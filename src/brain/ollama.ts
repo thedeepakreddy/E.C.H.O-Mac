@@ -4,6 +4,8 @@ import { TOOLS, TOOL_MAP } from "../tools/registry.js";
 import { classify, bareToolName } from "../safety/risk.js";
 import { runGated } from "../safety/gate.js";
 import { parseCallsFromText, resolveToolName, toolsForLocalModel } from "./localtools.js";
+import { selectToolNames } from "./tool-router.js";
+import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
 import { capture } from "../safety/snapshot.js";
 import { confirmations } from "../safety/confirm.js";
 import { recordLLM, approxTokens } from "../agent-replay/runtime.js";
@@ -34,16 +36,9 @@ export class OllamaBrain extends Brain {
   // A 3B model given all 73 definitions (~22KB per turn) cannot pick the right
   // one and starts inventing names. A focused list is what makes tool use work
   // at all locally.
-  private tools = toolsForLocalModel(
-    TOOLS.map((t) => ({
-      type: "function",
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: z.toJSONSchema(z.object(t.schema), { io: "input" }),
-      },
-    }))
-  );
+  private tools: any[];
+  /** This turn's pruned subset (AGI blueprint #9) of the list above, or null to send them all. */
+  private activeTools: any[] | null = null;
 
   constructor(
     private cfg: JarvisConfig,
@@ -51,6 +46,20 @@ export class OllamaBrain extends Brain {
     private readonly limits: BrainExecutionLimits = {}
   ) {
     super();
+    // A restricted agent (frontier/fleet.ts) is filtered here FIRST, before the
+    // local-model curation above narrows further — see gemini.ts's constructor
+    // for why this is a hard filter, not a hint.
+    const allowed = this.limits.allowedTools;
+    this.tools = toolsForLocalModel(
+      (allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS).map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: z.toJSONSchema(z.object(t.schema), { io: "input" }),
+        },
+      }))
+    );
     const system = buildSystemPrompt(
       undefined,
       "CRITICAL: You are an autonomous agent. When asked to perform an action or look at the screen, you MUST invoke the provided tool natively. DO NOT output conversational text telling the user which tool to use. You must actually call the tool!",
@@ -63,6 +72,18 @@ export class OllamaBrain extends Brain {
     this.lastSend = opts ?? {};
     if (this.memory.begin(userText, opts)) this.messages = this.messages.filter((m) => m.role === "system");
     if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
+    // How the user is doing changes how a reply should read, and it changes
+    // between turns — so it rides along with each message rather than being
+    // baked into the system prompt at startup. Silent in the ordinary case: a
+    // fresh state contributes nothing.
+    //
+    // This was wired into the Claude brain only, so the same person got a
+    // different Echo depending on which model was answering — the exact drift
+    // `buildSystemPrompt` exists to prevent.
+    noteActivity();
+    const style = styleFor(assess());
+    if (style) userText = `${userText}\n\n[context: ${style}]`;
+
     this.messages.push({ role: "user", content: userText });
     if (!this.busy) void this.run();
   }
@@ -97,7 +118,7 @@ export class OllamaBrain extends Brain {
     const request = {
       model: this.cfg.ollama?.model ?? "llama3.2:3b",
       messages: this.messages.map((m) => m.role === "system" ? { ...m, content: `${m.content}\n\n${this.memory.packet()}` } : m),
-      tools: this.tools,
+      tools: this.activeTools ?? this.tools,
       stream: true,
       options: { temperature: 0.4 },
     };
@@ -152,6 +173,23 @@ export class OllamaBrain extends Brain {
     this.aborted = false;
     this.emitEvent("status", "thinking");
     let hadError = false;
+
+    // Tool pruning (AGI blueprint #9), once per turn — see gemini.ts's runLoop
+    // for the same pattern and why it must not change mid-turn. Narrows WITHIN
+    // the already-curated local-model tool list, not the full registry: a
+    // small model already struggles with the curated ~20; the point here is
+    // to hand it fewer still, the ones this turn is actually about.
+    if (this.cfg.agi?.toolPruning?.enabled) {
+      const lastUser = [...this.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+      const keep = await selectToolNames(
+        String(lastUser), Math.min(this.cfg.agi.toolPruning.topK, this.tools.length),
+        undefined,
+        this.tools.map((t: any) => ({ name: t.function?.name ?? t.name, description: t.function?.description ?? "" }))
+      ).catch(() => null);
+      this.activeTools = keep ? this.tools.filter((t: any) => keep.has(t.function?.name ?? t.name)) : null;
+    } else {
+      this.activeTools = null;
+    }
 
     const log = currentLoop();
     const MAX_TURNS = this.limits.maxIterations ?? LOOP_CAPS.ollama.maxIterations;

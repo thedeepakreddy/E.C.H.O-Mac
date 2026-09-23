@@ -66,6 +66,11 @@
       <img class="m50-bloom-wide" src="../assets/reactor-mark50.png" alt="" aria-hidden="true" draggable="false" />
       <img class="m50-art" src="../assets/reactor-mark50.png" alt="" draggable="false" />
       <img class="m50-bloom" src="../assets/reactor-mark50.png" alt="" aria-hidden="true" draggable="false" />
+      <!-- The wake flash. Sits at opacity 0 doing nothing until the name is
+           heard. Its brightness is baked into a static filter so the browser
+           rasterises it once; the flash itself is pure opacity, which the
+           compositor does for free. -->
+      <img class="m50-flash" src="../assets/reactor-mark50.png" alt="" aria-hidden="true" draggable="false" />
       <!--
         A layered skin splits the same render into concentric rings so they can
         turn independently. One flat image cannot spin: rotating it takes the

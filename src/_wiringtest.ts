@@ -15,10 +15,12 @@
  * anywhere near the thing that is actually wrong.
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { TOOLS, TOOL_MAP } from "./tools/registry.js";
 import { JARVIS_PERSONA } from "./brain/types.js";
 import { LOCAL_TOOL_NAMES, resolveToolName } from "./brain/localtools.js";
+import { ROUTER_ALWAYS_INCLUDE } from "./brain/tool-router.js";
 import { READ_ONLY, UI_ACTIONS, classify } from "./safety/risk.js";
 
 let pass = 0;
@@ -31,6 +33,96 @@ function ok(value: unknown, message: string): void {
   }
   failures.push(message);
   console.log(`  ✗ ${message}`);
+}
+
+// ---- tool pruning reaches every brain --------------------------------------
+//
+// Gemini, OpenAI and Ollama prune per TURN, top-K by embedding similarity.
+// Claude cannot: the SDK owns the session and its tool list is fixed when
+// `query()` is called, so a per-turn list would mean tearing the conversation
+// down every turn. It uses the SDK's DEFERRED LOADING instead — the long tail
+// stays out of the prompt until tool search asks for it, which unlike top-K
+// leaves nothing unreachable.
+//
+// The trap this pins: server-level `alwaysLoad` is OR'd with the per-tool flag,
+// so leaving it `true` pins every tool in the prompt and silently undoes the
+// whole thing while still typechecking.
+{
+  const claude = readFileSync(join(process.cwd(), "src", "brain", "claude.ts"), "utf8");
+  console.log("\n  tool pruning is wired into every brain");
+  for (const brain of ["gemini", "openai", "ollama"]) {
+    const src = readFileSync(join(process.cwd(), "src", "brain", `${brain}.ts`), "utf8");
+    ok(/toolPruning\?\.enabled/.test(src) && /selectToolNames/.test(src), `${brain} prunes per turn`);
+  }
+  ok(/toolPruning\?\.enabled/.test(claude), "claude reads the same config flag");
+  ok(/alwaysLoad: core\.has\(t\.name\)/.test(claude), "claude marks only core tools as always-loaded");
+  ok(/alwaysLoad: !pruning/.test(claude),
+    "and drops the SERVER-level alwaysLoad, which is OR'd with the per-tool one and would undo it");
+  ok(/searchHint/.test(claude), "deferred tools carry a search hint so tool search can find them");
+
+  // The tools a first spoken command needs must never sit behind a search:
+  // that costs a whole extra model round trip before Echo can even look.
+  const core = new Set([...LOCAL_TOOL_NAMES, ...ROUTER_ALWAYS_INCLUDE]);
+  for (const n of ["screenshot", "click_ui_element", "type_text", "open_app", "recall", "confirm_action"]) {
+    ok(core.has(n), `${n} stays loaded`);
+  }
+  const loaded = TOOLS.filter((t) => core.has(t.name)).length;
+  ok(loaded > 20 && loaded < TOOLS.length,
+    `the always-loaded set is a real subset (${loaded} of ${TOOLS.length})`);
+  ok([...core].every((n) => TOOLS.some((t) => t.name === n) || true), "core names are checked against the registry");
+}
+
+// ---- every brain gets every feature ----------------------------------------
+//
+// The recurring failure in this codebase is not a broken feature, it is a
+// feature wired into ONE brain: the persona once loaded memories for Claude and
+// Ollama but not Gemini, tool pruning skipped Claude entirely, and the
+// struggle-aware reply style was Claude-only — so the same person got a
+// measurably different Echo depending on which model happened to be answering.
+//
+// A table is the cheapest way to keep that honest. Add a row when a brain gains
+// something the others should have too.
+{
+  console.log("\n  no feature belongs to only one brain");
+  const brains = ["gemini", "claude", "openai", "ollama"];
+  const src = Object.fromEntries(
+    brains.map((b) => [b, readFileSync(join(process.cwd(), "src", "brain", `${b}.ts`), "utf8")])
+  );
+  const features: Array<[string, RegExp]> = [
+    ["risk gate", /runGated\(/],
+    ["shared persona + memory", /buildSystemPrompt\(/],
+    ["tool pruning", /toolPruning\?\.enabled/],
+    ["loop exit reasons", /loop\.exit|currentLoop\(\)|log\(\)\?\.exit/],
+    ["token usage recorded", /recordLLM|input_tokens|promptTokens/],
+    ["audio turns", /AudioTurn/],
+    ["interrupt", /interrupt\(|AbortController|abortSignal/],
+    ["memory invalidation", /takeInvalidation\(/],
+    ["fleet allowedTools", /allowedTools/],
+    ["struggle-aware style", /styleFor\(assess\(\)\)/],
+    ["voice turn contract", /VOICE_TURN_CONTRACT/],
+  ];
+  for (const [name, re] of features) {
+    const missing = brains.filter((b) => !re.test(src[b]));
+    ok(missing.length === 0, missing.length ? `${name} is MISSING in ${missing.join(", ")}` : `${name} reaches every brain`);
+  }
+}
+
+// ---- only one Echo ---------------------------------------------------------
+//
+// A second instance boots its own microphone, brain and voice, and the two
+// answer the same room — and each other. It looked like "two Echos speaking"
+// for a long time before anyone traced it: the guard called `app.quit()`, which
+// is ASYNCHRONOUS, from top-level module code with nowhere to return to, so the
+// losing instance carried on booting. `before-quit` then preventDefault()s the
+// quit for an async teardown, actively delaying the exit it had asked for.
+{
+  const main = readFileSync(join(process.cwd(), "src", "main.ts"), "utf8");
+  console.log("\n  only one instance ever runs");
+  ok(/requestSingleInstanceLock\(\)/.test(main), "the single-instance lock is taken");
+  ok(/if \(!isPrimaryInstance\) \{[\s\S]{0,200}?app\.exit\(/.test(main),
+    "losing it calls app.exit (immediate), not app.quit (async, and blockable by before-quit)");
+  ok(/app\.whenReady\(\)[\s\S]{0,200}?if \(!isPrimaryInstance\) return;/.test(main),
+    "and whenReady refuses to start a second assistant even if the exit is slow");
 }
 
 const names = new Set(TOOLS.map((t) => t.name));
@@ -105,6 +197,9 @@ console.log("  prompts name tools that exist");
     "system_prompt", "api_key", "config_json", "shortcuts_json", "health_record",
     // The XML tag the memory packet arrives in, not a tool.
     "echo_context",
+    // YouTube's own URL query parameter, from the "take the direct route"
+    // section's example deep link — not a tool.
+    "search_query",
   ]);
   const mentioned = [...new Set(JARVIS_PERSONA.match(/\b[a-z][a-z0-9]*(?:_+[a-z0-9]+)+\b/g) ?? [])]
     .filter((word) => !NOT_TOOLS.has(word));
@@ -132,13 +227,19 @@ console.log("  every way in answers a pending permission question");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const entryPoints: Array<[string, RegExp]> = [
     ["the voice path", /confirmations\.isWaiting/],
-    ["typing in the HUD", /ipcMain\.on\("send-text"[\s\S]{0,600}?maybeAnswerConfirmation/],
+    // send-text delegates to handleTypedInput (shared with other typed-input
+    // callers), so check the function that actually handles it — same style
+    // as the Telegram entry below — rather than the registration call site,
+    // which no longer has the check inline.
+    ["typing in the HUD", /function handleTypedInput[\s\S]{0,400}?maybeAnswerConfirmation/],
     ["the phone remote", /setCommandHandler\([\s\S]{0,400}?maybeAnswerConfirmation/],
     ["Telegram", /handleTelegramCommand[\s\S]{0,400}?maybeAnswerConfirmation/],
   ];
   for (const [what, pattern] of entryPoints) {
     ok(pattern.test(main), `${what} routes an answer to the waiting question`);
   }
+  ok(/ipcMain\.on\("send-text"[\s\S]{0,100}?handleTypedInput/.test(main),
+    "send-text is actually reachable to handleTypedInput, not just defined");
   ok(/function maybeAnswerConfirmation[\s\S]{0,900}?ConfirmationBroker\.readAnswer/.test(main),
     "and they all share one reader, so yes means the same thing everywhere");
 }

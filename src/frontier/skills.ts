@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Skills: named recipes Echo can teach itself, safely.
@@ -134,7 +134,7 @@ export function screenPlan(
 // ---- storage --------------------------------------------------------------
 
 function skillsFile(base?: string): string {
-  return join(base ?? join(homedir(), ".jarvis"), "skills", "skills.json");
+  return join(base ?? dataRoot(), "skills", "skills.json");
 }
 
 export function loadSkills(base?: string): Skill[] {

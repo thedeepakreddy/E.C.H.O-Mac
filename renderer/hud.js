@@ -42,6 +42,22 @@ window.addEventListener("unhandledrejection", (e) => {
 const body = document.body;
 const orb = document.getElementById("orb");
 const orb50 = document.getElementById("orb50");
+let idlePhase = 0;
+let lastLevelPaintAt = 0;
+
+function updateRenderMode(status = body.dataset.status) {
+  const active = !["", "idle", "asleep", "error"].includes(String(status || "idle"));
+  body.dataset.renderMode = active && !document.hidden ? "active" : "idle";
+}
+
+// Bloom changes much less often because it is only a quiet idle heartbeat.
+setInterval(() => {
+  if (body.dataset.renderMode !== "idle") return;
+  idlePhase = idlePhase ? 0 : 1;
+  body.dataset.idlePhase = String(idlePhase);
+}, 6000);
+document.addEventListener("visibilitychange", () => updateRenderMode());
+updateRenderMode();
 
 const SKINS = ["classic", "mark50", "jarvis"];
 
@@ -83,7 +99,7 @@ function setSkin(skin) {
     if (art) {
       // The flat render drives the artwork and both bloom copies; the glow has
       // to come from the whole reactor, not from one ring of it.
-      for (const img of orb50.querySelectorAll(".m50-art, .m50-bloom, .m50-bloom-wide")) {
+      for (const img of orb50.querySelectorAll(".m50-art, .m50-bloom, .m50-bloom-wide, .m50-flash")) {
         img.src = art.full;
       }
       for (const [ring, src] of Object.entries(art.layers ?? {})) {
@@ -134,7 +150,9 @@ function refreshTooltip(status) {
 }
 
 function setStatus(status) {
-  if (!status || body.dataset.status === status) return;
+  if (!status) return;
+  updateRenderMode(status);
+  if (body.dataset.status === status) return;
 
   // Trigger sci-fi glitch effect on transition
   const el = activeOrb();
@@ -202,6 +220,10 @@ if (window.jarvis) {
   window.jarvis.onMessage((m) => note(m.kind, m.text));
 
   window.jarvis.onLevel((n) => {
+    const now = performance.now();
+    const wait = body.dataset.renderMode === "idle" ? 5000 : 50;
+    if (now - lastLevelPaintAt < wait) return;
+    lastLevelPaintAt = now;
     document.documentElement.style.setProperty("--level", String(n ?? 0));
   });
 

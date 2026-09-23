@@ -4,6 +4,9 @@ let snapshot = null;
 let feedbackTimer = null;
 let activeView = "overview";
 let selectedMissionId = "";
+let settingsDirty = false;
+let lastLevelPaintAt = 0;
+const renderKeys = Object.create(null);
 const expandedMissionTasks = new Set();
 
 const valueText = (value, fallback = "—") => value === undefined || value === null || value === "" ? fallback : String(value);
@@ -90,6 +93,101 @@ function setView(name) {
     panel.classList.toggle("active", visible);
   });
   document.querySelectorAll(".section-nav [data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
+  syncNeuralCard();
+}
+
+function stableKey(value) {
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+// Cheap change-fingerprints for missions/agents: touch only the small fields
+// that actually change, not the full object graph (a mission's tasks carry
+// full Results — summaries, artifacts, verification refs — that can be large
+// and were previously re-stringified in full on every refresh tick).
+function missionsFingerprint(missions) {
+  return missions.map((m) => {
+    const tasks = m.tasks || {};
+    let taskSig = "";
+    for (const id in tasks) {
+      const t = tasks[id];
+      taskSig += `${id}:${t.status}:${t.result?.completedAt || ""};`;
+    }
+    return `${m.id}:${m.status}:${m.updatedAt}:${taskSig}`;
+  }).join("|");
+}
+function agentsFingerprint(agents) {
+  return agents.map((a) => `${a.name}:${a.status}:${a.progress}`).join("|");
+}
+
+function renderChanged(name, value, callback) {
+  const key = stableKey(value);
+  if (renderKeys[name] === key) return;
+  renderKeys[name] = key;
+  callback();
+}
+
+
+/* ---------------------------------------------------------------------------
+ * Live synaptic field card (under Live Activity)
+ *
+ * The same engine the Neural Map window uses, built from a 0.6-scale copy of
+ * the micrograph and capped at 30fps: ~0.4ms of work per frame, ~2MB resident.
+ * It is built during idle time so opening the panel never waits on it, and it
+ * is stopped whenever it cannot be seen — another view, a hidden window — so a
+ * panel left open in the background costs nothing.
+ * ------------------------------------------------------------------------ */
+let neuralCard = null;
+let neuralCardStatus = "idle";
+
+function neuralCardVisible() {
+  return activeView === "overview" && !document.hidden;
+}
+
+function syncNeuralCard() {
+  if (!neuralCard) return;
+  if (neuralCardVisible()) neuralCard.start();
+  else neuralCard.stop();
+}
+
+function buildNeuralCard() {
+  const host = byId("neural-card");
+  if (!host || neuralCard || typeof SynapseField !== "function" || !window.ECHO_SYNAPSE_MAPS) return;
+  const map = window.ECHO_SYNAPSE_MAPS.dense;
+  try {
+    neuralCard = new SynapseField(Object.assign({}, map, {
+      host,
+      imageSrc: map.src,
+      buildScale: 0.6,      // quality holds: same fibre lengths, a third of the cost
+      fxScale: 0.6,
+      impulseCap: 120,
+      fps: 30,
+      interactive: false,
+      zoom: 1.4,            // crop into the tissue so detail still reads at card size
+      chunked: true,        // build in slices — never block a panel frame
+    }));
+  } catch {
+    return;                 // a decorative panel never breaks the control panel
+  }
+  neuralCard.ready.then(() => {
+    neuralCard.setState(window.ECHO_SYNAPSE_STATE(neuralCardStatus));
+    neuralCard.onframe = (st) => {
+      const el = byId("neural-card-ap");
+      if (el) el.textContent = st.active + " AP";
+    };
+    syncNeuralCard();
+  }).catch(() => { neuralCard = null; });
+}
+
+function setNeuralCardState(status) {
+  neuralCardStatus = status;
+  if (neuralCard) neuralCard.setState(window.ECHO_SYNAPSE_STATE(status));
+}
+
+document.addEventListener("visibilitychange", syncNeuralCard);
+
+function setRenderMode(status) {
+  const active = !["idle", "asleep", "error"].includes(String(status || "idle"));
+  document.body.dataset.renderMode = active ? "active" : "idle";
 }
 
 function render(next) {
@@ -97,6 +195,8 @@ function render(next) {
   snapshot = next;
   const status = String(next.state?.status || "idle").toLowerCase();
   document.body.dataset.status = status;
+  setRenderMode(status);
+  setNeuralCardState(status);
   byId("system-state").textContent = status.toUpperCase();
   byId("core-status").textContent = status.toUpperCase();
 
@@ -109,8 +209,8 @@ function render(next) {
   byId("voice-state").textContent = `VOICE ${next.voiceEnabled ? "ON" : "MUTED"}`;
   byId("voice-toggle").classList.toggle("enabled", Boolean(next.voiceEnabled));
 
+  renderIntel(next.intel);
   const logs = Array.isArray(next.logs) ? next.logs : [];
-  const tasks = Array.isArray(next.tasks) ? next.tasks : [];
   const agents = Array.isArray(next.agents) ? next.agents : [];
   const missions = Array.isArray(next.missions) ? next.missions : [];
   const models = Array.isArray(next.models) ? next.models : [];
@@ -125,12 +225,111 @@ function render(next) {
   byId("current-route-model").textContent = activeModelVersion;
   byId("core-agent-count").textContent = plural(agents.length, "AGENT");
 
-  renderLogs(logs);
-  renderMissions(missions, agents);
-  renderTasks(tasks);
-  renderAgents(agents);
-  renderModels(models);
-  renderConnections(connections);
+  // logs: a plain revision counter from the main process instead of
+  // JSON.stringify-ing the whole array on every tick. That used to run at up
+  // to ~16/sec while Echo was active and re-hash up to 240 log entries every
+  // single time, whether or not anything had actually changed.
+  renderChanged("logs", next.logRevision ?? 0, () => renderLogs(logs));
+  // missions/agents don't carry a revision counter (they're owned by the swarm
+  // module, not this telemetry object), and their objects can be large —
+  // nested tasks with full Results, artifacts, etc. A fingerprint of just the
+  // fields that actually change is enough to detect an update without hashing
+  // all of that.
+  const agentsKey = agentsFingerprint(agents);
+  renderChanged("missions", `${missionsFingerprint(missions)}|${agentsKey}`, () => renderMissions(missions, agents));
+  renderChanged("agents", agentsKey, () => renderAgents(agents));
+  renderChanged("board", `${missionsFingerprint(missions)}|${fleetRevision}`, () => renderBoard(missions));
+  renderChanged("models", models, () => renderModels(models));
+  renderChanged("connections", connections, () => renderConnections(connections));
+  // Do not consume the new key while the user is editing. Otherwise a runtime
+  // update can cache the saved value without applying it, and the explicit
+  // post-save render then appears unchanged.
+  if (!settingsDirty) renderChanged("settings", next.settings || null, () => renderSettings(next.settings || null));
+}
+
+function setControlValue(id, value) {
+  const control = byId(id);
+  if (!control) return;
+  if (control.type === "checkbox") control.checked = Boolean(value);
+  else control.value = value === undefined || value === null ? "" : String(value);
+}
+
+function renderSettings(settings, force = false) {
+  if (!settings || (settingsDirty && !force)) return;
+  setControlValue("settings-brain", settings.brain);
+  setControlValue("settings-start-listening", settings.hud?.startListeningOnLaunch);
+  setControlValue("settings-tts-enabled", settings.voice?.ttsEnabled);
+  setControlValue("settings-wake-word", settings.voice?.wakeWord);
+  setControlValue("settings-conversation-mode", settings.voice?.conversationMode);
+  setControlValue("settings-barge-in", settings.voice?.bargeIn);
+  setControlValue("settings-stt-streaming", settings.voice?.sttStreaming);
+  setControlValue("settings-tts-streaming", settings.voice?.ttsStreaming);
+  setControlValue("settings-send-audio", settings.voice?.sendAudioToBrain);
+  setControlValue("settings-stt-provider", settings.voice?.sttProvider);
+  setControlValue("settings-stt-language", settings.voice?.sttLanguage);
+  setControlValue("settings-tts-engine", settings.voice?.ttsEngine);
+  setControlValue("settings-max-spoken", settings.voice?.maxSpokenSentences);
+  setControlValue("settings-conversation-window", Math.round(Number(settings.voice?.conversationWindowMs || 12000) / 1000));
+  setControlValue("settings-memory-enabled", settings.memory?.enabled);
+  setControlValue("settings-cloud-recall", settings.memory?.cloudRecall);
+  setControlValue("settings-retention-days", settings.memory?.retentionDays);
+  setControlValue("settings-shadow", settings.helpers?.shadow);
+  setControlValue("settings-ghost", settings.helpers?.ghost);
+  setControlValue("settings-auto-debug", settings.helpers?.autoDebug);
+  setControlValue("settings-shadow-interval", settings.helpers?.shadowIntervalSeconds);
+  setControlValue("settings-dreaming", settings.dreaming?.enabled);
+  setControlValue("settings-learning-enabled", settings.learning?.enabled);
+  setControlValue("settings-capture-screens", settings.learning?.captureScreens);
+  setControlValue("settings-max-steps", settings.learning?.maxStepsPerTurn);
+  byId("settings-config-path").textContent = valueText(settings.configPath, "Echo user-data/config.json");
+  byId("settings-save-state").textContent = "Synced with Echo";
+  byId("settings-save-state").classList.remove("dirty");
+}
+
+function checked(id) {
+  return Boolean(byId(id).checked);
+}
+
+function numericValue(id) {
+  return Number(byId(id).value);
+}
+
+function settingsPayload() {
+  return {
+    brain: byId("settings-brain").value,
+    voice: {
+      ttsEnabled: checked("settings-tts-enabled"),
+      wakeWord: checked("settings-wake-word"),
+      conversationMode: checked("settings-conversation-mode"),
+      bargeIn: checked("settings-barge-in"),
+      sttStreaming: checked("settings-stt-streaming"),
+      ttsStreaming: checked("settings-tts-streaming"),
+      sendAudioToBrain: checked("settings-send-audio"),
+      sttProvider: byId("settings-stt-provider").value,
+      sttLanguage: byId("settings-stt-language").value.trim(),
+      ttsEngine: byId("settings-tts-engine").value,
+      maxSpokenSentences: numericValue("settings-max-spoken"),
+      conversationWindowMs: numericValue("settings-conversation-window") * 1000,
+    },
+    hud: { startListeningOnLaunch: checked("settings-start-listening") },
+    memory: {
+      enabled: checked("settings-memory-enabled"),
+      cloudRecall: checked("settings-cloud-recall"),
+      retentionDays: numericValue("settings-retention-days"),
+    },
+    helpers: {
+      shadow: checked("settings-shadow"),
+      ghost: checked("settings-ghost"),
+      autoDebug: checked("settings-auto-debug"),
+      shadowIntervalSeconds: numericValue("settings-shadow-interval"),
+    },
+    dreaming: { enabled: checked("settings-dreaming") },
+    learning: {
+      enabled: checked("settings-learning-enabled"),
+      captureScreens: checked("settings-capture-screens"),
+      maxStepsPerTurn: numericValue("settings-max-steps"),
+    },
+  };
 }
 
 function activityMarkup(logs) {
@@ -151,29 +350,6 @@ function renderLogs(logs) {
   const markup = activityMarkup(logs);
   byId("live-log").innerHTML = markup;
   byId("routing-log").innerHTML = markup;
-}
-
-function renderTasks(tasks) {
-  const active = tasks.filter((task) => task.status === "working" || task.status === "queued");
-  byId("task-summary-count").textContent = `${active.length} active`;
-
-  const statusCounts = tasks.reduce((counts, task) => {
-    const status = String(task.status || "unknown");
-    counts[status] = (counts[status] || 0) + 1;
-    return counts;
-  }, {});
-  byId("task-legend").innerHTML = Object.entries(statusCounts).map(([status, count]) => `<span class="legend-item ${escapeHtml(status)}"><i></i>${escapeHtml(count)} ${escapeHtml(status)}</span>`).join("");
-
-  const ordered = [...tasks].reverse().slice(0, 8);
-  byId("task-list").innerHTML = ordered.length ? ordered.map((task) => {
-    const icon = task.status === "failed" ? "alert" : task.status === "done" ? "check" : "file";
-    const timing = task.finishedAt ? `Ended ${eventTime(task.finishedAt)}` : `Started ${eventTime(task.startedAt)}`;
-    return `<article class="task-card ${escapeHtml(task.status)}">
-      <span class="task-card-icon"><svg><use href="#icon-${icon}"></use></svg></span>
-      <div class="task-copy"><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(task.agent || "Echo")} · ${escapeHtml(timing)}</p></div>
-      <div class="task-meta"><span class="status-tag ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span><span>${escapeHtml(relativeTime(task.finishedAt || task.startedAt))}</span></div>
-    </article>`;
-  }).join("") : '<div class="empty-state large">No task activity in this session.</div>';
 }
 
 function resultItems(items, emptyText, className = "") {
@@ -224,6 +400,73 @@ function missionTaskMarkup(task, index, missionId, activeAgents) {
   </details>`;
 }
 
+/**
+ * Delete is destructive and the missions page re-renders under the pointer on
+ * every snapshot, so it asks twice: the first click arms the button, the second
+ * one within a few seconds does it. Without the timeout an armed button could
+ * sit there for an hour and catch a stray click.
+ */
+let pendingMissionDelete = "";
+let pendingMissionDeleteTimer = 0;
+
+function armMissionDelete(id) {
+  pendingMissionDelete = id;
+  clearTimeout(pendingMissionDeleteTimer);
+  pendingMissionDeleteTimer = setTimeout(() => {
+    pendingMissionDelete = "";
+    if (snapshot) renderMissions(Array.isArray(snapshot.missions) ? snapshot.missions : [], snapshot.agents || []);
+  }, 5000);
+}
+
+byId("mission-panel").addEventListener("click", async (event) => {
+  const stop = event.target.closest("[data-stop-mission]");
+  if (stop) {
+    pendingMissionDelete = "";
+    await act({ type: "stop-mission", missionId: stop.dataset.stopMission });
+    return;
+  }
+  const remove = event.target.closest("[data-delete-mission]");
+  if (!remove) return;
+  const id = remove.dataset.deleteMission;
+  if (pendingMissionDelete !== id) {
+    armMissionDelete(id);
+    remove.classList.add("confirming");
+    remove.lastChild.textContent = "Confirm delete";
+    return;
+  }
+  clearTimeout(pendingMissionDeleteTimer);
+  pendingMissionDelete = "";
+  if (selectedMissionId === id) selectedMissionId = "";
+  const result = await act({ type: "delete-mission", missionId: id });
+  // A mission with no live agents broadcasts nothing when it goes, so ask for
+  // a fresh snapshot rather than waiting for one that may never arrive.
+  if (result.ok && bridge) {
+    try { render(await bridge.snapshot()); } catch { /* the next update will catch up */ }
+  }
+});
+
+/**
+ * The last few open-intelligence answers.
+ *
+ * Shows failures as well as successes, in red: five different public services
+ * back this, each with its own outage, and a card that only ever showed the
+ * good answers would hide the one fact worth knowing — which of them stopped
+ * working.
+ */
+function renderIntel(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  byId("intel-summary-count").textContent = list.length
+    ? `${list.length} recent`
+    : "Nothing asked yet";
+  byId("intel-summary").innerHTML = list.length
+    ? list.slice(0, 3).map((e) =>
+        `<span class="intel-row${e.ok ? "" : " failed"}"><i class="${e.ok ? "" : "failed"}"></i>` +
+        `<div><strong>${escapeHtml(e.label)}${e.query ? ` · ${escapeHtml(e.query)}` : ""}</strong>` +
+        `<span>${escapeHtml(e.answer)}</span></div></span>`
+      ).join("")
+    : '<span class="summary-empty">Ask about satellites, world news, what\'s nearby, a network, or exploited CVEs</span>';
+}
+
 function renderMissions(missions, agents) {
   const running = missions.filter((mission) => mission.status === "running");
   byId("mission-summary-count").textContent = `${running.length} active`;
@@ -257,7 +500,15 @@ function renderMissions(missions, agents) {
   byId("mission-panel").innerHTML = `<article class="mission-overview ${escapeHtml(mission.status)}">
     <header class="mission-overview-header">
       <div><span class="mission-id">${escapeHtml(mission.id)}</span><h2>${escapeHtml(mission.goal)}</h2><p>Updated ${escapeHtml(relativeTime(mission.updatedAt))} · Started ${escapeHtml(eventTime(mission.createdAt))}</p></div>
-      <span class="status-tag ${escapeHtml(mission.status)}">${escapeHtml(statusLabel(mission.status))}</span>
+      <div class="mission-header-right">
+        <span class="status-tag ${escapeHtml(mission.status)}">${escapeHtml(statusLabel(mission.status))}</span>
+        <div class="mission-actions">
+          ${mission.status === "running"
+            ? `<button type="button" class="mission-action stop" data-stop-mission="${escapeHtml(mission.id)}" title="Stop this mission and every agent on it"><svg><use href="#icon-stop" /></svg>Stop</button>`
+            : ""}
+          <button type="button" class="mission-action delete${pendingMissionDelete === mission.id ? " confirming" : ""}" data-delete-mission="${escapeHtml(mission.id)}" title="${mission.status === "running" ? "Stop this mission and remove it from the board" : "Remove this mission from the board"}"><svg><use href="#icon-trash" /></svg>${pendingMissionDelete === mission.id ? "Confirm delete" : "Delete"}</button>
+        </div>
+      </div>
     </header>
     <div class="mission-progress-row"><progress class="mission-progress-track" aria-label="Mission tasks resolved" max="100" value="${percent}">${percent}%</progress><strong>${percent}%</strong></div>
     <dl class="mission-overview-metrics">
@@ -277,13 +528,6 @@ function renderMissions(missions, agents) {
 function renderAgents(agents) {
   byId("agent-summary-count").textContent = `${agents.length} connected`;
   byId("agent-summary").innerHTML = agents.length ? agents.slice(0, 2).map((agent) => `<span class="summary-row"><i class="active"></i><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.status)}</small></span>`).join("") : '<span class="summary-empty">No background agents</span>';
-  byId("agent-count").textContent = `${agents.length} / 4 active`;
-  byId("agent-list").innerHTML = agents.length ? agents.map((agent) => `<article class="agent-card"><span class="agent-avatar"><svg><use href="#icon-agent"></use></svg></span><div><strong>${escapeHtml(agent.name)}</strong><p>${escapeHtml(agent.goal)}</p><p>${escapeHtml(agent.progress || agent.status)}</p></div><i></i></article>`).join("") : '<div class="empty-state">No background agents connected.</div>';
-
-  const target = byId("agent-target");
-  const previous = target.value;
-  target.innerHTML = '<option value="">Deploy a new agent</option>' + agents.map((agent) => `<option value="${escapeHtml(agent.name)}">Assign to ${escapeHtml(agent.name)}</option>`).join("");
-  if ([...target.options].some((option) => option.value === previous)) target.value = previous;
 }
 
 function renderModels(models) {
@@ -346,6 +590,22 @@ byId("mission-panel").addEventListener("toggle", (event) => {
   else expandedMissionTasks.delete(details.dataset.missionTaskKey);
 }, true);
 byId("panel-close").addEventListener("click", () => bridge?.close());
+const shutdownDialog = byId("shutdown-dialog");
+byId("power-off").addEventListener("click", () => {
+  if (typeof shutdownDialog?.showModal === "function") shutdownDialog.showModal();
+});
+byId("shutdown-confirm").addEventListener("click", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "Closing MCP…";
+  const result = await act({ type: "shutdown" });
+  if (!result.ok) {
+    button.disabled = false;
+    button.textContent = "Close MCP & power off";
+    shutdownDialog?.close();
+  }
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") bridge?.close();
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -374,18 +634,479 @@ byId("command-form").addEventListener("submit", async (event) => {
   if (result.ok) input.value = "";
 });
 
-byId("agent-form").addEventListener("submit", async (event) => {
+byId("settings-form").addEventListener("input", () => {
+  settingsDirty = true;
+  byId("settings-save-state").textContent = "Unsaved changes";
+  byId("settings-save-state").classList.add("dirty");
+});
+byId("settings-reset").addEventListener("click", () => {
+  settingsDirty = false;
+  renderSettings(snapshot?.settings, true);
+  notify("Unsaved settings restored.");
+});
+byId("settings-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const goalInput = byId("agent-goal");
-  const target = byId("agent-target").value;
-  const goal = goalInput.value.trim();
-  if (!goal) return notify("Describe a focused task first.", true);
-  const action = target ? { type: "assign-agent", name: target, goal } : { type: "spawn-agent", goal };
-  const result = await act(action);
-  if (result.ok) {
-    goalInput.value = "";
-    bridge?.snapshot?.().then(render).catch(() => {});
+  if (!event.currentTarget.reportValidity()) return;
+  const saveButton = byId("settings-save");
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving…";
+  const result = await act({ type: "save-settings", settings: settingsPayload() });
+  saveButton.disabled = false;
+  saveButton.textContent = "Save settings";
+  if (!result.ok) return;
+  settingsDirty = false;
+  try {
+    render(await bridge.snapshot());
+  } catch (error) {
+    notify(error?.message || String(error), true);
   }
+});
+
+// ---- API keys -----------------------------------------------------------------
+//
+// Keys are fetched and shown only when this dialog is actually opened — never
+// part of the continuous control:update snapshot — and even then only WHICH
+// keys are set, never their content (see keystore.ts's keyStatus/saveKeys).
+// A blank field on save means "leave it as it is"; typing a new value is the
+// only way to change one.
+const apiKeysDialog = byId("api-keys-dialog");
+let apiKeysLoaded = false;
+
+function apiKeyRow(field, isSet) {
+  const id = `api-key-${field.env}`;
+  return `<div class="api-key-row">
+    <label for="${id}"><strong>${escapeHtml(field.label)}</strong><small>${escapeHtml(field.help)}</small></label>
+    <div class="api-key-input-group">
+      <input id="${id}" name="${escapeHtml(field.env)}" type="password" autocomplete="off" spellcheck="false"
+        placeholder="${isSet ? "•••••••• saved — leave blank to keep" : "Not set — paste a key to add one"}" />
+      <button type="button" class="api-key-reveal" data-target="${id}" aria-label="Show or hide">Show</button>
+    </div>
+    <div class="api-key-meta">
+      <span class="api-key-status ${isSet ? "set" : ""}">${isSet ? "Saved" : "Not set"}</span>
+      ${field.url ? `<a href="${escapeHtml(field.url)}" class="api-key-link" data-external-url="${escapeHtml(field.url)}">Get a key</a>` : ""}
+    </div>
+  </div>`;
+}
+
+async function loadApiKeys() {
+  const list = byId("api-keys-list");
+  if (!bridge?.apiKeys) {
+    list.innerHTML = '<div class="empty-state">The control bridge is unavailable.</div>';
+    return;
+  }
+  try {
+    const { fields, status, path } = await bridge.apiKeys();
+    byId("api-keys-path").textContent = path || "~/.jarvis/keys.env";
+    list.innerHTML = fields.length
+      ? fields.map((f) => apiKeyRow(f, !!status[f.env])).join("")
+      : '<div class="empty-state">No API keys are configured for this build.</div>';
+    apiKeysLoaded = true;
+  } catch (error) {
+    list.innerHTML = `<div class="empty-state">Could not load API keys: ${escapeHtml(error?.message || String(error))}</div>`;
+  }
+}
+
+byId("open-api-keys")?.addEventListener("click", () => {
+  if (typeof apiKeysDialog?.showModal === "function") apiKeysDialog.showModal();
+  if (!apiKeysLoaded) loadApiKeys();
+});
+byId("api-keys-close").addEventListener("click", () => apiKeysDialog?.close());
+apiKeysDialog?.addEventListener("cancel", () => {}); // Escape closes it natively; nothing extra to do
+apiKeysDialog?.addEventListener("click", (event) => {
+  const link = event.target.closest?.("[data-external-url]");
+  if (!link) return;
+  event.preventDefault();
+  bridge?.openExternal?.(link.dataset.externalUrl);
+});
+byId("api-keys-list").addEventListener("click", (event) => {
+  const button = event.target.closest?.(".api-key-reveal");
+  if (!button) return;
+  const input = byId(button.dataset.target);
+  if (!input) return;
+  const showing = input.type === "text";
+  input.type = showing ? "password" : "text";
+  button.textContent = showing ? "Show" : "Hide";
+});
+byId("api-keys-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const inputs = [...byId("api-keys-list").querySelectorAll("input[name]")];
+  const apiKeys = Object.fromEntries(inputs.map((input) => [input.name, input.value]).filter(([, v]) => v.trim()));
+  const feedback = byId("api-keys-feedback");
+  const saveButton = byId("api-keys-save");
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving…";
+  const result = await act({ type: "save-api-keys", apiKeys });
+  saveButton.disabled = false;
+  saveButton.textContent = "Save keys";
+  feedback.textContent = result.message || (result.ok ? "Saved." : "Could not save.");
+  feedback.classList.toggle("error", !result.ok);
+  if (result.ok) {
+    inputs.forEach((input) => (input.value = ""));
+    apiKeysLoaded = false;
+    await loadApiKeys(); // refresh which fields now show as "Saved"
+  }
+});
+
+// ---- Agent board + fleet (ported from Aira's agent canvas / agent-editor) ------
+//
+// The board is a thin client over frontier/swarm.ts's existing mission model:
+// "run-board" submits one flat mission (no dependencies) with one task per
+// selected fleet member, and everything below just renders whatever comes
+// back through the ordinary control:update snapshot — there is no separate
+// board state on the main-process side to fall out of sync with.
+let fleetMembers = [];
+let grantableToolNames = [];
+let fleetMaxCustom = 6;
+let fleetRevision = 0; // bumped on every fleet change; feeds the board's own dirty-check
+let selectedAgentIds = new Set();
+let openBoardCards = new Set();
+/** Which mission the board is currently showing. Sticky across renders so a
+ *  finished board's answer does not vanish the moment something else on the
+ *  panel updates. */
+let currentBoardMissionId = null;
+
+const ROLE_ICON = { lead: "icon-crown", research: "icon-bars", plan: "icon-layers", write: "icon-file", review: "icon-scale", analyse: "icon-gauge" };
+const ROLE_COLOUR = {
+  lead: { light: "#ffc861", deep: "#c06a04" },
+  research: { light: "#5fd0c8", deep: "#0b6f6a" },
+  plan: { light: "#a996f5", deep: "#4f2fb0" },
+  write: { light: "#f2a0c0", deep: "#a33668" },
+  review: { light: "#74d495", deep: "#176f45" },
+  analyse: { light: "#7fb6f0", deep: "#1f56a8" },
+};
+const DEFAULT_COLOUR = { light: "#9fb7bd", deep: "#31515a" };
+const PHASE_LABEL = { idle: "Ready", working: "Working", done: "Complete", error: "Failed", stopped: "Stopped" };
+
+/** Escaped plain text, not real markdown — an agent's report is untrusted-ish
+ *  text from a model, and a hand-rolled markdown-to-HTML parser is exactly
+ *  the kind of code worth not writing when "readable" is all that's needed. */
+function renderPlainText(text) {
+  return escapeHtml(text).split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+}
+
+function phaseOf(task) {
+  if (!task) return "idle";
+  if (task.status === "working") return "working";
+  if (task.status === "completed" || task.status === "partial") return "done";
+  if (task.status === "failed" || task.status === "blocked") return "error";
+  if (task.status === "cancelled") return "stopped";
+  return "idle";
+}
+
+async function loadFleet() {
+  if (!bridge?.fleet) return;
+  try {
+    const result = await bridge.fleet();
+    fleetMembers = result.members || [];
+    grantableToolNames = result.grantableTools || [];
+    fleetMaxCustom = result.maxCustom || 6;
+    // Default to the whole team, the first time only — a change here later
+    // must never silently re-select everyone out from under the user.
+    if (!loadFleet.everLoaded) fleetMembers.forEach((m) => selectedAgentIds.add(m.id));
+    loadFleet.everLoaded = true;
+    fleetRevision++;
+    renderFleetDialog();
+    renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+  } catch (error) {
+    console.error("could not load the agent fleet", error);
+  }
+}
+
+function boardMissionFor(missions) {
+  const boards = missions.filter((m) => m.id.startsWith("board-") || m.id.startsWith("solo-"));
+  if (currentBoardMissionId) {
+    const found = boards.find((m) => m.id === currentBoardMissionId);
+    if (found) return found;
+  }
+  return boards.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
+}
+
+function agentCardMarkup(member, task, liveProgress) {
+  const phase = phaseOf(task);
+  const colour = ROLE_COLOUR[member.id] || DEFAULT_COLOUR;
+  const icon = ROLE_ICON[member.id] || "icon-agent";
+  const selected = selectedAgentIds.has(member.id);
+  const open = openBoardCards.has(member.id);
+
+  const artifactText = (task?.result?.artifacts || []).filter((a) => a.kind === "text" && a.value).map((a) => a.value).join("\n\n");
+  const fullText = [task?.result?.summary, artifactText].filter(Boolean).join("\n\n");
+  const words = fullText ? fullText.trim().split(/\s+/).length : 0;
+  const lines = fullText.trim().split("\n").filter(Boolean);
+  const preview = (lines.find((l) => !/^#{1,6}\s/.test(l)) || lines[0] || "").replace(/^[#>*\-\s]+/, "").slice(0, 150);
+
+  const startedAt = task?.startedAt;
+  const endedAt = task?.result?.completedAt ? new Date(task.result.completedAt).getTime() : null;
+  const elapsed = startedAt ? Math.max(0, ((phase === "working" ? Date.now() : endedAt || Date.now()) - startedAt) / 1000) : 0;
+  const elapsedLabel = elapsed ? (elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${Math.round(elapsed % 60)}s` : `${elapsed.toFixed(1)}s`) : "—";
+  const errored = task?.result?.status === "failed" || task?.result?.status === "blocked";
+  const errorMsg = errored ? (task.result.summary || (task.result.blockers || []).join(", ") || "Failed") : "";
+  const progress = phase === "working" ? liveProgress.get(member.name) : "";
+
+  return `<article class="board-agent-card ${phase}${selected ? " selected" : ""}" data-agent-id="${escapeHtml(member.id)}"
+      style="--card-light:${colour.light};--card-deep:${colour.deep}">
+    <div class="board-agent-card-top">
+      <span class="board-agent-card-glyph"><svg><use href="#${icon}" /></svg></span>
+      <span class="board-agent-card-state"><i></i>${PHASE_LABEL[phase]}</span>
+    </div>
+    <h3>${escapeHtml(member.name)}</h3>
+    <p class="board-agent-card-role">${escapeHtml(member.description || (member.brief || "").split("\n")[0] || "")}</p>
+    <label class="board-agent-card-select">
+      <input type="checkbox" data-select-agent="${escapeHtml(member.id)}" ${selected ? "checked" : ""} />
+      ${selected ? "Gets the next task" : "Not in the next task"}
+    </label>
+    <dl class="board-agent-card-metrics">
+      <div><dt><svg><use href="#icon-clock" /></svg>Time</dt><dd>${elapsedLabel}</dd></div>
+      <div><dt><svg><use href="#icon-file" /></svg>Words</dt><dd>${words || "—"}</dd></div>
+    </dl>
+    ${progress ? `<p class="board-agent-card-preview">${escapeHtml(progress)}</p>` : ""}
+    ${errorMsg ? `<p class="board-agent-card-error">${escapeHtml(errorMsg)}</p>` : ""}
+    ${fullText ? `
+      ${open ? `<div class="board-agent-card-output">${renderPlainText(fullText)}</div>` : `<p class="board-agent-card-preview">${escapeHtml(preview)}</p>`}
+      <button type="button" class="board-agent-card-toggle" data-toggle-agent="${escapeHtml(member.id)}">${open ? "Hide answer" : `Read answer · ${words} words`}<svg><use href="#icon-chevron" /></svg></button>
+    ` : ""}
+    <form class="board-agent-card-compose" data-agent-compose="${escapeHtml(member.id)}">
+      <input type="text" placeholder="${phase === "working" ? `Queue another for ${escapeHtml(member.name)}…` : `Ask ${escapeHtml(member.name)} directly…`}" aria-label="Task for ${escapeHtml(member.name)}" />
+      ${phase === "working"
+        ? `<button type="button" data-stop-agent="${escapeHtml(member.id)}" aria-label="Stop ${escapeHtml(member.name)}"><svg><use href="#icon-stop" /></svg></button>`
+        : `<button type="submit" aria-label="Send to ${escapeHtml(member.name)}"><svg><use href="#icon-send" /></svg></button>`}
+    </form>
+  </article>`;
+}
+
+function renderBoard(missions) {
+  if (!fleetMembers.length) return; // nothing to draw yet — loadFleet() will call back in
+  const mission = boardMissionFor(missions);
+  if (mission) currentBoardMissionId = mission.id;
+  const liveProgress = new Map((Array.isArray(snapshot?.agents) ? snapshot.agents : []).map((a) => [a.name, a.progress]));
+
+  const half = Math.ceil(fleetMembers.length / 2);
+  const left = fleetMembers.slice(0, half);
+  const right = fleetMembers.slice(half);
+  const taskOf = (id) => mission?.tasks?.[id] || null;
+  byId("board-column-left").innerHTML = left.map((m) => agentCardMarkup(m, taskOf(m.id), liveProgress)).join("");
+  byId("board-column-right").innerHTML = right.map((m) => agentCardMarkup(m, taskOf(m.id), liveProgress)).join("");
+
+  const busy = mission?.status === "running";
+  byId("board-run").hidden = busy;
+  byId("board-stop").hidden = !busy;
+
+  const leadTask = mission ? taskOf("lead") : null;
+  const leadDone = leadTask && (leadTask.status === "completed" || leadTask.status === "partial") && leadTask.result?.summary;
+  byId("board-answer").hidden = !leadDone;
+  byId("board-task").hidden = !!leadDone;
+  if (leadDone) {
+    byId("board-answer-goal").textContent = mission.goal;
+    byId("board-answer-text").innerHTML = renderPlainText(leadTask.result.summary);
+  }
+
+  const statusEl = byId("board-status-text");
+  if (!mission) statusEl.textContent = "Ready when you are.";
+  else if (busy) {
+    const working = fleetMembers.filter((m) => phaseOf(taskOf(m.id)) === "working").map((m) => m.name);
+    statusEl.textContent = working.length ? `${working.join(", ")} working…` : "Starting…";
+  } else {
+    statusEl.textContent = "Finished.";
+  }
+  statusEl.closest(".board-task-status").classList.toggle("live", busy);
+}
+
+function boardColumns() {
+  return [byId("board-column-left"), byId("board-column-right")];
+}
+for (const col of boardColumns()) {
+  col.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-toggle-agent]");
+    if (toggle) {
+      const id = toggle.dataset.toggleAgent;
+      if (openBoardCards.has(id)) openBoardCards.delete(id); else openBoardCards.add(id);
+      renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+      return;
+    }
+    const stop = event.target.closest("[data-stop-agent]");
+    if (stop && currentBoardMissionId) void act({ type: "stop-mission-task", missionId: currentBoardMissionId, name: stop.dataset.stopAgent });
+  });
+  col.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-select-agent]");
+    if (!checkbox) return;
+    const id = checkbox.dataset.selectAgent;
+    if (checkbox.checked) selectedAgentIds.add(id); else selectedAgentIds.delete(id);
+    renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+  });
+  col.addEventListener("submit", (event) => {
+    const form = event.target.closest("[data-agent-compose]");
+    if (!form) return;
+    event.preventDefault();
+    const input = form.querySelector("input");
+    const text = input.value.trim();
+    if (!text) return;
+    void act({ type: "run-fleet-agent", name: form.dataset.agentCompose, goal: text }).then((result) => {
+      if (!result.ok) return;
+      input.value = "";
+      if (result.data?.missionId) currentBoardMissionId = result.data.missionId;
+    });
+  });
+}
+
+byId("board-select-all").addEventListener("click", () => {
+  fleetMembers.forEach((m) => selectedAgentIds.add(m.id));
+  renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+});
+byId("board-toggle-output").addEventListener("click", () => {
+  openBoardCards = openBoardCards.size ? new Set() : new Set(fleetMembers.map((m) => m.id));
+  renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+});
+byId("board-run").addEventListener("click", () => {
+  const text = byId("board-task").value.trim();
+  if (!text) return;
+  if (!selectedAgentIds.size) return notify("Select at least one agent for the board.", true);
+  void act({ type: "run-board", goal: text, agentIds: [...selectedAgentIds] }).then((result) => {
+    if (!result.ok) return;
+    if (result.data?.missionId) currentBoardMissionId = result.data.missionId;
+    renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+  });
+});
+byId("board-task").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); byId("board-run").click(); }
+});
+byId("board-stop").addEventListener("click", () => {
+  if (currentBoardMissionId) void act({ type: "stop-mission", missionId: currentBoardMissionId });
+});
+byId("board-clear").addEventListener("click", () => {
+  currentBoardMissionId = null;
+  byId("board-task").value = "";
+  openBoardCards.clear();
+  renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
+});
+
+document.querySelectorAll(".ops-tab").forEach((tab) => tab.addEventListener("click", () => {
+  const view = tab.dataset.opsView;
+  document.querySelectorAll(".ops-tab").forEach((t) => { t.classList.toggle("active", t === tab); t.setAttribute("aria-selected", String(t === tab)); });
+  document.querySelectorAll("[data-ops-panel]").forEach((panel) => { panel.hidden = panel.dataset.opsPanel !== view; });
+}));
+
+// Zoom the agent board and mission list in/out. Uses the `zoom` CSS property
+// (Chromium-only, which Electron always is) rather than transform: scale() —
+// it reflows layout at the new size instead of just stretching pixels, and
+// both zoomed panels already scroll (overflow: auto) so zooming in past the
+// window's fixed, non-resizable bounds degrades to a scrollbar, not a clip.
+const AGENTS_ZOOM_MIN = 0.7;
+const AGENTS_ZOOM_MAX = 1.5;
+const AGENTS_ZOOM_STEP = 0.1;
+let agentsZoom = 1;
+try { agentsZoom = parseFloat(localStorage.getItem("echo-agents-zoom")) || 1; } catch {}
+
+function applyAgentsZoom() {
+  agentsZoom = Math.round(Math.min(AGENTS_ZOOM_MAX, Math.max(AGENTS_ZOOM_MIN, agentsZoom)) * 100) / 100;
+  const stage = document.querySelector(".board-stage");
+  const missionPanel = byId("mission-panel");
+  if (stage) stage.style.zoom = String(agentsZoom);
+  if (missionPanel) missionPanel.style.zoom = String(agentsZoom);
+  byId("agents-zoom-level").textContent = `${Math.round(agentsZoom * 100)}%`;
+  byId("agents-zoom-out").disabled = agentsZoom <= AGENTS_ZOOM_MIN;
+  byId("agents-zoom-in").disabled = agentsZoom >= AGENTS_ZOOM_MAX;
+  try { localStorage.setItem("echo-agents-zoom", String(agentsZoom)); } catch {}
+}
+byId("agents-zoom-in").addEventListener("click", () => { agentsZoom += AGENTS_ZOOM_STEP; applyAgentsZoom(); });
+byId("agents-zoom-out").addEventListener("click", () => { agentsZoom -= AGENTS_ZOOM_STEP; applyAgentsZoom(); });
+applyAgentsZoom();
+
+// ---- Fleet editor dialog (ported from Aira's agent-editor.tsx) -----------------
+const fleetDialog = byId("fleet-dialog");
+let fleetIdTouched = false;
+const slugify = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+/** Sensible defaults for a brand-new agent: it can look things up, not just guess. */
+const DEFAULT_GRANTS = new Set(["recall", "read_local_file", "list_ui_elements", "search_my_past"]);
+
+function fleetItemMarkup(member, isCustom) {
+  const icon = !isCustom ? `<svg><use href="#${ROLE_ICON[member.id] || "icon-agent"}" /></svg>` : "";
+  return `<div class="fleet-item">
+    <div class="fleet-item-body">
+      <strong>${icon}${escapeHtml(member.name)}</strong>
+      <span class="fleet-item-meta">${escapeHtml(member.id)} · ${escapeHtml(member.tier)}</span>
+      <span class="fleet-item-desc">${escapeHtml(member.description || (member.brief || "").split("\n")[0] || "")}</span>
+      ${isCustom ? `<span class="fleet-item-tools">${member.tools.length ? escapeHtml(member.tools.join(" · ")) : "no tools"}</span>` : ""}
+    </div>
+    ${isCustom ? `<button type="button" class="fleet-drop" data-remove-agent="${escapeHtml(member.id)}" aria-label="Remove ${escapeHtml(member.name)}"><svg><use href="#icon-trash" /></svg></button>` : ""}
+  </div>`;
+}
+
+function renderFleetDialog() {
+  const mine = fleetMembers.filter((m) => m.custom);
+  const theirs = fleetMembers.filter((m) => !m.custom);
+  byId("fleet-mine").innerHTML = mine.length
+    ? mine.map((m) => fleetItemMarkup(m, true)).join("")
+    : '<p class="fleet-empty">None yet. An agent is a name, a brief, and the tools it is allowed to use.</p>';
+  byId("fleet-theirs").innerHTML = theirs.map((m) => fleetItemMarkup(m, false)).join("");
+  const full = mine.length >= fleetMaxCustom;
+  const addButton = byId("fleet-add-open");
+  addButton.disabled = full;
+  addButton.title = full ? `You can have up to ${fleetMaxCustom} of your own agents.` : "";
+  addButton.querySelector("span").textContent = full ? `Limit reached (${fleetMaxCustom})` : "Add an agent";
+}
+
+function openFleetForm() {
+  byId("fleet-browse").hidden = true;
+  byId("fleet-form").hidden = false;
+  byId("fleet-form").reset();
+  fleetIdTouched = false;
+  byId("fleet-tools").innerHTML = grantableToolNames
+    .map((tool) => `<label><input type="checkbox" value="${escapeHtml(tool)}" ${DEFAULT_GRANTS.has(tool) ? "checked" : ""} />${escapeHtml(tool)}</label>`)
+    .join("");
+  byId("fleet-error").hidden = true;
+  byId("fleet-name").focus();
+}
+function closeFleetForm() {
+  byId("fleet-browse").hidden = false;
+  byId("fleet-form").hidden = true;
+}
+
+byId("board-manage").addEventListener("click", () => {
+  closeFleetForm();
+  if (typeof fleetDialog?.showModal === "function") fleetDialog.showModal();
+  if (!fleetMembers.length) void loadFleet();
+});
+byId("fleet-close").addEventListener("click", () => fleetDialog?.close());
+byId("fleet-add-open").addEventListener("click", openFleetForm);
+byId("fleet-cancel").addEventListener("click", closeFleetForm);
+byId("fleet-id").addEventListener("input", () => { fleetIdTouched = true; });
+byId("fleet-name").addEventListener("input", (event) => {
+  if (!fleetIdTouched) byId("fleet-id").value = slugify(event.target.value);
+});
+byId("fleet-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const agent = {
+    id: byId("fleet-id").value.trim(),
+    name: byId("fleet-name").value.trim(),
+    description: byId("fleet-description").value.trim(),
+    brief: byId("fleet-brief").value.trim(),
+    tier: byId("fleet-tier").value,
+    tools: [...byId("fleet-tools").querySelectorAll("input:checked")].map((input) => input.value),
+  };
+  const saveButton = byId("fleet-save");
+  const errorEl = byId("fleet-error");
+  saveButton.disabled = true;
+  const result = await act({ type: "save-agent", agent });
+  saveButton.disabled = false;
+  if (!result.ok) {
+    errorEl.hidden = false;
+    errorEl.textContent = result.message || "Could not save the agent.";
+    return;
+  }
+  closeFleetForm();
+  await loadFleet();
+});
+byId("fleet-mine").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-remove-agent]");
+  if (!button) return;
+  const result = await act({ type: "remove-agent", name: button.dataset.removeAgent });
+  if (!result.ok) {
+    const errorEl = byId("fleet-error");
+    errorEl.hidden = false;
+    errorEl.textContent = result.message || "Could not remove the agent.";
+    return;
+  }
+  selectedAgentIds.delete(button.dataset.removeAgent);
+  await loadFleet();
 });
 
 byId("weather-form").addEventListener("submit", (event) => {
@@ -413,12 +1134,52 @@ setInterval(tick, 1000);
 tick();
 setView(activeView);
 
+// Diagnostic for the "the panel got slow" reports — see the matching
+// control:perf handler in control-panel.ts for why this exists alongside
+// the main process's own event-loop check. A dropped frame here means the
+// compositor missed a paint, whether the cause is this window's own JS,
+// a GC pause, or GPU contention from another window (Osiris's WebGL globe
+// is the prime suspect). Throttled hard: report at most once every 2s while
+// it's happening, since the point is "is this happening at all right now",
+// not a full frame-by-frame trace. Remove once the cause is found.
+if (bridge?.perf) {
+  let lastFrameAt = performance.now();
+  let lastReportAt = 0;
+  const watchFrames = () => {
+    const now = performance.now();
+    const delta = now - lastFrameAt;
+    lastFrameAt = now;
+    // A steady 60Hz frame is ~16.7ms; only a frame late enough to be visibly
+    // janky (well past 2 frames' worth) is worth a report at all.
+    if (delta > 50 && now - lastReportAt > 2000) {
+      lastReportAt = now;
+      try { bridge.perf({ droppedMs: delta }); } catch { /* diagnostic only */ }
+    }
+    requestAnimationFrame(watchFrames);
+  };
+  requestAnimationFrame(watchFrames);
+}
+
 if (bridge) {
   bridge.snapshot().then(render).catch((error) => notify(error?.message || String(error), true));
+  void loadFleet();
   bridge.onUpdate?.(render);
   bridge.onState?.((state) => render({ ...(snapshot || {}), state: { ...(snapshot?.state || {}), ...state } }));
-  bridge.onLevel?.((level) => document.documentElement.style.setProperty("--level", String(Number(level) || 0)));
+  bridge.onLevel?.((level) => {
+    const now = performance.now();
+    const wait = document.body.dataset.renderMode === "idle" ? 5000 : 80;
+    if (now - lastLevelPaintAt < wait) return;
+    lastLevelPaintAt = now;
+    document.documentElement.style.setProperty("--level", String(Number(level) || 0));
+    if (neuralCard) neuralCard.setLevel(Number(level) || 0);
+  });
   loadWeather();
+  // Built well off the critical path. The panel's own bootstrap costs ~100ms of
+  // worst-case frame time; starting the field on top of that is what turns two
+  // dropped frames into four. Let the panel settle first, then build in idle
+  // slices — measured after this: zero dropped frames from the field.
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 400));
+  setTimeout(() => idle(() => buildNeuralCard(), { timeout: 4000 }), 1500);
 } else {
   notify("The control panel bridge did not load.", true);
 }

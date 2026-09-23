@@ -12,9 +12,12 @@ import {
 import type { AudioTurn, BrainExecutionLimits, SendOptions } from "./types.js";
 import { stripAudioParts, toInlineDataPart } from "../voice/audio-turn.js";
 import { TOOLS, ToolDef } from "../tools/registry.js";
+import { selectToolNames } from "./tool-router.js";
 import { runGated } from "../safety/gate.js";
 import { trimGeminiHistory } from "./history.js";
+import { modelHealth } from "./model-health.js";
 import { recordLLM, approxTokens } from "../agent-replay/runtime.js";
+import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
 import { resolveToolName } from "./localtools.js";
 import { currentLoop, normalizeGeminiFinish, classifyProviderError } from "../agent-replay/loop-log.js";
 import type { ExitReason } from "../agent-replay/recorder.js";
@@ -74,7 +77,9 @@ function jsonSchemaToGoogle(node: any): any {
   return out;
 }
 
-function toFunctionDeclaration(t: ToolDef) {
+/** Exported so the realtime voice session declares tools the same way — one
+ *  copy of this conversion, not two that drift. */
+export function toFunctionDeclaration(t: ToolDef) {
   // io: "input" — a field with a default is optional for the *caller*.
   const json: any = z.toJSONSchema(z.object(t.schema), { io: "input" });
   const converted = jsonSchemaToGoogle(json);
@@ -161,7 +166,9 @@ function unknownToolAdvice(called: string, known: string[]): string {
 export class GeminiBrain extends Brain {
   private ai: GoogleGenAI;
   private contents: any[] = [];
-  private functionDeclarations = TOOLS.map(toFunctionDeclaration);
+  private functionDeclarations: any[];
+  /** This turn's pruned subset (AGI blueprint #9), or null to send them all. Recomputed once per runLoop(). */
+  private activeFunctionDeclarations: any[] | null = null;
   private busy = false;
   private aborted = false;
   private mcpInitialized = false;
@@ -185,6 +192,11 @@ export class GeminiBrain extends Brain {
   constructor(private cfg: JarvisConfig, apiKey: string, private readonly limits: BrainExecutionLimits = {}) {
     super();
     this.ai = new GoogleGenAI({ apiKey });
+    // A restricted agent (a custom fleet member — see frontier/fleet.ts) never
+    // sees a tool outside its allowlist in the first place; per-turn pruning
+    // (tool-router.ts) only ever narrows further within this.
+    const allowed = this.limits.allowedTools;
+    this.functionDeclarations = (allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS).map(toFunctionDeclaration);
     // The listening instructions are only true when audio is actually attached,
     // so they are only in the prompt when it is.
     this.systemPrompt = buildSystemPrompt(
@@ -263,6 +275,18 @@ export class GeminiBrain extends Brain {
     if (this.memory.begin(userText, opts)) this.contents = [];
     // A spoken turn gets the per-turn reminder that it will be read aloud.
     if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
+    // How the user is doing changes how a reply should read, and it changes
+    // between turns — so it rides along with each message rather than being
+    // baked into the system prompt at startup. Silent in the ordinary case: a
+    // fresh state contributes nothing.
+    //
+    // This was wired into the Claude brain only, so the same person got a
+    // different Echo depending on which model was answering — the exact drift
+    // `buildSystemPrompt` exists to prevent.
+    noteActivity();
+    const style = styleFor(assess());
+    if (style) userText = `${userText}\n\n[context: ${style}]`;
+
     // Audio first, transcript second: the model reads the parts in order, and
     // this is the order that says "here is what was said, and here is a guess
     // at it" rather than the reverse.
@@ -334,9 +358,19 @@ export class GeminiBrain extends Brain {
     if (streamedText) this.emitEvent("textDone", { text, turnId });
     const cand = last?.candidates?.[0] ?? {};
     const merged = [...(text ? [{ text }] : []), ...otherParts];
+    // A candidate with no content at all — blocked by a safety filter, cut
+    // off at the token limit with nothing produced yet, a recitation halt —
+    // is exactly the case runLoop's `if (!content)` exists to catch and name
+    // out loud (see its own comment: "the reason was sitting on the response
+    // the whole time and was never read"). Synthesizing a content object here
+    // unconditionally, even when nothing was ever streamed, would make every
+    // one of those candidates look like an ordinary empty-but-present reply
+    // and silently defeat that check — reintroducing the exact silent stop
+    // the non-streaming path was fixed to catch.
+    const content = merged.length ? { role: cand?.content?.role ?? "model", parts: merged } : undefined;
     return {
       ...last,
-      candidates: [{ ...cand, content: { role: cand?.content?.role ?? "model", parts: merged } }],
+      candidates: [{ ...cand, content }],
     };
   }
 
@@ -362,6 +396,22 @@ export class GeminiBrain extends Brain {
     this.turnAbort = new AbortController();
     this.emitEvent("status", "thinking");
 
+    // Tool pruning (AGI blueprint #9): computed once per turn, from the text
+    // that started it, and held for every iteration of the loop below — a
+    // tool that gets pruned out mid-turn because the model wrote a tool-result
+    // message would look like the tool vanished. `null` (pruning off,
+    // unavailable, or not trusted) means "send everything", today's behaviour.
+    if (this.cfg.agi?.toolPruning?.enabled) {
+      const lastUserText = [...this.contents].reverse().find((c) => c.role === "user")
+        ?.parts?.find((p: any) => typeof p.text === "string")?.text ?? "";
+      const keep = await selectToolNames(lastUserText, this.cfg.agi.toolPruning.topK).catch(() => null);
+      this.activeFunctionDeclarations = keep
+        ? this.functionDeclarations.filter((d: any) => keep.has(d.name) || this.mcpTools.has(d.name))
+        : null;
+    } else {
+      this.activeFunctionDeclarations = null;
+    }
+
     const log = currentLoop();
     let exitReason: ExitReason | null = null;
     let exitDetail: string | undefined;
@@ -384,8 +434,17 @@ export class GeminiBrain extends Brain {
     };
 
     try {
-      // Shared with the hearing pass — see GEMINI_MODEL_FALLBACKS.
-      const FALLBACK_MODELS = GEMINI_MODEL_FALLBACKS;
+      // Shared with the hearing pass — see GEMINI_MODEL_FALLBACKS — minus the
+      // models this key has already been told it cannot use. Without that
+      // filter every exhausted turn re-ran the whole ladder: four 404s for
+      // models retired weeks ago, then the same 429 as last turn.
+      const FALLBACK_MODELS = modelHealth.ladder([this.cfg.gemini.model, ...GEMINI_MODEL_FALLBACKS]);
+      if (!FALLBACK_MODELS.length) {
+        throw new Error(
+          `No Gemini model is usable right now — ${modelHealth.explain([this.cfg.gemini.model, ...GEMINI_MODEL_FALLBACKS])}. ` +
+          `Switch brains (Claude or the local model) or add quota.`
+        );
+      }
 
       // Gemini flash likes to stop mid-task with a text-only "next I will…"
       // rather than continuing to call tools. These bound an automatic nudge so
@@ -410,7 +469,7 @@ export class GeminiBrain extends Brain {
         let res;
         let attempt = 0;
         let turnStartedAt = Date.now();
-        let currentModel = this.cfg.gemini.model;
+        let currentModel = FALLBACK_MODELS[0];
         
         // Auto-fallback logic for quota exhaustion
         while (attempt < FALLBACK_MODELS.length) {
@@ -423,7 +482,7 @@ export class GeminiBrain extends Brain {
               contents: this.contents,
               config: {
                 systemInstruction: `${this.systemPrompt}\n\n${this.memory.packet()}`,
-                tools: [{ functionDeclarations: this.functionDeclarations }],
+                tools: [{ functionDeclarations: this.activeFunctionDeclarations ?? this.functionDeclarations }],
               },
             };
             log?.enterState("awaiting_llm", `gemini:${currentModel}`);
@@ -451,17 +510,26 @@ export class GeminiBrain extends Brain {
             const reason = geminiFallbackReason(err);
 
             if (reason) {
-              console.warn(`[gemini] Model ${currentModel} failed (${reason}); switching models...`);
-              const idx = FALLBACK_MODELS.indexOf(currentModel);
-              currentModel = FALLBACK_MODELS[idx + 1];
-              if (!currentModel) {
-                currentModel = FALLBACK_MODELS[0];
-              }
+              // Remember it, so the next turn does not pay for this discovery
+              // again. A 404 means this key has lost the model for good; a 429
+              // means its quota window has to pass first.
+              if (reason === "not found") modelHealth.markDead(currentModel, errStr);
+              else if (reason === "quota") modelHealth.markExhausted(currentModel, errStr);
+
+              const from = currentModel;
               attempt++;
-              log?.note("llm.model_fallback", { from: currentModel, reason, attempt });
-              if (attempt >= FALLBACK_MODELS.length) {
-                throw new Error(`All Gemini fallback models exhausted or unavailable. Last error: ${errStr}`);
+              // Straight down the ladder. It used to wrap back to the first
+              // model when it ran off the end, so the last thing a doomed turn
+              // did was re-ask the model that had already failed it.
+              const next = FALLBACK_MODELS[attempt];
+              console.warn(`[gemini] ${from} failed (${reason})${next ? `; trying ${next}` : ""}`);
+              log?.note("llm.model_fallback", { from, to: next ?? null, reason, attempt });
+              if (!next) {
+                throw new Error(
+                  `Gemini has no model left to try (${FALLBACK_MODELS.join(", ")}). Last error: ${errStr}`
+                );
               }
+              currentModel = next;
             } else {
               throw err; // Bubble up other errors immediately
             }

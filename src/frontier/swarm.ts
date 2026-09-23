@@ -9,6 +9,7 @@ import {
   type TaskResult,
   type TaskResultStatus,
 } from "../memory/task-state.js";
+import { getFleetMember } from "./fleet.js";
 
 /**
  * The clone swarm: background sub-agents working in parallel.
@@ -263,8 +264,13 @@ export class SwarmManager {
   }
 
   listMissions(): MissionState[] {
+    return this.persistedMissions(taskCoordinator);
+  }
+
+  /** The same view, from a given coordinator — reconciliation must read what it will write. */
+  private persistedMissions(coordinator: TaskCoordinator): MissionState[] {
     const all = new Map<string, MissionState>();
-    for (const state of taskCoordinator.list()) {
+    for (const state of coordinator.list()) {
       if (!state.taskId.startsWith("mission.")) continue;
       const saved = state.bindings.mission as MissionState | undefined;
       if (saved?.id) all.set(saved.id, saved);
@@ -283,25 +289,7 @@ export class SwarmManager {
     if (!mission || !deps || mission.status !== "running") return false;
     const coordinator = deps.coordinator ?? taskCoordinator;
     for (const task of Object.values(mission.tasks)) {
-      if (resultStatus(task.status)) continue;
-      if (task.taskId && coordinator.get(task.taskId)?.status !== "cancelled") coordinator.cancel(task.taskId);
-      task.status = "cancelled";
-      task.result = {
-        status: "cancelled",
-        summary: "Mission cancelled",
-        artifacts: [],
-        verificationRefs: [],
-        blockers: [],
-        completedAt: new Date().toISOString(),
-      };
-      const timer = task.taskId ? this.taskTimers.get(task.taskId) : undefined;
-      if (timer) clearTimeout(timer);
-      if (task.taskId) this.taskTimers.delete(task.taskId);
-      const brain = task.actorName ? this.brains.get(task.actorName) : undefined;
-      brain?.interrupt?.();
-      void brain?.stop?.().catch(() => {});
-      if (task.actorId) this.clones.delete(task.actorId);
-      if (task.actorName) this.brains.delete(task.actorName);
+      this.cancelOneTask(task, coordinator, "Mission cancelled");
     }
     mission.status = "cancelled";
     mission.result = this.aggregateResult(mission, "cancelled", "Mission cancelled");
@@ -311,6 +299,156 @@ export class SwarmManager {
     this.broadcast(deps);
     this.scheduleAll();
     return true;
+  }
+
+  /**
+   * Close out Missions that cannot still be running, after a restart.
+   *
+   * An Agent Task's wall-time budget is enforced by a `setTimeout` living in
+   * the process that started it. Kill Echo and the timer dies with it, while
+   * the Mission stays on disk saying "working" — so the next start restores a
+   * board full of agents that do not exist. Measured here before this existed:
+   * six tasks reported "working" 19.8 HOURS into a 10-minute cap, because no
+   * run since had any reason to look at them.
+   *
+   * Runs after checkpoint recovery, so a task that genuinely resumed is left
+   * alone; anything still unattached to a live brain is written off with the
+   * reason it actually ended — over budget, or abandoned when Echo exited.
+   */
+  reconcileAbandoned(deps: SwarmDeps & { now?: () => number } = {} as SwarmDeps): { missions: number; tasks: number } {
+    const coordinator = deps.coordinator ?? taskCoordinator;
+    const now = (deps.now ?? Date.now)();
+    let missionCount = 0;
+    let taskCount = 0;
+
+    for (const saved of this.persistedMissions(coordinator)) {
+      if (saved.status !== "running") continue;
+      if (this.missions.has(saved.id)) continue;   // this process owns it, timers and all
+
+      // This runs during startup over whatever is on disk: a half-written
+      // record, an older schema, or a task some other actor owns. One bad
+      // mission must not take the boot sequence with it.
+      try {
+      const mission = structuredClone(saved);
+      let touched = false;
+      for (const task of Object.values(mission.tasks)) {
+        if (resultStatus(task.status)) continue;
+        // A recovered task has a live brain in THIS process; leave it be.
+        if (task.actorName && this.brains.has(task.actorName)) continue;
+
+        const startedAt = task.startedAt ?? mission.createdAt;
+        const overBudget = !!task.startedAt && now - startedAt > task.budget.timeoutMs;
+        const summary = overBudget
+          ? `Agent Task exceeded its ${task.budget.timeoutMs}ms time budget while Echo was not running`
+          : "Agent Task was abandoned when Echo exited";
+        task.status = overBudget ? "failed" : "cancelled";
+        task.result = {
+          status: task.status,
+          summary,
+          artifacts: [],
+          verificationRefs: [],
+          blockers: [overBudget ? "budget:timeout" : "abandoned:restart"],
+          completedAt: new Date(now).toISOString(),
+        };
+        if (task.taskId && coordinator.get(task.taskId) && coordinator.get(task.taskId)!.status !== "cancelled") {
+          coordinator.cancel(task.taskId);
+        }
+        touched = true;
+        taskCount++;
+      }
+
+      if (!touched && Object.values(mission.tasks).some((task) => !resultStatus(task.status))) continue;
+      const statuses = Object.values(mission.tasks).map((task) => task.status);
+      mission.status = statuses.every((value) => value === "completed") ? "completed"
+        : statuses.includes("failed") ? "failed" : "cancelled";
+      mission.result = this.aggregateResult(mission, mission.status as TaskResultStatus,
+        `Mission ended ${mission.status} — Echo restarted while it was running`);
+      mission.updatedAt = now;
+      // The Result is a courtesy to the coordinator; the persisted Mission is
+      // the thing the board reads. If the first is refused, still write the
+      // second — otherwise the board would go on showing work as running.
+      try {
+        this.commitMissionResult(mission, coordinator);
+      } catch (err: any) {
+        console.warn(`[swarm] mission ${mission.id}: could not file its Result (${err?.message ?? err})`);
+      }
+      this.persistMission(mission, coordinator);
+      missionCount++;
+      } catch (err: any) {
+        console.warn(`[swarm] could not reconcile mission ${saved.id}: ${err?.message ?? err}`);
+      }
+    }
+
+    if (missionCount) this.broadcast(deps);
+    return { missions: missionCount, tasks: taskCount };
+  }
+
+  /**
+   * Remove a mission from the board for good.
+   *
+   * A running mission is cancelled first: deleting the record of work that is
+   * still executing would leave agents running with nothing left to report to,
+   * and their Results would arrive for a mission that no longer exists. Each
+   * Agent Task owns its own coordinator record, so those are forgotten too —
+   * otherwise "deleted" would mean "hidden", with the task tree still on disk.
+   */
+  forgetMission(id: string, coordinator: TaskCoordinator = taskCoordinator): { ok: boolean; cancelled: boolean } {
+    const mission = this.missions.get(id) ?? this.getMission(id);
+    if (!mission) return { ok: false, cancelled: false };
+
+    const cancelled = mission.status === "running" ? this.cancelMission(id) : false;
+    const live = this.missions.get(id) ?? mission;
+    for (const task of Object.values(live.tasks)) {
+      if (task.taskId) coordinator.forget(task.taskId);
+    }
+    coordinator.forget(live.taskId);
+    this.missions.delete(id);
+    const deps = this.missionDeps.get(id);
+    this.missionDeps.delete(id);
+    if (deps) this.broadcast(deps);
+    return { ok: true, cancelled };
+  }
+
+  /**
+   * Stop just one Agent Task, leaving the rest of the mission running — the
+   * board's per-card "stop" (Aira's onStopAgent), where cancelling the whole
+   * mission would also kill agents the user never asked to stop.
+   */
+  cancelMissionTask(missionId: string, taskId: string): boolean {
+    const mission = this.missions.get(missionId);
+    const deps = this.missionDeps.get(missionId);
+    const task = mission?.tasks[taskId];
+    if (!mission || !deps || !task || resultStatus(task.status)) return false;
+    const coordinator = deps.coordinator ?? taskCoordinator;
+    this.cancelOneTask(task, coordinator, "Stopped");
+    mission.updatedAt = (deps.now ?? Date.now)();
+    this.persistMission(mission, coordinator);
+    this.broadcast(deps);
+    this.scheduleAll(); // a task downstream of this one may now need to be marked blocked
+    return true;
+  }
+
+  /** The cleanup one Agent Task needs when it is cut short — shared by both cancel paths above. */
+  private cancelOneTask(task: MissionTaskState, coordinator: TaskCoordinator, summary: string): void {
+    if (resultStatus(task.status)) return;
+    if (task.taskId && coordinator.get(task.taskId)?.status !== "cancelled") coordinator.cancel(task.taskId);
+    task.status = "cancelled";
+    task.result = {
+      status: "cancelled",
+      summary,
+      artifacts: [],
+      verificationRefs: [],
+      blockers: [],
+      completedAt: new Date().toISOString(),
+    };
+    const timer = task.taskId ? this.taskTimers.get(task.taskId) : undefined;
+    if (timer) clearTimeout(timer);
+    if (task.taskId) this.taskTimers.delete(task.taskId);
+    const brain = task.actorName ? this.brains.get(task.actorName) : undefined;
+    brain?.interrupt?.();
+    void brain?.stop?.().catch(() => {});
+    if (task.actorId) this.clones.delete(task.actorId);
+    if (task.actorName) this.brains.delete(task.actorName);
   }
 
   /**
@@ -465,7 +603,11 @@ export class SwarmManager {
     this.counter = Math.max(this.counter + 1, next);
     const taskId = `${mission.taskId}.${safePart(task.id, "task")}`;
     const actorId = `${safePart(mission.id, "mission")}.${safePart(task.id, "task")}`;
-    const actorName = task.profile?.trim() || `Echo Agent ${this.counter}`;
+    // A fleet id ("research") displays as its member's proper name ("Research");
+    // anything else is used verbatim, so a caller that already has a display
+    // name in mind (an ad-hoc profile string) is not renamed underneath it.
+    const fleetMember = task.profile ? getFleetMember(task.profile) : null;
+    const actorName = fleetMember?.name || task.profile?.trim() || `Echo Agent ${this.counter}`;
     const identity: AgentIdentity = { id: actorId, name: actorName, kind: "clone", parentTaskId: mission.taskId };
     coordinator.create({
       taskId,
@@ -540,7 +682,14 @@ export class SwarmManager {
     const criteria = task.acceptanceCriteria?.length
       ? task.acceptanceCriteria.map((item, index) => `${index + 1}. ${item}`).join("\n")
       : "1. Deliver the requested work and verify it directly.";
-    return `${systemPrompt(actorName, task.goal)}\n\n` +
+    // task.profile doubles as a fleet member id (frontier/fleet.ts) — when it
+    // resolves to one, that agent's own standing brief IS this task's
+    // instructions, ahead of the generic "you are an Echo agent" framing.
+    // This is the one place a fleet member's persona is ever read from, so
+    // the board (main.ts) and a plain spawned clone never disagree about it.
+    const member = task.profile ? getFleetMember(task.profile) : null;
+    const brief = member ? `${member.brief}\n\n` : "";
+    return `${brief}${systemPrompt(actorName, task.goal)}\n\n` +
       `Mission: ${mission.goal}\n` +
       `Execution lane: ${task.lane}\n` +
       `Acceptance criteria:\n${criteria}\n\n` +

@@ -21,8 +21,10 @@ html, body { width: 100%; height: 100%; background: #03050a; overflow: hidden;
   cursor: pointer; font-size: 13px; }
 #bar button:hover { background: color-mix(in srgb, var(--glow) 20%, transparent); color: #eafcff; }
 
-#stage { position: relative; flex: 1; }
-#core { display: block; width: 100%; height: 100%; }
+#stage { position: relative; flex: 1; overflow: hidden; }
+/* The field hosts the micrograph + its FX layers; it fills the stage and is
+   the element that takes the zoom / pan / rotate gestures. */
+#field { position: absolute; inset: 0; width: 100%; height: 100%; }
 
 /* HUD overlay on the canvas */
 .hud { position: absolute; inset: 0; pointer-events: none; }
@@ -34,4 +36,10 @@ html, body { width: 100%; height: 100%; background: #03050a; overflow: hidden;
 .read { position: absolute; color: var(--glow); font-size: 11px; line-height: 1.9; opacity: .9; }
 .read.l { left: 26px; bottom: 24px; }
 .read.r { right: 26px; bottom: 24px; text-align: right; }
+.read.c { left: 50%; bottom: 18px; transform: translateX(-50%); font-size: 10px;
+  letter-spacing: .1em; color: #4c6b76; white-space: nowrap; }
 .read .d { color: #5d7f8a; } .read b { color: #eafcff; font-weight: 600; }
+
+/* The readouts sit over live tissue, so they carry their own scrim. */
+.read.l, .read.r { padding: 6px 10px; border-radius: 8px;
+  background: rgba(3, 7, 12, .55); backdrop-filter: blur(2px); }

@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from "node:child_process";
 import { withProsody, speakableText } from "./prosody.js";
 import type { SpeechStream } from "./speech-stream.js";
+import { PiperWorker, piperPaths } from "./tts-stream.js";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,10 +51,11 @@ export class Tts {
   constructor(
     private voice: string,
     private enabled: boolean,
-    private engine: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" = "mac",
+    private engine: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" | "gemini" | "piper" = "mac",
     private elevenLabsVoiceId?: string,
     private onStateChange?: (speaking: boolean) => void,
-    private sarvam: { speaker?: string; pace?: number } = {}
+    private sarvam: { speaker?: string; pace?: number } = {},
+    private piperVoice?: string
   ) {}
 
   say(text: string) {
@@ -217,6 +219,42 @@ export class Tts {
     return null;
   }
 
+  private async fetchPiper(text: string): Promise<string | null> {
+    const paths = piperPaths(this.piperVoice);
+    if (!paths) {
+      console.error("[piper] not installed — run npm run piper:setup");
+      return null;
+    }
+    try {
+      const worker = PiperWorker.for(paths);
+      await worker.ready;
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) =>
+        worker.request(text, (pcm) => chunks.push(pcm), (err) => (err ? reject(new Error(err)) : resolve()))
+      );
+      const pcm = Buffer.concat(chunks);
+      const header = Buffer.alloc(44);
+      header.write("RIFF", 0);
+      header.writeUInt32LE(36 + pcm.length, 4);
+      header.write("WAVEfmt ", 8);
+      header.writeUInt32LE(16, 16);
+      header.writeUInt16LE(1, 20);
+      header.writeUInt16LE(1, 22);
+      header.writeUInt32LE(paths.sampleRate, 24);
+      header.writeUInt32LE(paths.sampleRate * 2, 28);
+      header.writeUInt16LE(2, 32);
+      header.writeUInt16LE(16, 34);
+      header.write("data", 36);
+      header.writeUInt32LE(pcm.length, 40);
+      const tmpPath = join(tmpdir(), `piper_${Date.now()}.wav`);
+      writeFileSync(tmpPath, Buffer.concat([header, pcm]));
+      return tmpPath;
+    } catch (err) {
+      console.error("[piper] synthesis error:", err);
+      return null;
+    }
+  }
+
   private async drain() {
     const generation = ++this.generation;
     this.speaking = true;
@@ -239,6 +277,8 @@ export class Tts {
         console.log(`[jarvis] fetching sarvam voice for: "${text.slice(0, 30)}..."`);
         audioPath = await this.fetchSarvam(text);
       }
+      // Any voice that could not produce audio falls back to Piper before `say`.
+      if (!audioPath && this.engine !== "mac") audioPath = await this.fetchPiper(text);
 
       // If stop() was called while downloading audio, don't play it.
       if (generation !== this.generation) break;
@@ -250,7 +290,7 @@ export class Tts {
           this.current.kill("SIGTERM");
           this.current = null;
         }
-        if ((this.engine === "fakeyou" || this.engine === "elevenlabs" || this.engine === "local-clone" || this.engine === "sarvam") && audioPath) {
+        if (audioPath) {
           this.current = spawn("/usr/bin/afplay", [audioPath]);
         } else {
           // Give the line a delivery rather than reading it flat: pitch,

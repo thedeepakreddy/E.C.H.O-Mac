@@ -1,7 +1,7 @@
 import QRCode from "qrcode";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Getting the phone-remote link onto the phone.
@@ -35,7 +35,7 @@ export async function qrText(url: string): Promise<string> {
  * fallback that means the link is never actually lost while the remote is open.
  */
 export function saveRemoteUrl(url: string): string {
-  const path = join(homedir(), ".jarvis", "remote-url.txt");
+  const path = join(dataRoot(), "remote-url.txt");
   try {
     writeFileSync(path, url + "\n", { mode: 0o600 });
   } catch {

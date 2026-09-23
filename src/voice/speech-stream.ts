@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
 import type { JarvisConfig } from "../config.js";
 import { SentenceChunker, splitSentences } from "./chunker.js";
-import { createTtsStream, languageOf, type TtsStream, type TtsAudio } from "./tts-stream.js";
+import { createTtsStream, isLatinText, languageOf, offlineTtsStream, OFFLINE_STREAMS, type TtsStream, type TtsAudio } from "./tts-stream.js";
 import type { AudioPlayer } from "./player.js";
 
 /**
@@ -17,6 +17,9 @@ import type { AudioPlayer } from "./player.js";
  *
  * Events: 'speaking'(bool) · 'firstAudio'(sentence text) · 'sentence'(text, index) · 'capped'
  */
+/** After the cloud voice fails, go straight to the local one for this long. */
+export const CLOUD_RETRY_MS = 60_000;
+
 export class SpeechStream extends EventEmitter {
   private generation = 0;
   private chunker = new SentenceChunker();
@@ -36,6 +39,12 @@ export class SpeechStream extends EventEmitter {
   private idleClose: NodeJS.Timeout | null = null;
   private audioMsEnd: number[] = [];
   private sampleRate = 24000;
+  /** Streams given up on mid-turn; anything they still emit is ignored. */
+  private abandoned = new WeakSet<TtsStream>();
+  /** When the configured cloud voice last failed; skip it for a while after. */
+  private cloudFailedAt = -Infinity;
+  /** The open stream is the offline stand-in, not the configured voice. */
+  private onFallback = false;
 
   constructor(
     private readonly cfg: JarvisConfig,
@@ -44,6 +53,9 @@ export class SpeechStream extends EventEmitter {
       maxSentences: () => number;
       /** Test seam: build the TTS stream (defaults to the configured engine). */
       createTts?: (cfg: JarvisConfig, firstText: string) => TtsStream | null;
+      /** Test seam: the local voice used when the configured one fails. */
+      createOfflineTts?: (cfg: JarvisConfig) => TtsStream;
+      now?: () => number;
     }
   ) {
     super();
@@ -57,6 +69,15 @@ export class SpeechStream extends EventEmitter {
 
   /** A new brain turn: reset the per-turn sentence budget. */
   newTurn(): void {
+    // The stand-in voice would otherwise be reused for as long as it stays
+    // open; once the cooldown is over, a new turn tries the real voice again.
+    if (this.onFallback && this.tts && !this.awaitingAudio.size
+        && (this.opts.now ?? Date.now)() - this.cloudFailedAt >= CLOUD_RETRY_MS) {
+      const t = this.tts;
+      this.tts = null;
+      this.onFallback = false;
+      void t.close();
+    }
     this.spokenThisTurn = 0;
     this.capped = false;
   }
@@ -72,51 +93,137 @@ export class SpeechStream extends EventEmitter {
     void this.ensureTts(hint).catch(() => {});
   }
 
-  private async ensureTts(text: string): Promise<TtsStream | null> {
+  private async ensureTts(text: string, rechecks = 0): Promise<TtsStream | null> {
     const lang = languageOf(text);
-    if (this.tts && this.ttsLang && this.ttsLang !== lang && this.tts.name === "sarvam-ws") {
+    const sarvamSwitch = this.tts?.name === "sarvam-ws" && !!this.ttsLang && this.ttsLang !== lang;
+    // Piper cannot read other scripts: a sentence in Telugu or Hindi switches
+    // to the Gemini voice and back. Not while standing in for a failed voice.
+    const scriptSwitch = this.cfg.voice.ttsEngine === "piper" && !!this.tts && !this.onFallback
+      && OFFLINE_STREAMS.has(this.tts.name) !== isLatinText(text);
+    if (sarvamSwitch || scriptSwitch) {
       // Sarvam fixes the language per connection; a reply that switches script
       // gets a fresh one for the new language.
-      const old = this.tts;
+      const old = this.tts!;
       this.tts = null;
       void old.close();
     }
     if (this.tts) return this.tts;
     if (this.ttsOpening) {
       await this.ttsOpening;
-      return this.tts;
+      // The voice that just opened was chosen for an earlier sentence; check
+      // once more that it suits this one (a Telugu line after an English one).
+      return rechecks >= 3 ? this.tts : this.ensureTts(text, rechecks + 1);
     }
     const gen = this.generation;
-    const stream = (this.opts.createTts ?? createTtsStream)(this.cfg, text);
+    const now = (this.opts.now ?? Date.now)();
+    const coolingDown = now - this.cloudFailedAt < CLOUD_RETRY_MS;
+    const stream = coolingDown ? this.offline() : (this.opts.createTts ?? createTtsStream)(this.cfg, text);
     if (!stream) return null;
+    const standIn = coolingDown;
     this.ttsLang = lang;
-    this.sampleRate = stream.sampleRate;
-    stream.on("audio", (a: TtsAudio) => {
-      if (gen !== this.generation) return;
-      this.onAudio(a);
-    });
-    stream.on("sentenceDone", (idx: number) => {
-      if (gen !== this.generation) return;
-      this.awaitingAudio.delete(idx);
-      this.player.endSentence(idx);
-      this.checkIdle();
-    });
-    stream.on("error", (m: string) => console.log(`[voice] tts stream: ${m}`));
-    stream.on("closed", () => {
-      if (this.tts === stream) this.tts = null;
-    });
+    this.wire(stream, gen);
     this.ttsOpening = stream.open().then(
       () => {
-        if (gen === this.generation) this.tts = stream;
-        else stream.abort();
+        if (gen === this.generation) {
+          this.tts = stream;
+          this.onFallback = standIn;
+        } else stream.abort();
       },
-      (err: any) => {
+      async (err: any) => {
         console.log(`[voice] tts stream failed to open: ${err?.message ?? err}`);
+        if (OFFLINE_STREAMS.has(stream.name) || gen !== this.generation) return;
+        // A cloud voice that cannot connect (offline, rate-limited, bad key)
+        // used to leave the reply silent. Speak it locally instead.
+        this.abandoned.add(stream);
+        this.cloudFailedAt = (this.opts.now ?? Date.now)();
+        const local = this.offline();
+        this.wire(local, gen);
+        try {
+          await local.open();
+          if (gen === this.generation) {
+            this.tts = local;
+            this.onFallback = true;
+          } else local.abort();
+        } catch (e: any) {
+          console.log(`[voice] offline voice failed to open too: ${e?.message ?? e}`);
+        }
       }
     );
     await this.ttsOpening;
     this.ttsOpening = null;
     return this.tts;
+  }
+
+  private offline(): TtsStream {
+    return (this.opts.createOfflineTts ?? offlineTtsStream)(this.cfg);
+  }
+
+  private wire(stream: TtsStream, gen: number): void {
+    this.sampleRate = stream.sampleRate;
+    const live = () => gen === this.generation && !this.abandoned.has(stream);
+    stream.on("audio", (a: TtsAudio) => {
+      if (live()) this.onAudio(a);
+    });
+    stream.on("sentenceDone", (idx: number) => {
+      if (!live()) return;
+      this.awaitingAudio.delete(idx);
+      this.player.endSentence(idx);
+      this.checkIdle();
+    });
+    stream.on("error", (m: string) => {
+      console.log(`[voice] tts stream: ${m}`);
+      if (live() && this.tts === stream && !OFFLINE_STREAMS.has(stream.name)) void this.failOver(stream, gen);
+    });
+    stream.on("closed", () => {
+      if (this.tts !== stream) return;
+      this.tts = null;
+      // Closed by the server with sentences still owed: a dropped connection,
+      // not the end of the turn.
+      if (live() && this.awaitingAudio.size && !OFFLINE_STREAMS.has(stream.name)) void this.failOver(stream, gen);
+    });
+  }
+
+  /**
+   * The cloud voice broke mid-reply. Hand the rest of the turn to the local
+   * voice: every sentence that has produced no audio yet is spoken again there,
+   * and one that was cut off part-way is let go rather than restarted.
+   */
+  private async failOver(stream: TtsStream, gen: number): Promise<void> {
+    if (this.abandoned.has(stream)) return;
+    this.abandoned.add(stream);
+    this.cloudFailedAt = (this.opts.now ?? Date.now)();
+    if (this.tts === stream) this.tts = null;
+    stream.abort();
+    console.log(`[voice] ${stream.name} failed mid-turn — continuing with the offline voice`);
+    const owed = [...this.awaitingAudio].sort((a, b) => a - b);
+    for (const idx of owed) {
+      if (this.audioMsEnd[idx] !== undefined) {
+        this.awaitingAudio.delete(idx);
+        this.player.endSentence(idx);
+      }
+    }
+    const local = this.offline();
+    this.wire(local, gen);
+    // Held as the opening stream, so a sentence arriving meanwhile waits for
+    // this voice rather than starting a second one.
+    this.ttsOpening = local.open().then(
+      () => {
+        if (gen === this.generation) {
+          this.tts = local;
+          this.onFallback = true;
+        } else local.abort();
+      },
+      (e: any) => console.log(`[voice] offline voice failed to open: ${e?.message ?? e}`)
+    );
+    await this.ttsOpening;
+    this.ttsOpening = null;
+    if (gen !== this.generation) return;
+    for (const idx of owed) {
+      if (!this.awaitingAudio.has(idx)) continue;
+      if (this.tts === local) local.speak(this.sentences[idx], idx);
+      else this.awaitingAudio.delete(idx);
+    }
+    this.checkIdle();
   }
 
   /** Streamed model text. */

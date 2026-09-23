@@ -154,11 +154,24 @@ assistant describing their mood back to them.`;
  * chain that ends in old models ends in nothing. The tail is kept anyway for
  * keys that still have access to them.
  */
+/*
+ * Ordered by MEASURED latency, not by version number.
+ *
+ * Newest-first looks right and was wrong. Probed on this key (three calls each
+ * for an eight-token reply): 3.7-flash answered once in 142s, 503'd once and
+ * timed out once; 3.6-flash took 15-33s; 3.1-flash-lite took 4.0s and 11.5s.
+ * The fastest, most reliable model was tried LAST, so every turn queued behind
+ * the two slowest before reaching it — which is what "Echo thinks for a long
+ * time" actually was.
+ *
+ * Re-measure before reordering. A version number says nothing about how loaded
+ * a model is for a given key, and these numbers will drift.
+ */
 export const GEMINI_MODEL_FALLBACKS = [
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
   "gemini-3.1-flash-lite",
+  "gemini-3.6-flash",
+  "gemini-3.7-flash",
+  "gemini-3.5-flash",
   "gemini-2.5-flash",
   "gemini-2.0-flash",
   "gemini-1.5-flash",
@@ -179,6 +192,16 @@ export interface SendOptions {
 /** Hard per-agent limits supplied by a Mission's Agent Task budget. */
 export interface BrainExecutionLimits {
   maxIterations?: number;
+  /**
+   * A hard restriction on which of the built-in TOOLS this brain may see at
+   * all — not the per-turn relevance pruning in brain/tool-router.ts, which
+   * only ever narrows within whatever this allows. Undefined means no
+   * restriction (the main brain, and every clone spawned before the agent
+   * fleet existed). Used to give a user-defined custom agent read-only tools
+   * only, enforced here rather than trusted to the agent's own instructions —
+   * an instruction is a request; a tool the brain was never given is a fact.
+   */
+  allowedTools?: ReadonlySet<string>;
 }
 
 /**
@@ -320,9 +343,25 @@ You have two sets of tools:
 2. The built-in coding/shell tools (Bash, Read, Write, Edit, Glob, Grep) — use these for reading and writing files, running and compiling code, and any terminal work.
 3. Memory tools (remember, recall, forget, memory_status) — these persist across restarts. See the Memory section below.
 
+## Take the direct route before clicking through a GUI
+
+Clicking is a fallback, not the default — it is slower and the one most likely to land on the wrong thing. Before list_ui_elements or click_ui_element, check whether the task has a direct path that skips the screen entirely:
+
+- **Opening an app** — open_app. Never hunt for a Dock icon or Spotlight-type it.
+- **Getting somewhere specific in a browser** — open_url with the destination already encoded, instead of opening a homepage and clicking/typing your way there. Most sites with a search box also take the query as a URL, so "search Gmail for invoices" is one open_url call, not open-then-click-then-type-then-click:
+  - Google: https://www.google.com/search?q=QUERY
+  - YouTube: https://www.youtube.com/results?search_query=QUERY
+  - Gmail: https://mail.google.com/mail/u/0/#search/QUERY
+  - Google Maps: https://www.google.com/maps/search/QUERY
+  If you don't already know a site's pattern, https://SITE/search?q=QUERY is a reasonable first guess for anything with search — look at the result and fall back to clicking only if it didn't land right.
+- **A system or app action that already exists as a shortcut** — run_shortcut, or a single run_terminal_command (osascript, open -a, defaults) for things like opening a specific file in a specific app, toggling a setting, or any other one-line system action. This is not only for coding.
+- **Typing into a field you already know has focus** — type_text directly. A field an app opens already focused (a just-launched app's main input, a freshly opened compose window) needs no click first.
+
+Reach for the visual loop below when none of this applies: an app or page with no URL or shortcut for what you need, something specific to whatever is currently on screen, or anything IRREVERSIBLE — sending, deleting, purchasing, submitting — where seeing it before it happens is the actual point, not overhead to skip.
+
 ## Operating any application
 
-You are not limited to apps you know: every app is driven by the same loop. Work VISUALLY — look at the real screen before you act and again after it, and never drive an interface by blind keystrokes or tab-navigation and hope.
+You are not limited to apps you know: every app is driven by the same loop. When there is no direct route above, work VISUALLY — look at the real screen before you act and again after it, and never drive an interface by blind keystrokes or tab-navigation and hope.
 
 1. CLEAR THE WAY — if anything is covering what you need, dismiss it before doing anything else. A popup clicked through by accident is the single most common reason these sequences go wrong.
 2. LOOK — observe before every action. Each of the seeing tools says when it is the right one; use the cheapest one that answers the question you actually have.

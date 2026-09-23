@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { disableOrtTelemetry } from "../utils/ortEnv.js";
 
 /**
  * Voice activity detection on the listener's frames.
@@ -66,6 +67,7 @@ export class SileroVad implements Vad {
     if (!existsSync(modelPath)) return null;
     let ort: any;
     try {
+      disableOrtTelemetry(); // must precede the native load — see utils/ortEnv.ts
       ort = await import("onnxruntime-node");
     } catch {
       return null;

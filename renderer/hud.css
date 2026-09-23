@@ -348,13 +348,48 @@ body[data-status="error"] .gear {
 .loader.glitch { animation: glitch-anim 0.28s linear; }
 
 /* ---- status: colour + spin speed carry all the meaning ---- */
-/* The wake pulse: a single fast bloom the moment the name is heard. */
+/* The wake pulse: a single fast bloom the moment the name is heard.
+ *
+ * Transform only. This animates #orb50, which WRAPS the two blurred bloom
+ * layers, and animating `filter` on a parent re-rasterises that whole blurred
+ * subtree every frame for the full 0.7s — a real thermal spike for one flash.
+ * `transform` is a compositor property: the GPU reuses the texture it already
+ * has. The brightness half of the flash is done below, as opacity on a layer
+ * that is already rasterised, which is equally free. */
 @keyframes wake-pulse {
-  0%   { filter: brightness(1) saturate(1); transform: scale(1); }
-  18%  { filter: brightness(2.2) saturate(1.6); transform: scale(1.08); }
-  100% { filter: brightness(1) saturate(1); transform: scale(1); }
+  0%   { transform: scale(1); }
+  18%  { transform: scale(1.08); }
+  100% { transform: scale(1); }
 }
 #orb.wake, #orb50.wake { animation: wake-pulse 0.7s ease-out !important; }
+
+/* The bright half of the flash.
+ *
+ * A dedicated layer rather than a brightness filter on the reactor. Its
+ * brightness is static, so it is rasterised once and the flash is nothing but
+ * an alpha ramp on an existing texture — as cheap as the scale, and it can be
+ * as bright as we like. Lifting the bloom's own opacity instead was far too
+ * timid to read as a flash: it only ran from 0.54 to 1. */
+.m50-flash {
+  /* Size and placement come from `.orb50 > *`; all it needs of its own is to
+     sit ON TOP. Every layer shares one grid cell and stacks in DOM order, so
+     without this the flash paints under the ring images and is swallowed. */
+  z-index: 6;
+  opacity: 0;
+  mix-blend-mode: screen;
+  filter:
+    hue-rotate(var(--m50-hue, 0deg))
+    brightness(3.4)
+    saturate(1.7)
+    blur(calc(var(--size) * 0.012))
+    drop-shadow(0 0 calc(var(--size) * 0.06) var(--glow));
+}
+@keyframes wake-flash {
+  0%   { opacity: 0; }
+  14%  { opacity: 0.95; }
+  100% { opacity: 0; }
+}
+#orb50.wake .m50-flash { animation: wake-flash 0.7s ease-out !important; }
 /* Conversation window open: a steady ring so a glance says "no need to say Echo". */
 body[data-session="open"] #orb, body[data-session="open"] #orb50 {
   box-shadow: 0 0 0 3px rgba(89, 240, 255, 0.28), 0 0 28px rgba(89, 240, 255, 0.35);
@@ -390,6 +425,33 @@ body[data-status="error"] .sweep { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
   .coils, .turbine, .sweep, .core, .core .triad { animation: none !important; }
 }
+
+/* Idle governor: keep the outer and secondary counter-ring moving smoothly,
+   while leaving the sweep, extra gears, flicker and bloom layers paused.
+   Active states restore the full animation stack. The control panel has its
+   own idle governor and remains stationary when idle. */
+body[data-render-mode="idle"] :is(
+  .coils, .turbine, .sweep, .gear, .core, .triad, .neurons, .nx,
+  .m50-l-outer, .m50-l-mid, .m50-l-sweep, .m50-bloom, .m50-bloom-wide
+) { animation: none !important; }
+@media (prefers-reduced-motion: no-preference) {
+  body[data-render-mode="idle"][data-skin="classic"]:not([data-status="error"]) .coils,
+  body[data-render-mode="idle"][data-skin="jarvis"]:not([data-status="error"]) .m50-l-outer {
+    animation: spin calc(var(--spin, 9s) * 1.8) steps(480, end) infinite !important;
+  }
+  body[data-render-mode="idle"][data-skin="classic"]:not([data-status="error"]) :is(.turbine, .gear.g2, .gear.g4),
+  body[data-render-mode="idle"][data-skin="jarvis"]:not([data-status="error"]) .m50-l-mid {
+    animation: spin-reverse calc(var(--spin, 9s) * 2.3) steps(480, end) infinite !important;
+  }
+  body[data-render-mode="idle"][data-skin="jarvis"] .m50-l-outer {
+    filter:
+      hue-rotate(var(--m50-hue, 0deg))
+      contrast(var(--m50-contrast, 1))
+      saturate(var(--m50-sat, 1.15));
+  }
+}
+body[data-render-mode="idle"][data-idle-phase="1"] .m50-bloom { opacity: calc(0.50 + var(--level) * 0.32); }
+body[data-render-mode="idle"][data-idle-phase="1"] .m50-bloom-wide { opacity: calc(0.36 + var(--level) * 0.28); }
 
 
 /* ---- 7b. layered image skins -------------------------------------------
@@ -583,7 +645,8 @@ body:not([data-skin="mark50"]):not([data-skin="jarvis"]) #orb50 { display: none;
     saturate(calc(var(--m50-sat, 1.15) * 1.05))
     blur(calc(var(--size) * 0.028))
     drop-shadow(0 0 calc(var(--size) * 0.045) var(--glow));
-  opacity: calc(0.54 + var(--level) * 0.4);
+  --bloom-base: 0.54;
+  opacity: calc(var(--bloom-base) + var(--level) * 0.4);
   transition: opacity 140ms ease-out, filter 420ms ease;
   animation: m50-breathe var(--spin, 9s) ease-in-out infinite;
 }
@@ -611,7 +674,8 @@ body:not([data-skin="mark50"]):not([data-skin="jarvis"]) #orb50 { display: none;
     brightness(2.15)
     saturate(calc(var(--m50-sat, 1.15) * 1.15))
     blur(calc(var(--size) * 0.05));
-  opacity: calc(0.4 + var(--level) * 0.34);
+  --bloom-base: 0.40;
+  opacity: calc(var(--bloom-base) + var(--level) * 0.34);
   transform: scale(1);
   transition: opacity 160ms ease-out, filter 420ms ease;
   animation: m50-breathe calc(var(--spin, 9s) * 1.15) ease-in-out infinite;
@@ -652,9 +716,22 @@ body:is([data-skin="mark50"], [data-skin="jarvis"])[data-status="error"]     { -
  * itself, which are already the right shape. That is what .m50-bloom-wide is
  * for, and dropping this layer also makes the skin cheaper to composite. */
 
+/* Breathe on opacity, not filter.
+ *
+ * These keyframes used to set `filter: brightness(...)`, which REPLACES the
+ * element's whole filter chain while the animation runs — and it runs
+ * permanently. The bloom's blur, hue-rotate, saturate and drop-shadow were all
+ * being discarded; computed style during listening was literally
+ * `brightness(1)`. So the glow was neither blurred nor tinted, and every frame
+ * paid to re-filter the image anyway.
+ *
+ * Opacity leaves the filter chain alone (it now actually applies, rasterised
+ * once) and is a compositor property, so the breathing itself is free. The
+ * --level term is kept inside the keyframes so the bloom still rides the live
+ * mic level instead of the animation overriding it. */
 @keyframes m50-breathe {
-  0%, 100% { filter: brightness(1); }
-  50%      { filter: brightness(1.28); }
+  0%, 100% { opacity: calc(var(--bloom-base, 0.5) + var(--level) * 0.4); }
+  50%      { opacity: calc(var(--bloom-base, 0.5) + 0.22 + var(--level) * 0.4); }
 }
 
 /* Thinking reads as a slow scan rather than a spin — the model has a fixed

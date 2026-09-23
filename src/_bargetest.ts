@@ -16,6 +16,7 @@ const BARGE_BLOCK_MS = 1500;
 const MS_PER_FRAME = 32;
 const SPEECH_THRESHOLD = 164; // representative value from the live mic
 const ROOM_NOISE = 60; // idle noise floor the peak estimate starts from
+const ECHO_PEAK_DECAY = 0.99945; // ~40s half-life — see listener.ts's own comment
 
 /** Mirrors VoiceListener.watchForBargeIn, fed a sequence of frame levels. */
 function simulate(levels: number[]): { fired: boolean; atFrame: number } {
@@ -29,7 +30,7 @@ function simulate(levels: number[]): { fired: boolean; atFrame: number } {
 
     const bar = Math.max(echoPeak * BARGE_FACTOR, SPEECH_THRESHOLD);
     if (settling || rms < bar) {
-      echoPeak = Math.max(rms, echoPeak * 0.995);
+      echoPeak = Math.max(rms, echoPeak * ECHO_PEAK_DECAY);
     }
     if (settling) continue;
 
@@ -44,6 +45,45 @@ function simulate(levels: number[]): { fired: boolean; atFrame: number } {
 
 const rand = (base: number, spread: number) => base + (Math.random() - 0.5) * spread;
 const frames = (n: number, gen: (i: number) => number) => Array.from({ length: n }, (_, i) => gen(i));
+
+// Mirrors VoiceListener.setPaused's reset-vs-resume choice, from Sep 2026.
+// The full BARGE_BLOCK_MS settling window is sized for learning a brand-new
+// reply's volume from a standing start; reapplying it on every ordinary
+// sentence-boundary resume doesn't produce a wrong answer (the peak still
+// relearns fast within it either way) but it does mean Echo is deaf to a
+// REAL interruption for a full 1.5s after every such resume. Keeping the
+// peak the reply already earned and reopening only a brief settle catches a
+// genuine barge-in right after a resume much sooner, without introducing a
+// false one.
+const BARGE_RESUME_SETTLE_MS = 300;
+function simulateWithGap(levels: number[], gapAtFrame: number, resetOnResume: boolean): { fired: boolean; atFrame: number } {
+  let echoPeak = ROOM_NOISE;
+  let bargeFrames = 0;
+  let settleUntilFrame = Math.ceil(BARGE_BLOCK_MS / MS_PER_FRAME);
+
+  for (let i = 0; i < levels.length; i++) {
+    if (i === gapAtFrame) {
+      if (resetOnResume) {
+        echoPeak = ROOM_NOISE;
+        settleUntilFrame = i + Math.ceil(BARGE_BLOCK_MS / MS_PER_FRAME);
+      } else {
+        settleUntilFrame = i + Math.ceil(BARGE_RESUME_SETTLE_MS / MS_PER_FRAME);
+      }
+      bargeFrames = 0;
+    }
+    const rms = levels[i];
+    const settling = i < settleUntilFrame;
+    const bar = Math.max(echoPeak * BARGE_FACTOR, SPEECH_THRESHOLD);
+    if (settling || rms < bar) echoPeak = Math.max(rms, echoPeak * ECHO_PEAK_DECAY);
+    if (settling) continue;
+    if (rms >= bar) {
+      if (++bargeFrames >= BARGE_FRAMES) return { fired: true, atFrame: i };
+    } else if (bargeFrames > 0) {
+      bargeFrames--;
+    }
+  }
+  return { fired: false, atFrame: -1 };
+}
 
 interface Case {
   name: string;
@@ -121,6 +161,17 @@ const cases: Case[] = [
     levels: frames(40, () => 3000),
     expect: false,
   },
+  {
+    // Regression: a ~5s gap between sentences (a slow tool call, a longer
+    // breath) let the old fast decay (~4s half-life) forget how loud Echo
+    // had been, so returning to that SAME, ordinary volume afterwards looked
+    // like a new, louder voice and fired mid-reply. No pause/resume event
+    // needed — this is pure decay during a quiet stretch while still
+    // logically "speaking" (the player between sentences, or a breath).
+    name: "quiet gap between sentences, then the SAME volume resumes — must NOT self-trigger",
+    levels: [...frames(60, () => 650), ...frames(150, () => rand(50, 30)), ...frames(30, () => 650)],
+    expect: false,
+  },
 ];
 
 let pass = 0;
@@ -141,6 +192,41 @@ for (const c of cases) {
   } else {
     fail++;
     console.log(`  ✗ ${c.name}\n      fired ${fired}/${RUNS}, expected ${c.expect ? RUNS : 0}`);
+  }
+}
+
+console.log("\nSame-reply resume: real interruptions are caught, not just false ones prevented");
+{
+  // Sentence one plays normally; at frame 60 a natural sentence-boundary
+  // pause/resume happens, sentence two resumes at the same ordinary volume
+  // for a while — then, 20 frames (~640ms) into it, the user genuinely
+  // starts talking over it. That moment falls inside the OLD full 1.5s
+  // settle window (which unconditionally folds whatever is happening into
+  // the tracked peak, loud or not — the same known limit the "inside the
+  // block window" case above documents), so old settling ends only once the
+  // interruption has already been learned as if it were Echo's own voice,
+  // and it never catches it at all. The new, short settle has already
+  // closed by then, so it catches the interruption normally.
+  const levels = [...frames(60, () => 650), ...frames(20, () => 650), ...frames(60, () => 3000)];
+  const oldWay = simulateWithGap(levels, 60, true);
+  const newWay = simulateWithGap(levels, 60, false);
+  if (!oldWay.fired && newWay.fired) {
+    pass++;
+    console.log(`  ✓ the shorter settle catches a real interruption the full settle misses entirely (new fired at frame ${newWay.atFrame})`);
+  } else {
+    fail++;
+    console.log(`  ✗ expected old to miss it and new to catch it — old fired=${oldWay.fired}, new fired=${newWay.fired}`);
+  }
+
+  // And the ordinary case — resuming at the SAME volume as before — must
+  // still not fire under the new, shorter settle either.
+  const ordinary = simulateWithGap([...frames(60, () => 650), ...frames(60, () => 650)], 60, false);
+  if (!ordinary.fired) {
+    pass++;
+    console.log("  ✓ resuming at the same volume still does not self-trigger with the shorter settle");
+  } else {
+    fail++;
+    console.log("  ✗ resuming at the same volume self-triggered with the shorter settle");
   }
 }
 

@@ -1,8 +1,7 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { memoryRoot } from "./paths.js";
+import { dataRoot, memoryRoot } from "./paths.js";
 import { contentHash, matchesQuery, normalizedScope, sameScope, scopeMatches, suppressionMatches, writePolicy } from "./policy.js";
 import type { ForgetReceipt, ForgetRequest, MemoryChange, MemoryFilters, MemoryInput, MemoryObject, MemoryScope, SuppressionRule } from "./types.js";
 export * from "./types.js";
@@ -226,8 +225,8 @@ export class MemoryService {
   }
   /** Explicit, idempotent import. Deleted legacy IDs stay barred after future imports. */
   importLegacy(paths: { memoryFile?: string; episodicDir?: string; skillsFile?: string } = {}): { imported: number; skipped: number } {
-    const memoryFile = paths.memoryFile ?? join(homedir(), ".jarvis", "memory", "memories.jsonl");
-    const episodicDirectory = paths.episodicDir ?? process.env.JARVIS_EPISODIC_DIR ?? join(homedir(), ".jarvis", "episodic");
+    const memoryFile = paths.memoryFile ?? join(dataRoot(), "memory", "memories.jsonl");
+    const episodicDirectory = paths.episodicDir ?? process.env.JARVIS_EPISODIC_DIR ?? join(dataRoot(), "episodic");
     const result = { imported: 0, skipped: 0 };
     const importSource = (path: string, records: MemoryInput[]) => {
       if (!existsSync(path) || this.load().imports.includes(path)) return;

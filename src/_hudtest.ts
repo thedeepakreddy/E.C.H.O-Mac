@@ -41,5 +41,17 @@ ok(css.includes('[data-away="yes"]'), "away state has styling");
 ok(js.includes("dataset.away"), "away state is set by the renderer");
 ok(/opacity/.test(css.split('[data-away="yes"]')[1] ?? ""), "away styling actually dims the reactor");
 
+// Idle is still alive, but it must not continuously repaint the transparent
+// always-on-top window at the display refresh rate.
+ok(css.includes('[data-render-mode="idle"]'), "idle mode has a compositor-throttling rule");
+const idleGovernor = /body\[data-render-mode="idle"\]\s*:is\(([^)]+)\)/.exec(css)?.[1] ?? "";
+ok(/\.coils/.test(idleGovernor) && /\.m50-l-outer/.test(idleGovernor), "idle governor removes continuous animation from mechanical reactor layers");
+ok(/\.core/.test(idleGovernor) && /\.m50-bloom/.test(idleGovernor), "idle governor still pauses expensive flicker and bloom layers");
+ok(css.includes('[data-skin="classic"]:not([data-status="error"]) .coils') && css.includes('[data-skin="jarvis"]:not([data-status="error"]) .m50-l-outer'), "idle reactor keeps the visible outer ring rotating smoothly");
+ok(css.includes('[data-skin="jarvis"]:not([data-status="error"]) .m50-l-mid') && css.includes("spin-reverse"), "idle reactor keeps its secondary ring counter-rotating");
+ok(css.includes("steps(480, end) infinite !important"), "idle ring rotation keeps a smooth approximately 30 fps cadence");
+ok(js.includes("5000") && js.includes("lastLevelPaintAt"), "idle microphone glow updates are throttled");
+ok(js.includes("6000") && js.includes("dataset.idlePhase"), "idle glow advances at a low discrete cadence");
+
 console.log(`\n${pass}/${pass + fail} HUD wiring checks passed\n`);
 process.exit(fail ? 1 : 0);

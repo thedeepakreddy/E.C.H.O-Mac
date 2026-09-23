@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readdir, unlink } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { writeWav } from "./wav.js";
 import type { JarvisConfig } from "../config.js";
@@ -39,8 +40,21 @@ const MS_PER_FRAME = (FRAME_LENGTH / SAMPLE_RATE) * 1000; // ~32ms
  * (see vad.ts) it decides speech/not-speech per frame instead, and the level
  * maths below only drives the reactor's glow.
  */
-const SPEECH_FACTOR = 2.5; // speech = this many times the rolling noise floor
-const MIN_SPEECH_RMS = 110; // absolute floor, so a silent room can't self-trigger
+export const SPEECH_FACTOR = 2.5; // speech = this many times the rolling noise floor
+export const MIN_SPEECH_RMS = 110; // absolute floor, so a silent room can't self-trigger
+
+/**
+ * The level the listener would call speech, given a measured noise floor.
+ *
+ * Exported so `npm run miccheck` reports what the app ACTUALLY uses. It had its
+ * own hardcoded 550 — the value this adaptive rule replaced — so on a quiet
+ * microphone it announced "speech is never detected" about a threshold nothing
+ * has used for a long time, and recommended a number the listener was already
+ * computing by itself. A diagnostic that drifts from the thing it diagnoses is
+ * worse than none.
+ */
+export const speechThresholdFor = (noiseFloor: number): number =>
+  Math.max(MIN_SPEECH_RMS, noiseFloor * SPEECH_FACTOR);
 const INITIAL_NOISE_FLOOR = 60;
 
 /**
@@ -60,6 +74,19 @@ const INITIAL_NOISE_FLOOR = 60;
  * stretch of speech is the user by construction and the VAD alone decides.
  */
 const BARGE_FACTOR = 1.6; // how far above Echo's own peak the user has to be
+/**
+ * Per-frame decay of the tracked echo peak, without hardware echo
+ * cancellation. At the old 0.995 (~4s half-life), any ordinary quiet moment
+ * in Echo's OWN delivery — a comma, a breath, a beat before the next clause —
+ * let the tracked peak drift down within a couple of seconds, so a perfectly
+ * normal return to Echo's usual volume right after looked like an unknown,
+ * louder voice and fired a barge-in mid-reply, with the model's own
+ * already-complete answer never fully spoken. ~40s half-life keeps the peak
+ * close to "the loudest Echo has actually been this reply" through any
+ * pause that fits inside one, while still forgetting a one-off transient
+ * (a loud sound effect, a door) over the course of a longer session.
+ */
+const ECHO_PEAK_DECAY = 0.99945;
 const BARGE_FRAMES = 6; // ~192ms sustained, so a cough or click doesn't cut in
 const BARGE_FRAMES_AEC = 8; // ~256ms of VAD-confirmed speech on a cancelled stream
 /**
@@ -69,6 +96,23 @@ const BARGE_FRAMES_AEC = 8; // ~256ms of VAD-confirmed speech on a cancelled str
  * on an echo-cancelled stream, where playback never reaches us at all.
  */
 const BARGE_BLOCK_MS = 1500;
+/**
+ * A pause-then-resume within this long of each other is the SAME reply
+ * still going — a natural gap between sentences while the next chunk of
+ * audio is still being synthesised, not Echo starting to speak fresh. The
+ * full BARGE_BLOCK_MS settling window exists to give the peak time to learn
+ * a brand-new reply's volume from a standing start (room noise); reapplying
+ * the whole thing on every routine resume doesn't cause wrong answers — the
+ * peak still relearns fast enough within it — but it does mean Echo is deaf
+ * to a real interruption for a full 1.5s after every ordinary sentence
+ * boundary. This keeps the peak the reply already established (no relearning
+ * needed) and reopens only a brief settle, so a genuine barge-in right after
+ * a sentence starts is caught quickly instead of being blocked by a window
+ * sized for a cold start that already happened once at the top of this reply.
+ */
+const BARGE_RESUME_WINDOW_MS = 4000;
+/** A short, not the full, settling grace period on a same-reply resume — long enough to smooth the transient, short enough not to blind barge-in for a real interruption right as Echo starts talking again. */
+const BARGE_RESUME_SETTLE_MS = 300;
 /**
  * Audio kept from before a capture starts. Long enough to hold the whole wake
  * word: an acoustic detector fires as the word ENDS, and the ~500 ms of "Echo"
@@ -134,6 +178,27 @@ export type EndpointHint = "punctuated" | "midclause" | null;
  *   'deaf'(wasDevice, nowDevice | null) — the input went silent and was rebound
  *   'bargein'(level, bar)
  */
+/** Captures are only needed while their turn is handled; the audio of a room must not pile up on disk. */
+export const CAPTURE_KEEP_MS = 5 * 60_000;
+
+/** Remove one capture once its turn can no longer need it. */
+export function scheduleCaptureCleanup(path: string, afterMs = CAPTURE_KEEP_MS): void {
+  if (!basename(path).startsWith("echo-utter-")) return;
+  setTimeout(() => void unlink(path).catch(() => {}), afterMs).unref?.();
+}
+
+/** Delete captures left behind by earlier runs (a crash, or builds that never deleted them). */
+export async function sweepOldCaptures(maxAgeMs = CAPTURE_KEEP_MS, dir = tmpdir()): Promise<number> {
+  let removed = 0;
+  const now = Date.now();
+  for (const name of await readdir(dir).catch(() => [] as string[])) {
+    const m = /^echo-utter-(\d+)\.wav$/.exec(name);
+    if (!m || now - Number(m[1]) < maxAgeMs) continue;
+    await unlink(join(dir, name)).then(() => removed++, () => {});
+  }
+  return removed;
+}
+
 export class VoiceListener extends EventEmitter {
   private source: FrameSource | null = null;
   private state: ListenerState = "idle";
@@ -167,6 +232,8 @@ export class VoiceListener extends EventEmitter {
   private echoPeak = 0;
   private speakingSince = 0;
   private bargeFrames = 0;
+  /** When capture was last resumed (Echo fell silent) — see setPaused(). */
+  private lastResumedAt = 0;
   private vadStartFrames = 0;
   private endpointHint: EndpointHint = null;
 
@@ -301,12 +368,21 @@ export class VoiceListener extends EventEmitter {
    */
   setPaused(paused: boolean) {
     if (paused && !this.paused) {
-      // Seed from the room's own noise level, NOT zero: on headphones Echo
-      // barely reaches the mic, and a zero seed let the user become the
-      // baseline instead of the interruption.
-      this.echoPeak = this.noiseFloor;
-      this.speakingSince = Date.now();
+      const sameReply = Date.now() - this.lastResumedAt < BARGE_RESUME_WINDOW_MS;
+      if (sameReply) {
+        // See BARGE_RESUME_WINDOW_MS: keep the peak this reply already
+        // established, just reopen a brief settling window on top of it.
+        this.speakingSince = Date.now() - (BARGE_BLOCK_MS - BARGE_RESUME_SETTLE_MS);
+      } else {
+        // A genuinely fresh reply — seed from the room's own noise level, NOT
+        // zero: on headphones Echo barely reaches the mic, and a zero seed
+        // let the user become the baseline instead of the interruption.
+        this.echoPeak = this.noiseFloor;
+        this.speakingSince = Date.now();
+      }
       this.bargeFrames = 0;
+    } else if (!paused && this.paused) {
+      this.lastResumedAt = Date.now();
     }
     this.paused = paused;
     if (paused && this.state === "capturing") {
@@ -708,7 +784,7 @@ export class VoiceListener extends EventEmitter {
     // candidate interruptions and must not raise the peak, or it would chase
     // your voice upward and the bar would outrun you.
     if (settling || rms < bar) {
-      this.echoPeak = Math.max(rms, this.echoPeak * 0.995); // decay ~4s half-life
+      this.echoPeak = Math.max(rms, this.echoPeak * ECHO_PEAK_DECAY);
     }
     if (settling) return;
 

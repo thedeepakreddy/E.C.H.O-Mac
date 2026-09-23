@@ -14,7 +14,12 @@ export function loadEnv(appRoot: string): string[] {
 
   const loaded: string[] = [];
   for (const raw of readFileSync(file, "utf8").split("\n")) {
-    const line = raw.trim();
+    // A leading "export " is common shell habit for a .env someone also
+    // `source`s directly. Without stripping it, the "key" becomes the literal
+    // text "export OPENAI_API_KEY" (space included) — a real key silently
+    // never reaches process.env under its real name, which surfaced as the
+    // control panel's API-keys panel reporting a configured key as "Not set".
+    const line = raw.trim().replace(/^export\s+/, "");
     if (!line || line.startsWith("#")) continue;
 
     const eq = line.indexOf("=");

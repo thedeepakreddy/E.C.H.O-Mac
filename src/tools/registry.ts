@@ -1,4 +1,5 @@
 import { z, ZodTypeAny } from "zod";
+import type { LocationFilter } from "./osiris-intel.js";
 import type { ToolResultMetadata } from "../memory/tool-result.js";
 import { normalizeToolOutput } from "../memory/tool-result.js";
 import { dataRoot } from "../memory/paths.js";
@@ -15,7 +16,8 @@ import { restore, describeRecent } from "../safety/snapshot.js";
 import { stats, GLOBAL } from "../memory/store.js";
 import { currentContext } from "../memory/context.js";
 import { getAppPath } from "../utils/appPath.js";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { activeConfig } from "../config.js";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { searchRewind, describeHistory } from "./rewind.js";
 import { loadRecent } from "../frontier/history.js";
@@ -402,8 +404,8 @@ export const TOOLS: ToolDef[] = [
           text: `No accessibility data for ${d.app}${d.error ? ` (${d.error})` : ""}. Take a screenshot and click by coordinates instead.`,
         };
       }
-      const matches = ax.rank(d.elements, a.description);
-      if (!matches.length) {
+      const scored = ax.rankScored(d.elements, a.description);
+      if (!scored.length) {
         return {
           text: `Nothing in ${d.app} matches "${a.description}". Elements available: ${d.elements
             .slice(0, 20)
@@ -412,18 +414,49 @@ export const TOOLS: ToolDef[] = [
             .join(", ")}. Or use a screenshot.`,
         };
       }
-      const el = matches[0];
+
+      // The critic (AGI blueprint #1): `rankScored` was computing exactly how
+      // well the top candidate fits and it used to be thrown away. Two shapes
+      // of a bad guess are visible in the scores alone, for free — no model
+      // call, no extra screen read, checked before anything is clicked rather
+      // than discovered afterwards from a failed screenshot:
+      //   weak     the only match is a single partial word overlap
+      //   ambiguous a strong second candidate is nearly as good as the first
+      if (activeConfig().agi.critic.enabled) {
+        const verdict = ax.criticVerdict(scored);
+        if (!verdict.ok) {
+          const candidates = scored.slice(0, 5)
+            .map((s) => `"${s.element.label || s.element.role.replace(/^AX/, "")}"${s.element.value ? ` (${s.element.value})` : ""}`)
+            .join(", ");
+          return {
+            text:
+              (verdict.reason === "weak"
+                ? `Not confident "${a.description}" is really on screen in ${d.app} — the best match is a weak, partial guess.`
+                : `"${a.description}" is ambiguous in ${d.app} — more than one control fits about equally well.`) +
+              ` Candidates, best first: ${candidates}. Call list_ui_elements to see the full picture, or take a screenshot, before clicking.`,
+            status: "failed",
+            verification: "unverified",
+            error: { category: "low_confidence", message: "the critic held this click back — the match was weak or ambiguous", retryable: true },
+          };
+        }
+      }
+
+      const el = scored[0].element;
       const where = `${el.role.replace(/^AX/, "")} "${el.label}"`;
 
       // Prefer AXPress — no mouse move, survives occlusion.
       if (el.press) {
         const r = await ax.press(d.pid, el.path);
-        if (r.ok) return { text: `Activated ${where} in ${d.app}.` };
+        if (r.ok) {
+          demo.noteStep({ kind: "click", target: a.description, role: el.role });
+          return { text: `Activated ${where} in ${d.app}.` };
+        }
       }
       // Fallback: click the element's centre.
       const cx = el.x + Math.round(el.w / 2);
       const cy = el.y + Math.round(el.h / 2);
       await act.click(cx, cy, "left");
+      demo.noteStep({ kind: "click", target: a.description, role: el.role });
       return { text: `Clicked ${where} at ${cx},${cy} in ${d.app}.` };
     },
   },
@@ -477,7 +510,11 @@ export const TOOLS: ToolDef[] = [
       "Type at the current keyboard focus, as if on the keyboard; newlines are sent as Return. Click the target field first so it has focus. Typing into a field that already has content APPENDS to it — to set a field to an exact value, use set_value, which clears what is there first.",
     schema: { text: z.string().describe("The exact text to type") },
     readOnly: false,
-    handler: async (a) => ({ text: await act.typeText(a.text) }),
+    handler: async (a) => {
+      const text = await act.typeText(a.text);
+      demo.noteStep({ kind: "type", text: a.text });
+      return { text };
+    },
   },
   {
     name: "press_keys",
@@ -498,9 +535,14 @@ export const TOOLS: ToolDef[] = [
         .describe("How many times to press the key"),
     },
     readOnly: false,
-    handler: async (a) => ({
-      text: await act.hotkey(a.modifiers ?? [], a.key, a.repeat ?? 1),
-    }),
+    handler: async (a) => {
+      const text = await act.hotkey(a.modifiers ?? [], a.key, a.repeat ?? 1);
+      // A workflow replays a shortcut once; "repeat" is how THIS call reached
+      // an effect a single press wouldn't (e.g. nudging a slider), which is a
+      // property of this invocation, not something to bake into a recording.
+      demo.noteStep({ kind: "keys", modifiers: a.modifiers ?? [], key: a.key });
+      return { text };
+    },
   },
   {
     name: "set_value",
@@ -540,6 +582,7 @@ export const TOOLS: ToolDef[] = [
     handler: async (a) => {
       const s = Math.min(15, Math.max(0.2, a.seconds ?? 1.5));
       await new Promise((r) => setTimeout(r, s * 1000));
+      demo.noteStep({ kind: "wait", seconds: s });
       return { text: `waited ${s}s` };
     },
   },
@@ -548,7 +591,11 @@ export const TOOLS: ToolDef[] = [
     description: "Open (or focus) a macOS application by name, e.g. 'Safari', 'Google Chrome', 'Visual Studio Code', 'Mail'.",
     schema: { name: z.string() },
     readOnly: false,
-    handler: async (a) => ({ text: await act.openApp(a.name) }),
+    handler: async (a) => {
+      const text = await act.openApp(a.name);
+      demo.noteStep({ kind: "open", app: a.name });
+      return { text };
+    },
   },
   {
     name: "open_url",
@@ -608,7 +655,7 @@ export const TOOLS: ToolDef[] = [
         // per tick, so it does not stutter.
         const watcherTts = new Tts(
           cfg.voice.ttsVoice, cfg.voice.ttsEnabled, cfg.voice.ttsEngine, cfg.voice.elevenLabsVoiceId,
-          undefined, { speaker: cfg.voice.sarvamSpeaker, pace: cfg.voice.sarvamPace }
+          undefined, { speaker: cfg.voice.sarvamSpeaker, pace: cfg.voice.sarvamPace }, cfg.voice.piperVoice
         );
         const host = (cfg.ollama.host || "http://localhost:11434").replace(/\/$/, "");
 
@@ -858,6 +905,45 @@ TOOLS.push(
       const scope = await memoryScope(a.project);
       const command = a.id ? `/memory why ${a.id}` : `/memory inspect ${a.query ?? ""}`.trim();
       return { text: executeMemoryCommand(command, { scope, appRoot: appRoot() }) ?? "Memory inspection is unavailable." };
+    },
+  },
+  {
+    name: "check_agents",
+    description:
+      "Check on the agent board or background agents you have dispatched (spawn_subagent, or a board run from the control panel): their status and what each one actually found or produced. Call this whenever the user asks what an agent found, whether a task finished, or refers to work you delegated — their real report is here, do not guess at it or say you don't know before checking. Omit missionId to see every board from this session.",
+    schema: {
+      missionId: z.string().optional().describe("One specific board/mission id, from an earlier check_agents call. Omit to see all of them."),
+    },
+    readOnly: true,
+    handler: async (a) => {
+      const { swarm } = await import("../frontier/swarm.js");
+      const missions = a.missionId
+        ? [swarm.getMission(a.missionId)].filter((m): m is NonNullable<typeof m> => !!m)
+        : swarm.listMissions();
+      if (!missions.length) {
+        return { text: a.missionId ? `No board or mission with id "${a.missionId}".` : "No agents have been dispatched this session." };
+      }
+      const live = new Map(swarm.list().map((c) => [c.name, c.progress]));
+      const describeTask = (id: string, task: (typeof missions)[number]["tasks"][string]) => {
+        const label = task.actorName || id;
+        if (task.status === "working") {
+          const progress = task.actorName ? live.get(task.actorName) : undefined;
+          return `  • ${label}: still working${progress ? ` — "${progress}"` : ""}`;
+        }
+        if (task.status === "pending") return `  • ${label}: queued, waiting on ${(task.dependsOn ?? []).join(", ") || "nothing"}`;
+        if (task.status === "blocked") return `  • ${label}: blocked (${task.result?.blockers?.join(", ") ?? "unresolved dependency"})`;
+        const r = task.result;
+        const artifacts = (r?.artifacts ?? [])
+          .filter((x) => x.kind === "text" && x.value)
+          .map((x) => `\n      ${x.label ? `${x.label}: ` : ""}${x.value.slice(0, 4000)}`)
+          .join("");
+        return `  • ${label} [${task.status}]: ${r?.summary ?? "no summary submitted"}${artifacts}`;
+      };
+      const lines = missions.map((m) => {
+        const tasks = Object.entries(m.tasks).map(([id, t]) => describeTask(id, t as any));
+        return `Board "${m.goal}" (id: ${m.id}, ${m.status}):\n${tasks.join("\n")}`;
+      });
+      return { text: lines.join("\n\n") };
     },
   },
   {
@@ -1395,6 +1481,96 @@ TOOLS.push(
     },
   },
   {
+    name: "open_intel",
+    description:
+      "Query a live open-intelligence source and answer out loud. Sources: " +
+      "`satellites` (CelesTrak + SGP4 — where a satellite is now and when it next passes overhead, e.g. \"ISS over Hyderabad\"), " +
+      "`news` (GDELT — world coverage of any topic in 100+ languages), " +
+      "`nearby` (OpenStreetMap — what is actually around a point: pharmacy, hospital, ATM, cafe, fuel, supermarket, park, station), " +
+      "`network` (RIPEstat — who owns an IP or AS number and what they announce), " +
+      "`exploited` (CISA KEV — vulnerabilities confirmed exploited in the wild, optionally filtered by vendor or product). " +
+      "Use for questions about satellites or passes overhead, world news on a topic, what is near a place, who owns an address or network, and which vulnerabilities are actively exploited. " +
+      "This is separate from show_osiris: that opens a map, this answers a question.",
+    schema: {
+      source: z
+        .string()
+        .describe("Which source: satellites, news, nearby, network, or exploited. Spoken aliases also work (passes, headlines, near me, who owns, kev)."),
+      query: z
+        .string()
+        .optional()
+        .describe(
+          "The argument for that source. satellites: a name or NORAD id, optionally 'over <place>'. news: a topic. " +
+          "nearby: what to find, optionally 'near <place>'. network: an IP, prefix or AS number. exploited: an optional vendor/product/CVE filter."
+        ),
+    },
+    readOnly: true,
+    handler: async (a) => {
+      const { resolveIntelSource, intelSourceNames, recordIntel } = await import("./intel-feeds.js");
+      const source = resolveIntelSource(String(a.source ?? ""));
+      if (!source) {
+        return { text: `I don't have an intel source called "${a.source}". I have: ${intelSourceNames()}.`, status: "failed" };
+      }
+      const query = a.query ? String(a.query) : "";
+      try {
+        const answer = await source.run(query || undefined, {});
+        recordIntel({ label: source.label, query, answer: answer.speak, ok: true });
+        return { text: answer.speak, data: answer.data as any };
+      } catch (err: any) {
+        // Named, not swallowed: these are five different services and knowing
+        // WHICH one is unreachable is most of the diagnosis. The failure is
+        // recorded too — a card that only ever shows successes hides exactly
+        // the thing worth noticing.
+        const why = String(err?.message ?? err);
+        recordIntel({ label: source.label, query, answer: why, ok: false });
+        return { text: `${source.label} is unavailable: ${why}`, status: "failed" };
+      }
+    },
+  },
+  {
+    name: "web_search",
+    description:
+      "Search the web privately through the user's own SearXNG and get the results back as data — titles, links and snippets merged from several engines, no API key. " +
+      "Use whenever you need facts from the web: current events, documentation, prices, how-tos, anything you would otherwise open a browser for. " +
+      "Prefer this over opening a search page in the browser when you only need to READ results. Use category \"news\" with a timeRange for recent events.",
+    schema: {
+      query: z.string().min(1).describe("What to search for."),
+      category: z.string().optional().describe("Optional: general (default), news, it, science, videos, images, map."),
+      timeRange: z.string().optional().describe("Optional: day, week, month or year — only results from that recent window."),
+      limit: z.number().int().min(1).max(15).optional().describe("How many results, default 6."),
+    },
+    readOnly: true,
+    handler: async (a) => {
+      const { webSearch, withAutostart } = await import("./selfhosted.js");
+      try {
+        const r = await withAutostart("searxng", appRoot(), () =>
+          webSearch({ query: String(a.query), category: a.category, timeRange: a.timeRange, limit: a.limit }));
+        return { text: r.text, data: { hits: r.hits } as any };
+      } catch (err: any) {
+        return { text: `Web search failed: ${err?.message ?? err}`, status: "failed" };
+      }
+    },
+  },
+  {
+    name: "system_sitrep",
+    description:
+      "A live situation report on this Mac from Glances: CPU and load, memory and swap, disk space, battery, uptime, the busiest processes, and active warnings. " +
+      "Use when the user asks how the machine is doing, why it is slow or hot, what is eating CPU or memory, how much disk is left, or for a status or sitrep.",
+    schema: {
+      sortBy: z.enum(["cpu", "memory"]).optional().describe("Rank the busiest processes by cpu (default) or memory."),
+    },
+    readOnly: true,
+    handler: async (a) => {
+      const { systemSitrep, withAutostart } = await import("./selfhosted.js");
+      try {
+        const r = await withAutostart("glances", appRoot(), () => systemSitrep(a.sortBy === "memory" ? "memory" : "cpu"));
+        const { text, ...data } = r;
+        return { text, data: data as any };
+      } catch (err: any) {
+        return { text: `No sitrep: ${err?.message ?? err}`, status: "failed" };
+      }
+    },
+  },
+  {
     name: "show_osiris",
     description:
       "Open (or close) the Osiris panel — the live global intelligence grid: a 3D world map layered with real-time flights, earthquakes, fires, satellites, CCTV cameras, undersea cables, conflict zones and 24/7 news. Use when the user asks to see the world map, the globe, global intelligence, OSINT, what's happening in the world, or Osiris by name. THE PANEL STAYS ON SCREEN until they ask to close it — never close it as tidying up, only when they say so. Pass layers to open it already showing something specific.",
@@ -1498,15 +1674,23 @@ TOOLS.push(
   {
     name: "osiris_intel",
     description:
-      "Read a live Osiris intelligence feed and answer out loud — earthquakes, air traffic, fires, the OSINT news feed, satellites, conflict zones, space weather, severe weather, cyber threats, or an overall grid status. Use whenever the user asks what's happening in the world, whether anything has happened (a quake, a fire, a conflict), or for a world briefing. This reads data and does not need the panel open.",
+      "Read a live Osiris intelligence feed and answer out loud — earthquakes, air traffic, fires, the OSINT news feed, satellites, conflict zones, space weather, severe weather, cyber threats, or an overall grid status. Use whenever the user asks what's happening in the world, whether anything has happened (a quake, a fire, a conflict), or for a world briefing. Pass `place` when they asked about somewhere specific ('earthquakes near Tokyo', 'what's happening in Ukraine') so the report is narrowed to there instead of the whole planet — status, satellites, space weather and cyber threats aren't broken down by place and say so rather than silently ignoring it. This reads data and does not need the panel open.",
     schema: {
       feed: z
         .string()
         .describe("Which feed: status, earthquakes, flights, fires, news, satellites, conflicts, space_weather, weather, or cyber."),
+      place: z
+        .string()
+        .optional()
+        .describe("Narrow the report to near this place — a city, country, region or landmark, as the user said it."),
+      radiusKm: z
+        .number()
+        .optional()
+        .describe("How far from the place still counts as near it. Defaults to 350km; widen it for a whole country or region, narrow it for a single city."),
     },
     readOnly: true,
     handler: async (a) => {
-      const { resolveFeed, osirisFetch, summarize, activeBase, FEEDS } = await import("./osiris-intel.js");
+      const { resolveFeed, osirisFetch, summarize, activeBase, FEEDS, geocodePlace, DEFAULT_RADIUS_KM } = await import("./osiris-intel.js");
       const feed = resolveFeed(a.feed ?? "status");
       if (!feed) {
         return { text: `I don't have a feed called "${a.feed}". I can read ${FEEDS.map((f) => f.id).join(", ")}.` };
@@ -1519,6 +1703,15 @@ TOOLS.push(
       const base = osiris.osirisBase() ?? (await activeBase());
       const relay = osiris.isOsirisOpen() ? osiris.relayFetch : undefined;
 
+      const place = String(a.place ?? "").trim();
+      let filter: LocationFilter | undefined;
+      let placeMissed = "";
+      if (place) {
+        const coords = await geocodePlace(place, { base, relay });
+        if (coords) filter = { ...coords, radiusKm: a.radiusKm ?? DEFAULT_RADIUS_KM, label: place };
+        else placeMissed = ` I couldn't place "${place}", so here's the global picture instead.`;
+      }
+
       let data: any;
       try {
         data = await osirisFetch(feed.path, { base, relay });
@@ -1526,12 +1719,13 @@ TOOLS.push(
         return { text: `I couldn't read the ${feed.label} feed — ${e?.message ?? e}.` };
       }
 
-      const summary = summarize(feed.id, data);
+      const summary = summarize(feed.id, data, filter);
       sendToOverlay("show-data-pane", {
-        title: `OSIRIS · ${feed.label.toUpperCase()}`,
+        title: `OSIRIS · ${feed.label.toUpperCase()}${filter ? ` · ${place.toUpperCase()}` : ""}`,
         content: summary.html,
         duration: 30000,
       });
+      if (placeMissed) return { text: summary.speech + placeMissed };
       return { text: summary.speech };
     },
   },
@@ -1590,7 +1784,7 @@ TOOLS.push(
   {
     name: "show_neural_core",
     description:
-      "Open (or close) a 3D visual of Echo's own neural core — a spiral galaxy with a glowing core and clusters of data orbiting it. Use when the user asks to see your core, your neural schema, your mind, your brain, or 'show me your galaxy'.",
+      "Open (or close) Echo's neural core: a live synaptic field where signals fire along the real dendrites of a neuron map, at a rate that tracks what Echo is doing. Use when the user asks to see your core, your neural schema, your mind, your brain, or your neurons firing.",
     schema: {
       show: z.boolean().optional().describe("true to open (default), false to close."),
     },
@@ -1602,7 +1796,7 @@ TOOLS.push(
         return { text: "Closed the neural core." };
       }
       openNeuralCore();
-      return { text: "This is my neural core — a galaxy of the data I hold, turning around its centre." };
+      return { text: "This is my neural core — every signal you see is firing along a real neuron, and it runs hotter the harder I am working." };
     },
   },
   {
@@ -1731,22 +1925,62 @@ TOOLS.push(
   },
   {
     name: "run_terminal_command",
-    description: "Run an arbitrary bash command in the background. Use this for 'Agentic' coding, building projects, testing code, creating folders, or executing scripts.",
+    description:
+      "Run an arbitrary bash command in the background. Use this for 'Agentic' coding, building projects, testing code, creating folders, or executing scripts. " +
+      "For a git repository, prefer create_worktree to try something before touching the real checkout. " +
+      "For a non-git directory, pass sandbox:true to run the SAME way — against an isolated copy — for a command you are not sure about (an installer, a generator, an untested script).",
     schema: {
       command: z.string().describe("The bash command to run."),
       cwd: z.string().optional().describe("The working directory. Defaults to the Jarvis app path."),
+      sandbox: z
+        .boolean()
+        .optional()
+        .describe(
+          "Run against an ISOLATED COPY of cwd instead of the real directory — nothing here can touch the user's actual files. " +
+            "For a git repo, use create_worktree instead, which does the same thing properly (a real branch, mergeable). " +
+            "Reports where the copy lives, so you can inspect it or copy changes back yourself once you're confident."
+        ),
     },
     readOnly: false,
     handler: async (a) => {
+      const realCwd = a.cwd || getAppPath();
+      let runCwd = realCwd;
+      let sandboxPath: string | null = null;
+
+      if (a.sandbox) {
+        const { tmpdir } = await import("node:os");
+        const { randomUUID } = await import("node:crypto");
+        const { execFile } = await import("node:child_process");
+        sandboxPath = join(tmpdir(), `echo-sandbox-${randomUUID()}`);
+        try {
+          mkdirSync(sandboxPath, { recursive: true });
+          // execFile with an argument array, not a shell string: realCwd is
+          // arbitrary model-supplied text, and cp's own "/." suffix (copy this
+          // directory's CONTENTS) needs no shell globbing to work.
+          await new Promise<void>((resolve, reject) => {
+            execFile("/bin/cp", ["-R", `${realCwd}/.`, `${sandboxPath}/`], (err) => (err ? reject(err) : resolve()));
+          });
+          runCwd = sandboxPath;
+        } catch (err: any) {
+          return {
+            text: `Could not set up the sandbox copy: ${err?.message ?? err}. Nothing was run.`,
+            status: "failed",
+            error: { category: "filesystem", message: String(err?.message ?? err) },
+          };
+        }
+      }
+
       return new Promise((resolve) => {
-        exec(a.command, { cwd: a.cwd || getAppPath() }, (error, stdout, stderr) => {
+        exec(a.command, { cwd: runCwd }, (error, stdout, stderr) => {
           let output = "";
+          if (sandboxPath) output += `[ran in an isolated copy — the real directory (${realCwd}) was not touched: ${sandboxPath}]\n`;
           if (stdout) output += `STDOUT:\n${stdout}\n`;
           if (stderr) output += `STDERR:\n${stderr}\n`;
           if (error) output += `ERROR:\n${error.message}\n`;
+          if (sandboxPath) output += `\nReview the sandbox at ${sandboxPath}, or copy specific files back once you trust the result — nothing is applied automatically.`;
           resolve({ text: output.trim() || "Command executed successfully with no output.",
             status: error ? "failed" : "success", verification: "unverified",
-            data: { exitCode: error?.code ?? 0, stdout, stderr },
+            data: { exitCode: error?.code ?? 0, stdout, stderr, sandboxPath },
             ...(error ? { error: { category: "process_exit", message: error.message, retryable: false } } : {}) });
         });
       });
@@ -1951,16 +2185,12 @@ TOOLS.push(
     readOnly: false,
     handler: async (a) => {
       const { loadConfig } = await import("../config.js");
-      const { createBrain } = await import("../brain/index.js");
+      const { makeFleetBrain } = await import("../frontier/fleet-brain.js");
       const { swarm } = await import("../frontier/swarm.js");
       const cfg = loadConfig(appRoot());
       const goal = `${a.taskDescription}\nRequested worker label: ${a.agentName}`;
       const result = swarm.spawn(goal, {
-        makeBrain: (identity, task) => createBrain(cfg, {
-          identity,
-          maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
-          limits: { maxIterations: task?.budget.maxIterations },
-        }).brain as any,
+        makeBrain: makeFleetBrain(cfg),
       });
       return result.ok
         ? { text: `${result.name} started. Its full run log and recovery checkpoint are active.` }
@@ -2109,14 +2339,14 @@ TOOLS.push(
           detail: `switch_brain to ${a.brain} — restarting the app on purpose`,
         });
 
-        setTimeout(() => {
+        setTimeout(async () => {
           // app.exit() force-terminates without firing will-quit, so tear down
           // here or this path orphans the camera helpers, the whisper server and
           // the `say` child — the very hole main.ts's spoken brain-switch avoids
           // by calling shutdown() directly. runShutdown() reaches that same
           // handler without importing main.ts (which would cycle). The old note
           // that it was "undefined" was only a missing import, now added above.
-          runShutdown();
+          await runShutdown();
           const el = electronApp();
           el?.relaunch();
           el?.exit(0);
@@ -2597,7 +2827,7 @@ TOOLS.push(
     readOnly: false,
     handler: async (a) => {
       const { loadConfig } = await import("../config.js");
-      const { createBrain } = await import("../brain/index.js");
+      const { makeFleetBrain } = await import("../frontier/fleet-brain.js");
       const { swarm } = await import("../frontier/swarm.js");
       const cfg = loadConfig(appRoot());
 
@@ -2608,11 +2838,7 @@ TOOLS.push(
         // Each clone is its own background brain; the swarm caps concurrency so
         // they can't trample each other over the single mouse and keyboard.
         const r = swarm.spawn(String(goal), {
-          makeBrain: (identity, task) => createBrain(cfg, {
-            identity,
-            maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
-            limits: { maxIterations: task?.budget.maxIterations },
-          }).brain as any,
+          makeBrain: makeFleetBrain(cfg),
         });
         if (r.ok) spawned++;
         else refusal = r.reason ?? "refused";
@@ -2634,7 +2860,7 @@ TOOLS.push(
         dependsOn: z.array(z.string()).default([]),
         lane: z.enum(["knowledge", "gui"]).default("knowledge"),
         acceptanceCriteria: z.array(z.string()).default([]),
-        profile: z.string().optional().describe("A short specialist name, such as Researcher or Verifier"),
+        profile: z.string().optional().describe("A fleet agent id — lead, research, plan, write, review, analyse, or one of the user's own agents. It sets that agent's brief, model tier and tool limits; any other text is only a display name."),
         timeoutMs: z.number().int().min(1_000).max(3_600_000).default(600_000),
         maxIterations: z.number().int().min(1).max(200).default(50),
         maxRecoveryAttempts: z.number().int().min(0).max(5).default(2),
@@ -2643,7 +2869,7 @@ TOOLS.push(
     readOnly: false,
     handler: async (args) => {
       const { loadConfig } = await import("../config.js");
-      const { createBrain } = await import("../brain/index.js");
+      const { makeFleetBrain } = await import("../frontier/fleet-brain.js");
       const { swarm } = await import("../frontier/swarm.js");
       const cfg = loadConfig(appRoot());
       const result = swarm.submitMission({
@@ -2663,11 +2889,7 @@ TOOLS.push(
           },
         })),
       }, {
-        makeBrain: (identity, task) => createBrain(cfg, {
-          identity,
-          maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
-          limits: { maxIterations: task?.budget.maxIterations },
-        }).brain as any,
+        makeBrain: makeFleetBrain(cfg),
       });
       return result.ok
         ? { text: `Mission ${result.missionId} started with ${args.tasks.length} Agent Task(s). Use inspect_agent_mission to read its Results.`, data: result }
@@ -2744,12 +2966,12 @@ TOOLS.push(
     readOnly: false,
     handler: async () => {
       const { exec } = await import("child_process");
-      exec("npm run build", { cwd: getAppPath() }, (err) => {
+      exec("npm run build", { cwd: getAppPath() }, async (err) => {
         if (err) {
           console.error("Build failed during restart:", err);
           return;
         }
-        runShutdown();
+        await runShutdown();
         const el = electronApp();
         el?.relaunch();
         el?.exit(0);
@@ -2981,7 +3203,7 @@ TOOLS.push(
       const { createBrain } = await import("../brain/index.js");
       const { loadConfig } = await import("../config.js");
       const cfg = loadConfig(appRoot());
-      
+
       const cronId = Date.now();
       const intervalMs = Math.max(1000, a.intervalSeconds * 1000);
       

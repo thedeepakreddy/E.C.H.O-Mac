@@ -1,6 +1,6 @@
 import { appendFile, mkdir, writeFile, unlink, readFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -8,6 +8,7 @@ import { scrubSecrets } from "../safety/redact.js";
 import { currentAgentRunContext } from "../agent-replay/context.js";
 import { currentInvocation } from "../memory/invocation.js";
 import { captureAllowed, deletionEpoch } from "../memory/capture-policy.js";
+import { dataRoot } from "../memory/paths.js";
 
 const run = promisify(execFile);
 
@@ -43,7 +44,7 @@ const run = promisify(execFile);
 // the real dataset. Without this the test could only run when no trajectories
 // existed — which stopped being true the moment the recorder was switched on,
 // leaving the one module that feeds DeepakLLM permanently untested.
-const DIR = process.env.JARVIS_TRAJECTORY_DIR || join(homedir(), ".jarvis", "trajectories");
+const DIR = process.env.JARVIS_TRAJECTORY_DIR || join(dataRoot(), "trajectories");
 const SCREENS = join(DIR, "screens");
 
 /** Which brain produced the action. Never train on "deepakllm". */

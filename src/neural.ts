@@ -6,8 +6,9 @@ const nodeRequire = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Echo's neural core: a star core with clusters of data orbiting it, shown when
- * the user asks to see Echo's "core" / "neural schema" / "mind".
+ * Echo's neural core: action potentials conducted along the real dendrites of a
+ * neuron micrograph, shown when the user asks to see Echo's "core" /
+ * "neural schema" / "mind".
  *
  * A SOLID (non-transparent) window on purpose — the same lesson as the orbital
  * panel: a transparent window hosting animated GPU content makes the compositor
@@ -65,4 +66,20 @@ export function closeNeuralCore(): void {
 
 export function isNeuralOpen(): boolean {
   return !!win && !win.isDestroyed();
+}
+
+/**
+ * Mirror a HUD channel into the neural window when it is open.
+ *
+ * The firing rate is meant to BE Echo's state, not a decoration of it, so the
+ * window rides the same `state` and `level` events the reactor does.
+ */
+export function forwardToNeural(channel: string, payload: unknown): void {
+  if (channel !== "state" && channel !== "level") return;
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.webContents.send(channel, payload);
+  } catch {
+    /* the window can go away mid-send; the next state will find it gone */
+  }
 }

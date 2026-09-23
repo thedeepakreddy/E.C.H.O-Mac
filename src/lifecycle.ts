@@ -11,7 +11,7 @@
  * module just hands other files a way to trigger it without importing main.ts
  * and creating a cycle.
  */
-type ShutdownFn = () => void;
+type ShutdownFn = () => void | Promise<void>;
 
 let handler: ShutdownFn | null = null;
 
@@ -19,9 +19,9 @@ export function setShutdownHandler(fn: ShutdownFn): void {
   handler = fn;
 }
 
-export function runShutdown(): void {
+export async function runShutdown(): Promise<void> {
   try {
-    handler?.();
+    await handler?.();
   } catch (err) {
     console.error("[jarvis] shutdown failed:", err);
   }

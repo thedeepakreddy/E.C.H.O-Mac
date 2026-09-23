@@ -211,5 +211,50 @@ else {
   console.log("  ✗ timeout should deny, not approve");
 }
 
+// ── a tool nobody wrote a rule for ────────────────────────────────────────
+//
+// The fallback used to be a flat `medium`, and medium runs with no
+// confirmation. That was a fair bet while an unrecognised tool was rare — and
+// it stops being one the moment an MCP aggregator is connected, because a
+// single server can add hundreds of tools at once, most of them writing to
+// something that matters. Measured before this rule existed: GMAIL_SEND_EMAIL,
+// GITHUB_DELETE_A_REPOSITORY, SUPABASE_EXECUTE_SQL and STRIPE_CREATE_PAYMENT
+// were ALL medium — Echo would have sent the mail, dropped the repo, run the
+// SQL and taken the payment without asking once.
+//
+// So an unknown tool is judged by the capability its name states. Same lesson
+// as `rm` vs `unlink`: name the capability, not the tool.
+console.log("\n  an unknown tool is judged by what its name says it does");
+{
+  const mustAsk = [
+    "GMAIL_SEND_EMAIL", "GMAIL_DELETE_MESSAGE", "GITHUB_DELETE_A_REPOSITORY",
+    "GITHUB_MERGE_A_PULL_REQUEST", "SUPABASE_EXECUTE_SQL", "SUPABASE_DELETE_PROJECT",
+    "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL", "STRIPE_CREATE_PAYMENT",
+    "GOOGLECALENDAR_DELETE_EVENT", "JIRA_TRANSFER_PROJECT", "AWS_TERMINATE_INSTANCE",
+    "VAULT_REVOKE_TOKEN", "HEROKU_DEPLOY_RELEASE",
+    // the same names in the other conventions a server might use
+    "githubDeleteRepo", "supabase.execute-sql", "mcp__composio__GMAIL_SEND_EMAIL",
+  ];
+  for (const n of mustAsk) check(`${n} asks first`, tier(n), "high");
+
+  const mayRun = [
+    "GITHUB_LIST_REPOSITORIES", "GMAIL_FETCH_EMAILS", "NOTION_SEARCH_PAGES",
+    "STRIPE_GET_BALANCE", "JIRA_DESCRIBE_ISSUE", "AWS_LIST_INSTANCES",
+  ];
+  for (const n of mayRun) check(`${n} just reads`, tier(n), "low");
+
+  // `\b` is useless on these names — `_` is a word character, so `\bsend\b`
+  // never matches inside GMAIL_SEND_EMAIL. This is the regression that check
+  // exists for.
+  check("an underscore name is tokenised, not regex-matched", tier("A_SEND_B"), "high");
+  check("a camelCase name is tokenised too", tier("aSendB"), "high");
+
+  // Worst match wins: a tool that lists AND deletes is a delete.
+  check("list and delete is a delete", tier("REPO_LIST_AND_DELETE_BRANCHES"), "high");
+
+  // And a name with no verb at all stays where it was: medium.
+  check("an unreadable name is still medium", tier("xyzzy_42"), "medium");
+}
+
 console.log(`\n${pass}/${pass + fail} risk checks passed\n`);
 process.exit(fail ? 1 : 0);

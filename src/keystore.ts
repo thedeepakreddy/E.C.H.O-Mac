@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "./memory/paths.js";
 
 /**
  * Where API keys live once Jarvis is an installed app.
@@ -15,7 +15,7 @@ import { join } from "node:path";
  * guarantee otherwise.
  */
 
-const DIR = join(homedir(), ".jarvis");
+const DIR = dataRoot();
 const FILE = join(DIR, "keys.env");
 
 export const keysPath = FILE;
@@ -61,6 +61,35 @@ export const KEY_FIELDS: KeyField[] = [
     label: "Picovoice",
     help: "A dedicated wake-word engine. Without it the name is detected from speech, which works fine.",
     url: "https://console.picovoice.ai",
+    optional: true,
+  },
+  {
+    env: "OPENAI_API_KEY",
+    label: "OpenAI",
+    help: "An alternative brain (GPT) you can switch to by voice.",
+    url: "https://platform.openai.com/api-keys",
+    optional: true,
+    looksValid: (v) => v.startsWith("sk-"),
+  },
+  {
+    env: "SARVAM_API_KEY",
+    label: "Sarvam",
+    help: "Speech recognition and text-to-speech for Indian languages, and the streaming voice pipeline.",
+    url: "https://dashboard.sarvam.ai",
+    optional: true,
+  },
+  {
+    env: "TELEGRAM_BOT_TOKEN",
+    label: "Telegram",
+    help: "Lets you message Echo from Telegram. Create a bot with @BotFather to get a token.",
+    url: "https://t.me/BotFather",
+    optional: true,
+  },
+  {
+    env: "TYPESAFE_API_KEY",
+    label: "TypeSafe (Jev)",
+    help: "A second opinion the risk gate asks before an irreversible click or shell command.",
+    url: "https://typesafe.ai",
     optional: true,
   },
 ];
@@ -127,4 +156,46 @@ export function needsSetup(): boolean {
   const keys = readKeys();
   const anyKey = KEY_FIELDS.some((f) => (keys[f.env] ?? process.env[f.env] ?? "").trim());
   return !anyKey;
+}
+
+/**
+ * Whether each known key is set right now, from EITHER source — the durable
+ * keystore or a real environment variable (typically a `.env` file loaded at
+ * startup). A key that only ever lived in `.env` still needs to show as
+ * "saved" here, or editing it through this UI would look like adding a
+ * brand-new key instead of what it actually is: taking over from `.env`.
+ */
+export function keyStatus(): Record<string, boolean> {
+  const keys = readKeys();
+  const status: Record<string, boolean> = {};
+  for (const f of KEY_FIELDS) status[f.env] = !!(keys[f.env] ?? process.env[f.env] ?? "").trim();
+  return status;
+}
+
+/**
+ * Save keys from a form where a blank field means "leave what is already
+ * saved" — the one piece of logic `setup.ts` and the control panel both need,
+ * now written once. Saved keys immediately win in THIS process too: `.env`
+ * only ever fills a gap at startup (see env.ts), so once someone has edited a
+ * key here it must not keep reading from a `.env` line that is now stale.
+ *
+ * Still true to the existing caveat: an already-constructed brain read its API
+ * key once, at startup, and does not notice `process.env` changing under it —
+ * switching brains or restarting is still what makes a NEW key actually used
+ * for that provider's calls. This only removes the "was it saved at all"
+ * confusion, not that deeper one.
+ */
+export function saveKeys(values: Record<string, string>): { count: number; changed: string[] } {
+  const existing = readKeys();
+  const merged: Record<string, string> = { ...existing };
+  const changed: string[] = [];
+  for (const f of KEY_FIELDS) {
+    const v = (values?.[f.env] ?? "").trim();
+    if (!v || v === existing[f.env]) continue;
+    merged[f.env] = v;
+    changed.push(f.env);
+  }
+  writeKeys(merged);
+  for (const env of changed) process.env[env] = merged[env];
+  return { count: Object.keys(merged).length, changed };
 }

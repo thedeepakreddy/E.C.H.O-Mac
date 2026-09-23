@@ -48,7 +48,7 @@
   "hud": {
     "startListeningOnLaunch": true
   },
-  "//memory": "The Memory OS. importLegacy folds the old memories.jsonl/episodic files in once (a copy; the originals stay). cloudRecall=false stops recalled memory being sent to a cloud brain — the current task's own state still is, and the local brain is unaffected. Screen/scan-derived and sensitive content is never sent to a cloud model either way. retentionDays expires consolidated episodes created after you switch it on; 0 keeps them until forgotten.",
+  "//memory": "The Memory OS. importLegacy folds the old memories.jsonl/episodic files in once (a copy; the originals stay). cloudRecall=false stops recalled memory being sent to a cloud brain \u2014 the current task's own state still is, and the local brain is unaffected. Screen/scan-derived and sensitive content is never sent to a cloud model either way. retentionDays expires consolidated episodes created after you switch it on; 0 keeps them until forgotten.",
   "memory": {
     "enabled": true,
     "importLegacy": true,
@@ -59,5 +59,55 @@
     "baseUrl": "",
     "preferLocal": true,
     "defaultLayers": []
+  },
+  "agi": {
+    "//": "Cost-effective AGI-blueprint features (Sep 2026). Every one degrades to its old/off behavior if its dependency (the local embedder, Ollama) is unavailable \u2014 none may be why a turn fails.",
+    "critic": {
+      "enabled": true,
+      "//": "Free, instant: click_ui_element holds back a click whose ax-tree match is weak or ambiguous instead of guessing."
+    },
+    "autoReflex": {
+      "enabled": true,
+      "//": "Notices a repeated request and offers (via a spoken yes/no) to save the fast path into the reflex cache."
+    },
+    "semanticReflex": {
+      "enabled": true,
+      "//": "The reflex cache also matches by meaning (local embedder), not only exact phrasing."
+    },
+    "confidenceToDemo": {
+      "enabled": true,
+      "failureThreshold": 2,
+      "//": "After N failed GUI actions in one task, offers to be shown once rather than keep guessing."
+    },
+    "dreamCompression": {
+      "enabled": true,
+      "//": "Once/day while idle, a free local model looks for generalisations across facts already promoted."
+    },
+    "curiosity": {
+      "enabled": false,
+      "//": "Off by default like every other background watcher. Read-only accessibility cataloguing of the frontmost app while away \u2014 never clicks anything."
+    },
+    "sandbox": {
+      "enabled": true,
+      "//": "run_terminal_command's sandbox:true option (isolated copy, non-git dirs) and create_worktree (git repos) \u2014 always available; this only documents the feature."
+    },
+    "toolPruning": {
+      "enabled": true,
+      "topK": 12,
+      "//": "Sends the K tools most relevant to this turn plus a fixed safety/memory allowlist, instead of the full registry, on Gemini/OpenAI/Ollama (Claude's tool list is SDK-managed)."
+    },
+    "speculative": {
+      "enabled": true,
+      "//": "Pre-warms the accessibility-tree read the moment a command is dispatched \u2014 single-use, ~1.2s TTL."
+    },
+    "escalation": {
+      "enabled": true,
+      "failureThreshold": 2,
+      "//": "After N failed turns in a row on the local Ollama model, switches to Claude for the next command and says so."
+    },
+    "feedback": {
+      "enabled": true,
+      "//": "A whole-utterance 'thanks' or 'that's wrong' is recorded as a scored memory (never rewrites the persona directly)."
+    }
   }
 }

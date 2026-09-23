@@ -74,6 +74,9 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
   private firstFrameAt = 0;
   private stopped = false;
   private disposed = false;
+  private recovering = false;
+  private restarts = 0;
+  private lastRestartAt = 0;
 
   constructor(private readonly bin: string, private readonly capture: boolean) {
     super();
@@ -91,32 +94,7 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
 
   async start(): Promise<void> {
     if (this.ready) return this.ready;
-    this.ready = new Promise<void>((resolve, reject) => {
-      this.readyResolve = resolve;
-      this.readyReject = reject;
-    });
-    const args = this.capture ? ["--capture"] : [];
-    this.proc = spawn(this.bin, args, { stdio: ["pipe", "pipe", "pipe"] });
-    this.proc.stdout!.on("data", (d: Buffer) => this.onData(d));
-    this.proc.stderr!.on("data", (d: Buffer) => {
-      const line = d.toString().trim();
-      if (line) console.log(`[voiceio] ${line}`);
-    });
-    this.proc.on("exit", (code) => {
-      if (!this.disposed) this.emit("exit", code);
-      this.readyReject?.(new Error(`voiceio exited (${code})`));
-      this.proc = null;
-    });
-    this.proc.on("error", (err) => {
-      this.emit("error", err.message);
-      this.readyReject?.(err);
-    });
-    const timeout = setTimeout(() => this.readyReject?.(new Error("voiceio did not report ready")), 4000);
-    try {
-      await this.ready;
-    } finally {
-      clearTimeout(timeout);
-    }
+    await this.launch(this.capture);
     if (this.capture) {
       // Voice processing that could not open the mic still reports ready, and
       // frames arriving is not proof either: measured on this machine, the unit
@@ -189,6 +167,87 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
     while (this.frames.length > 16) this.frames.shift();
   }
 
+  /** Spawn the helper and wait for its ready handshake. First start and recovery both come through here. */
+  private async launch(capture: boolean): Promise<void> {
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.readyResolve = resolve;
+      this.readyReject = reject;
+    });
+    const args = capture ? ["--capture"] : [];
+    this.proc = spawn(this.bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.proc.stdout!.on("data", (d: Buffer) => this.onData(d));
+    this.proc.stderr!.on("data", (d: Buffer) => {
+      const line = d.toString().trim();
+      if (line) console.log(`[voiceio] ${line}`);
+    });
+    this.proc.on("exit", (code) => {
+      this.proc = null;
+      this.ready = null;
+      if (this.disposed) return;
+      this.emit("exit", code);
+      this.readyReject?.(new Error(`voiceio exited (${code})`));
+      this.recover();
+    });
+    this.proc.on("error", (err) => {
+      this.emit("error", err.message);
+      this.readyReject?.(err);
+    });
+    const timeout = setTimeout(() => this.readyReject?.(new Error("voiceio did not report ready")), 4000);
+    try {
+      await this.ready;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * The helper died on its own — a crash, or the audio device changing under it
+   * (AirPods switching profile mid-sentence will do it).
+   *
+   * Nothing else brings it back: `send()` silently drops every write once the
+   * process is gone, so Echo stays MUTE until it is restarted, with one console
+   * line as the only evidence. That is exactly what happened when a typed
+   * command landed on top of a reply that was still playing.
+   *
+   * Recovery is playback-only on purpose. `--capture` takes the input device,
+   * and by now the plain recorder may own it — taking it back would trade a
+   * mute Echo for a deaf one.
+   */
+  private recover(): void {
+    if (this.disposed || this.recovering) return;
+    const now = Date.now();
+    if (now - this.lastRestartAt > 60_000) this.restarts = 0;
+    if (this.restarts >= 4) {
+      console.error("[voiceio] the player keeps dying — speech stays off until Echo restarts");
+      return;
+    }
+    this.recovering = true;
+    this.restarts++;
+    this.lastRestartAt = now;
+    if (this.aec) {
+      // The dead process was also the microphone; it is not coming back as one.
+      this.aec = false;
+      this.captureDead = true;
+      this.frameSource = null;
+      const waiters = this.frameWaiters.splice(0);
+      if (waiters.length) console.log("[voiceio] capture died with the player — hearing falls back to the plain recorder");
+    }
+    setTimeout(() => {
+      this.launch(false)
+        .then(() => {
+          this.rate = 0; // force a config message before the next sentence
+          this.playing = false;
+          this.stopped = false;
+          console.log(`[voiceio] player recovered after an unexpected exit (attempt ${this.restarts})`);
+          this.emit("recovered");
+        })
+        .catch((err: any) => console.error(`[voiceio] could not restart the player: ${err?.message ?? err}`))
+        .finally(() => {
+          this.recovering = false;
+        });
+    }, 150 * this.restarts);
+  }
+
   private send(type: number, payload: Buffer): void {
     if (!this.proc?.stdin?.writable) return;
     const head = Buffer.alloc(5);
@@ -202,7 +261,10 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
   }
 
   play(pcm: Buffer, sampleRate: number, _sentence: number): void {
-    if (!this.proc) return;
+    if (!this.proc) {
+      this.recover();   // this sentence is lost; the next one speaks
+      return;
+    }
     if (sampleRate !== this.rate) {
       this.rate = sampleRate;
       this.control({ cmd: "config", rate: sampleRate });

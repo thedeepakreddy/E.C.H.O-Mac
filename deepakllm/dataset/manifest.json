@@ -1,19 +1,19 @@
 {
-  "generatedAt": "2026-08-09T07:59:09.061Z",
-  "examples": 1057,
-  "examplesWithScreenshots": 296,
-  "uniqueScreenshots": 155,
+  "generatedAt": "2026-09-20T01:30:54.227Z",
+  "examples": 1146,
+  "examplesWithScreenshots": 300,
+  "uniqueScreenshots": 157,
   "droppedScreenshots": 0,
   "dropped": {
-    "unlabelled": 14,
-    "failed": 245,
+    "unlabelled": 16,
+    "failed": 369,
     "student": 0,
-    "refused": 19
+    "refused": 27
   },
   "sourceCounts": {
-    "gemini": 1139,
-    "claude": 192,
-    "ollama": 4
+    "gemini": 1335,
+    "claude": 218,
+    "ollama": 5
   },
   "imagePaths": "relative to this folder",
   "note": "Snapshot of ~/.jarvis/trajectories. Safe to copy anywhere."

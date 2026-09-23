@@ -1,7 +1,26 @@
 import { z } from "zod";
-import { classify, bareToolName, type RiskAssessment } from "./risk.js";
+import { classify, bareToolName, speakable, type RiskAssessment } from "./risk.js";
 import { capture } from "./snapshot.js";
+import { TypeSafeClient, noul } from "@typesafe-ai/sdk";
+
+let tsClient: TypeSafeClient | null = null;
+function getTsClient() {
+  if (!tsClient) tsClient = new TypeSafeClient();
+  return tsClient;
+}
+
+/** Above this yes-probability, Jev's answer escalates the tier to `high`. */
+const JEV_THRESHOLD = 0.5;
+/**
+ * One attempt, and a short one. The gate sits in front of every tool call, and
+ * the SDK's own default is 10s per attempt with two retries and no total
+ * budget — a sick API would stall each shell command for ~31s. Failing fast to
+ * the local classifier costs nothing, because Jev can only escalate.
+ */
+const JEV_TIMEOUT_MS = 2500;
 import { confirmations } from "./confirm.js";
+import { activeConfig } from "../config.js";
+import * as demo from "../frontier/demonstrate.js";
 import { observeAction } from "../frontier/observe.js";
 import { recordStep, captureGroundingFrame } from "../learn/trajectory.js";
 import { isReplaying, recordTool, recordToolDenied, takeReplayedTool } from "../agent-replay/runtime.js";
@@ -88,6 +107,54 @@ function rememberedDecision(key: string, now: number): boolean | null {
 /** Forget cached decisions. Used by tests, and whenever a turn ends. */
 export function resetGateMemory(): void {
   recent.clear();
+  guiFailureStreak.clear();
+  offeredDemo.clear();
+}
+
+/**
+ * AGI blueprint #4: confidence-driven human-in-the-loop. Physical UI actions
+ * — the ones a failure genuinely means "the click landed on the wrong thing",
+ * not "the file didn't exist" — that fail repeatedly in the SAME task are the
+ * signal: reusing `demonstrate.ts`'s existing recorder (the same one
+ * `learn_workflow` uses) rather than inventing a second one, Echo can ask to
+ * be shown rather than keep guessing. Declining just lets it keep trying.
+ */
+const GUI_TOOLS = new Set(["click_ui_element", "click_text", "click", "type_text", "set_value", "drag"]);
+const guiFailureStreak = new Map<string, number>();
+/** At most one offer per task — repeating "can you show me?" after a no is just noise. */
+const offeredDemo = new Set<string>();
+
+/** Called from executeGated once a GUI tool's outcome is known. Exported for tests, which drive it directly rather than fabricating a full AgentRunContext. */
+export function noteGuiOutcome(taskId: string | undefined, tool: string, succeeded: boolean): void {
+  if (!taskId || !GUI_TOOLS.has(bareToolName(tool))) return;
+  if (succeeded) guiFailureStreak.delete(taskId);
+  else guiFailureStreak.set(taskId, (guiFailureStreak.get(taskId) ?? 0) + 1);
+}
+
+/**
+ * Ask to be shown, once, when the same task has failed the same kind of
+ * action repeatedly. Returns true if it asked and the answer means the CALLER
+ * should stop and wait rather than execute — either "yes" (a demonstration is
+ * about to start) or "no" (declining also ends the offer for this task, but
+ * the current call still proceeds normally, so only "yes" holds it back).
+ */
+export async function maybeOfferDemo(toolName: string, taskId: string | undefined): Promise<boolean> {
+  const cfg = activeConfig().agi.confidenceToDemo;
+  if (!cfg.enabled || !taskId) return false;
+  if (!GUI_TOOLS.has(bareToolName(toolName))) return false;
+  if (offeredDemo.has(taskId)) return false;
+  if ((guiFailureStreak.get(taskId) ?? 0) < cfg.failureThreshold) return false;
+  if (demo.isRecording()) return false; // a demonstration (this or the user's own) is already under way
+
+  if (offeredDemo.size > 200) offeredDemo.clear(); // tasks are short-lived; this only guards a very long session
+  offeredDemo.add(taskId);
+  const approved = await confirmations
+    .request("I've tried this a couple of times without it working. Can you show me how, once?")
+    .catch(() => false);
+  if (!approved) return false;
+  demo.startRecording(`task ${taskId}`);
+  guiFailureStreak.delete(taskId);
+  return true;
 }
 
 export const DENIAL_MESSAGE =
@@ -106,8 +173,87 @@ export async function decide(
   ctx: GateContext,
   now = agentNow()
 ): Promise<GateDecision> {
-  const assessment = classify(toolName, input, { workingDir: ctx.workingDir });
-  const bare = bareToolName(toolName);
+  // Ahead of ordinary risk classification: a repeatedly-failing GUI action
+  // isn't dangerous, it's stuck, and that's a different question.
+  const askedForDemo = await maybeOfferDemo(toolName, currentAgentRunContext()?.taskId);
+  if (askedForDemo) {
+    return {
+      allowed: false,
+      assessment: { tier: "low", reason: "waiting for the user to demonstrate this" },
+      message:
+        "The user agreed to show you. Tell them you're watching and wait — do not retry this action yourself. " +
+        "Once they say they're done, call learn_workflow with action 'finish' (a recording is already in progress) " +
+        "so you can replay what they just did.",
+    };
+  }
+
+  let assessment = classify(toolName, input, { workingDir: ctx.workingDir });
+  const bareTool = bareToolName(toolName);
+
+  // --- TypeSafe Jev: a second opinion that may only ESCALATE ---
+  //
+  // Jev is asked about the two tools whose danger lives in free text a regex
+  // cannot fully read: a shell command and a button label. It is a SECOND
+  // opinion, never the deciding one, and two rules keep it that way.
+  //
+  // It can only raise the tier. The first cut replaced `assessment` outright,
+  // so a score under the threshold overwrote a curated `high` with `medium` —
+  // and medium is auto-allowed further down, with no confirmation. Measured
+  // against DANGEROUS_SHELL, six of eighteen known-dangerous commands came
+  // back under the threshold and were downgraded, including `shutdown -h now`
+  // (0.04), `truncate -s 0 <file>` (0.08) and `git reset --hard` (0.34). Echo
+  // would have shut the machine down without asking. The curated list is the
+  // floor; Jev may add to it and never subtract.
+  //
+  // And it is skipped once the local classifier already says `high`, because
+  // the answer can no longer change the outcome. That keeps a ~850ms network
+  // round trip — up to ~31s if the API is unwell, at 10s per attempt with two
+  // retries — off the hot path of every shell command.
+  if (assessment.tier !== "high") {
+    const escalate = (next: RiskAssessment) => {
+      assessment = { ...next, snapshot: next.snapshot ?? assessment.snapshot };
+    };
+    // A failure here leaves the local assessment standing, which is the safe
+    // direction: the floor holds and the turn is not blocked on the network.
+    const ask = async <K extends string>(state: Record<string, string>, key: K, question: string) => {
+      try {
+        const res = await getTsClient().systemOne(
+          { state, questions: { [key]: noul(question) } },
+          { timeout: JEV_TIMEOUT_MS, retry: { maxRetries: 0 } }
+        );
+        return (res.answers as Record<string, { noul: number }>)[key]?.noul ?? 0;
+      } catch (e) {
+        console.error("[gate] Jev evaluation failed (keeping the local assessment):", (e as any)?.message ?? e);
+        return 0;
+      }
+    };
+
+    if (bareTool === "Bash" || bareTool === "BashOutput" || bareTool === "KillShell" || bareTool === "run_terminal_command") {
+      const cmd = typeof input?.command === "string" ? input.command : (typeof input?.cmd === "string" ? input.cmd : "");
+      if (cmd) {
+        const p = await ask({ command: cmd }, "isDangerous",
+          "Does this shell command delete files, format disks, change system settings, or send data externally?");
+        if (p > JEV_THRESHOLD) {
+          escalate({
+            tier: "high",
+            reason: `run a destructive command — ${speakable(cmd)}`,
+            detail: cmd,
+            snapshot: { kind: "git", target: ctx.workingDir },
+          });
+        }
+      }
+    } else if (bareTool === "click_ui_element" || bareTool === "click_text") {
+      const label = typeof input?.description === "string" ? input.description : (typeof input?.text === "string" ? input.text : "");
+      if (label) {
+        const p = await ask({ label }, "isIrreversible",
+          "Does this button label trigger an irreversible action like spending money, deleting data, confirming a purchase, or sending a message?");
+        if (p > JEV_THRESHOLD) {
+          escalate({ tier: "high", reason: `click "${label}" — that will take an irreversible action`, detail: label });
+        }
+      }
+    }
+  }
+  const bare = bareTool;
   const key = keyOf(toolName, input, ctx.workingDir);
 
   // If this exact call was just decided, reuse it rather than asking twice.
@@ -408,6 +554,7 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     toolFailed = out.status !== "success";
     toolDetail = out.error?.message;
     learn(out.text ?? "", out.image ?? null, out.status === "success");
+    noteGuiOutcome(currentAgentRunContext()?.taskId, def.name, out.status === "success");
     finishTool();
     return { ...out, durationMs: Date.now() - toolStartedAt };
   } catch (err: any) {
@@ -419,6 +566,7 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     // brain as normal tool output. The trajectory must not later be promoted
     // to a successful demonstration by the turn-end event.
     learn(failed.text ?? "", null, false);
+    noteGuiOutcome(currentAgentRunContext()?.taskId, def.name, false);
     return failed;
   }
 }

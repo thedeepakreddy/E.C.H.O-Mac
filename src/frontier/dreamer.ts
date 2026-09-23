@@ -1,6 +1,8 @@
-import { loadConfig } from "../config.js";
+import { loadConfig, activeConfig } from "../config.js";
 import { createBrain, Brain } from "../brain/index.js";
 import { presenceMonitor } from "./presence.js";
+import { dump as axDump } from "../tools/ax.js";
+import { record, allFacts, promoteFact, type SemanticFact } from "../cognition/episodic.js";
 
 /**
  * Practises quietly while you are away, so common paths are already learned.
@@ -62,12 +64,126 @@ export function isDreaming(): boolean {
 
 export function resetIdleTimer() {
   if (idleTimer) clearTimeout(idleTimer);
-  if (!enabled) return;
+  // Curiosity and dream-compression are independent of rehearsal ("dreaming")
+  // being on — each has its own switch — so the idle timer has to run for any
+  // one of the three, not only when GUI rehearsal is enabled.
+  const cfg = activeConfig();
+  if (!enabled && !cfg.agi.curiosity.enabled && !cfg.agi.dreamCompression.enabled) return;
   idleTimer = setTimeout(startDreaming, IDLE_TIMEOUT_MS);
 }
 
+// ---- curiosity (AGI blueprint #7) ------------------------------------------
+//
+// Deliberately NOT another rehearsal task for the brain above to attempt: that
+// path's only guardrail is the model choosing to obey "look only" in its own
+// instructions. This one is safe by construction instead — a direct
+// accessibility read, structurally unable to click, type, or submit anything,
+// because it never calls act.click / ax.press / act.typeText at all. It only
+// ever runs when `agi.curiosity.enabled` is explicitly turned on, off by
+// default like every other background watcher here.
+
+const cataloguedApps = new Map<string, number>();
+const RECATALOGUE_MS = 24 * 60 * 60 * 1000; // an app's controls rarely change; don't re-log it daily
+
+/** Read the frontmost app's controls and remember them as a low-importance fact — never clicks anything. */
+async function curiosityTick(): Promise<void> {
+  try {
+    const d = await axDump();
+    if (!d.axAvailable || !d.elements.length || !d.app) return;
+    const last = cataloguedApps.get(d.app) ?? 0;
+    if (Date.now() - last < RECATALOGUE_MS) return;
+    cataloguedApps.set(d.app, Date.now());
+
+    const labels = [...new Set(d.elements.map((e) => e.label).filter(Boolean))].slice(0, 24);
+    if (labels.length < 3) return; // too little to be worth remembering
+    record({
+      kind: "observation",
+      text: `${d.app} exposes these controls: ${labels.join(", ")}.`,
+    });
+    console.log(`[dreamer] curiosity: catalogued ${labels.length} control(s) in ${d.app}`);
+  } catch (err) {
+    // Best-effort, and silent by design — a missed catalogue entry is nothing,
+    // unlike every other failure mode in this file which drives real input.
+    console.error("[dreamer] curiosity tick failed:", (err as any)?.message ?? err);
+  }
+}
+
+// ---- self-compressing context (AGI blueprint #6) ---------------------------
+//
+// cognition/episodic.ts's own doc comment on `consolidate()` names exactly
+// this gap: its promotion rule is lexical, so "prefers Brave" and "prefers
+// Firefox" never become "avoids Chrome" on their own. Once a day, while idle,
+// a free local model is asked to find that kind of connection across facts
+// consolidation already promoted — read-only over the fact store, and its
+// only write is `promoteFact`, which never touches an existing fact.
+
+const COMPRESS_EVERY_MS = 24 * 60 * 60 * 1000;
+let lastCompressedAt = 0;
+
+const COMPRESS_PROMPT = `You are compressing a list of facts an assistant has learned about its user into higher-level generalisations. Only state something that is a genuine inference connecting two or more of the facts below — never repeat a fact verbatim, and never invent something the facts don't support.
+
+Reply with ONLY a JSON array of up to 3 short strings (each under 120 characters), or [] if nothing new can be inferred. No commentary, no code fence.
+
+Facts:
+`;
+
+/** For tests: force the next maybeCompress call to run regardless of the 24h throttle. */
+export function _resetCompressionThrottleForTests(): void {
+  lastCompressedAt = 0;
+}
+
+export async function maybeCompress(cfg: ReturnType<typeof activeConfig>): Promise<void> {
+  if (!cfg.agi.dreamCompression.enabled) return;
+  if (Date.now() - lastCompressedAt < COMPRESS_EVERY_MS) return;
+  lastCompressedAt = Date.now();
+
+  const facts = allFacts().filter((f) => f.confidence >= 0.35);
+  if (facts.length < 4) return; // not enough raw material to generalise across
+
+  const known = new Set(facts.map((f) => f.text.toLowerCase()));
+  const list = facts.slice(0, 40).map((f) => `- (${f.kind}) ${f.text}`).join("\n");
+  try {
+    const host = (cfg.ollama.host || "http://localhost:11434").replace(/\/$/, "");
+    const res = await fetch(`${host}/api/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: cfg.ollama.model, prompt: COMPRESS_PROMPT + list, stream: false }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) return;
+    const j: any = await res.json();
+    const raw = String(j?.response ?? "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "");
+    const inferred = JSON.parse(raw);
+    if (!Array.isArray(inferred)) return;
+
+    const sourceIds = facts.slice(0, 40).map((f) => f.id);
+    let added = 0;
+    for (const text of inferred) {
+      if (typeof text !== "string" || !text.trim() || known.has(text.trim().toLowerCase())) continue;
+      promoteFact(text.trim(), "rule", sourceIds);
+      added++;
+      if (added >= 3) break;
+    }
+    if (added) console.log(`[dreamer] compression: inferred ${added} new fact(s) from ${facts.length} existing`);
+  } catch (err) {
+    // The local model being unavailable or slow must never be louder than a
+    // log line — this is a nice-to-have running in the background, unasked.
+    console.error("[dreamer] compression pass failed:", (err as any)?.message ?? err);
+  }
+}
+
 async function startDreaming() {
-  if (dreaming || !enabled) return;
+  const cfg = activeConfig();
+  if (cfg.agi.curiosity.enabled && presenceMonitor.isAway?.()) void curiosityTick();
+  void maybeCompress(cfg);
+
+  if (dreaming) return; // a rehearsal is already running; curiosity/compression above still ran on their own schedule
+  if (!enabled) {
+    // Rehearsal itself is off, but curiosity/compression might not be — keep
+    // the idle timer alive for their sake (resetIdleTimer already checks both).
+    resetIdleTimer();
+    return;
+  }
 
   // Idle is not absent. Only rehearse when presence says nobody is there; if it
   // cannot tell, err toward doing nothing.

@@ -14,6 +14,7 @@ import {
   SwarmManager,
   type CloneBrain,
   type MissionSpec,
+  type MissionState,
 } from "./frontier/swarm.js";
 import { TaskCoordinator } from "./memory/task-state.js";
 
@@ -302,6 +303,138 @@ console.log("  a process restart restores the Mission around a recovering agent"
   recoveredBrain!.emit("turnEnd");
   ok(afterCrash.getMission("recoverable")?.status === "completed",
     "the recovered Result completes the restored Mission");
+}
+
+console.log("  deleting a Mission");
+{
+  const coordinator = new TaskCoordinator(join(root, "delete-running"));
+  const swarm = new SwarmManager();
+  const brains = new Map<string, FakeBrain>();
+  swarm.submitMission(missionSpec([
+    { id: "work", goal: "Do important work", lane: "knowledge" },
+  ]), {
+    coordinator,
+    makeBrain: (identity) => {
+      const brain = new FakeBrain();
+      brains.set(identity.id, brain);
+      return brain;
+    },
+    broadcast: () => {},
+  });
+
+  const running = swarm.getMission("launch")!;
+  const workTaskId = running.tasks.work.taskId!;
+  ok(running.status === "running", "the Mission is running before it is deleted");
+
+  const removed = swarm.forgetMission("launch", coordinator);
+  ok(removed.ok, "deleting a Mission reports success");
+  ok(removed.cancelled, "deleting a RUNNING Mission stops it first");
+  ok(swarm.getMission("launch") === null, "the deleted Mission is gone from the board");
+  ok(!swarm.listMissions().some((m) => m.id === "launch"), "it is gone from the list as well");
+  ok(coordinator.get(workTaskId) === null,
+    "its Agent Task records are forgotten too, so 'deleted' does not mean 'hidden'");
+
+  // A late Result for work that no longer exists must not resurrect anything.
+  const reborn = swarm.getMission("launch");
+  ok(reborn === null, "a deleted Mission stays deleted");
+}
+
+console.log("  deleting a finished Mission");
+{
+  const coordinator = new TaskCoordinator(join(root, "delete-finished"));
+  const swarm = new SwarmManager();
+  let brain: FakeBrain | null = null;
+  swarm.submitMission(missionSpec([
+    { id: "work", goal: "Do important work", lane: "knowledge" },
+  ]), {
+    coordinator,
+    makeBrain: () => (brain = new FakeBrain()),
+    broadcast: () => {},
+  });
+  const task = swarm.getMission("launch")!.tasks.work;
+  coordinator.submitResult(task.taskId!, task.actorId!, {
+    status: "completed",
+    summary: "Work done",
+    artifacts: [{ kind: "data", label: "work", value: "completed" }],
+    verificationRefs: ["check:done"],
+    blockers: [],
+  });
+  brain!.emit("turnEnd");
+  ok(swarm.getMission("launch")?.status === "completed", "the Mission completed");
+
+  const removed = swarm.forgetMission("launch", coordinator);
+  ok(removed.ok && !removed.cancelled, "a finished Mission is deleted without a cancel");
+  ok(swarm.getMission("launch") === null, "the finished Mission is gone");
+  ok(!swarm.forgetMission("launch", coordinator).ok, "deleting it twice reports that it is already gone");
+}
+
+console.log("  a restart closes out work no timer survived");
+{
+  // The exact shape seen on this machine: an Agent Task persisted as "working"
+  // 19.8 hours into a 10-minute cap, because the process that armed its
+  // timeout was killed and no later run ever looked at it again.
+  const coordinator = new TaskCoordinator(join(root, "abandoned"));
+  const first = new SwarmManager();
+  first.submitMission(missionSpec([
+    { id: "work", goal: "Do important work", lane: "knowledge" },
+  ]), {
+    coordinator,
+    makeBrain: () => new FakeBrain(),
+    broadcast: () => {},
+  });
+  const before = first.getMission("launch")!;
+  ok(before.tasks.work.status === "working", "the Agent Task is working before the crash");
+
+  // A new process: the missions are on disk, the timers are not.
+  const afterCrash = new SwarmManager();
+  const read = () => coordinator.get("mission.launch")?.bindings.mission as MissionState | undefined;
+  ok(read()?.tasks.work.status === "working",
+    "a restart inherits the Agent Task still marked working");
+
+  const later = Date.now() + 20 * 60 * 60 * 1000;   // 20 hours on
+  const closed = afterCrash.reconcileAbandoned({
+    coordinator,
+    makeBrain: () => new FakeBrain(),
+    broadcast: () => {},
+    now: () => later,
+  });
+  ok(closed.tasks === 1 && closed.missions === 1, "reconciliation closes the abandoned Agent Task");
+
+  const settled = read()!;
+  ok(settled.tasks.work.status === "failed", "the Agent Task no longer claims to be working");
+  ok(settled.tasks.work.result?.blockers.includes("budget:timeout") === true,
+    "it names the wall-time budget it blew, rather than failing silently");
+  ok(settled.status === "failed", "the Mission itself stops reporting as running");
+
+  const twice = afterCrash.reconcileAbandoned({
+    coordinator,
+    makeBrain: () => new FakeBrain(),
+    broadcast: () => {},
+    now: () => later,
+  });
+  ok(twice.tasks === 0, "a second pass finds nothing left to close");
+}
+
+console.log("  reconciliation leaves live work alone");
+{
+  const coordinator = new TaskCoordinator(join(root, "live-work"));
+  const swarm = new SwarmManager();
+  swarm.submitMission(missionSpec([
+    { id: "work", goal: "Do important work", lane: "knowledge" },
+  ]), {
+    coordinator,
+    makeBrain: () => new FakeBrain(),
+    broadcast: () => {},
+  });
+  const closed = swarm.reconcileAbandoned({
+    coordinator,
+    makeBrain: () => new FakeBrain(),
+    broadcast: () => {},
+    now: () => Date.now() + 20 * 60 * 60 * 1000,
+  });
+  ok(closed.tasks === 0, "a Mission this process is actually running is never reconciled away");
+  ok(swarm.getMission("launch")?.tasks.work.status === "working", "its Agent Task keeps working");
+  swarm.cancelMission("launch");
 }
 
 rmSync(root, { recursive: true, force: true });

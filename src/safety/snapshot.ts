@@ -1,11 +1,11 @@
 import { mkdir, copyFile, writeFile, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { run } from "../tools/shell.js";
 import type { Snapshot } from "./risk.js";
+import { dataRoot } from "../memory/paths.js";
 
-const ROOT = join(homedir(), ".jarvis", "snapshots");
+const ROOT = join(dataRoot(), "snapshots");
 
 export interface SnapshotRecord {
   id: string;

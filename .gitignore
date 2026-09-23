@@ -18,3 +18,14 @@ runs/*/
 
 # A local checkout of Osiris, cloned by scripts/osiris_local.mjs.
 vendor/osiris/
+.voice-preview/
+
+# Installed by scripts/piper.mjs and scripts/selfhosted.mjs (hundreds of MB).
+vendor/
+
+# Backups written before config edits.
+*.bak-*
+
+# Scratch scripts that held a hard-coded API key — never commit them.
+test_mcp_call.cjs
+test_mcp_tools.cjs

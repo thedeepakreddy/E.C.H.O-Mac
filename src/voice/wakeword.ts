@@ -30,6 +30,29 @@ const VARIANTS = new Set([
 const PREFIXES = ["hey", "okay", "ok", "hello", "yo", "hi"];
 
 /**
+ * Whole utterances whisper returns for a greeting and the name fused together,
+ * where the name half is too mangled for any safe edit distance to reach.
+ *
+ * "Hey Echo" comes back as "Hayako": the name half is "ako", three edits from
+ * "echo" on a four-letter word. Loosening `isName` far enough to catch it would
+ * also catch "each", "ache" and "auto", so the distance rule stays exactly
+ * where it is — these are EXACT matches on the whole token and widen nothing.
+ * The same reasoning as the `i go` -> `echo` rewrite in matchWakeWord.
+ *
+ * Note this only matters on the always-on transcript path. When the acoustic
+ * spotter fires it is trusted above ACOUSTIC_CERTAIN and whisper cannot veto it
+ * (see voice/wake/index.ts) — but the transcript check also runs on its own
+ * whenever the spotter does not fire, and there it decides alone.
+ */
+const FUSED_GREETING_AND_NAME = new Set([
+  "hayako",
+  "hayeko",
+  "heyecho",
+  "heyeko",
+  "hiecho",
+]);
+
+/**
  * How the name comes back when the utterance was transcribed in Telugu script.
  *
  * Everything below this line works on [a-z] — `strip` throws the rest away — so
@@ -37,7 +60,41 @@ const PREFIXES = ["hey", "okay", "ok", "hello", "yo", "hi"];
  * spellings are romanised back to "echo" before any of that runs. Sarvam
  * rendered "Echo" as ఎకో in testing; the others are the obvious near-misses.
  */
-const SCRIPT_VARIANTS = /[\u0C0E\u0C0F]\u0C15\u0C4B|[\u0C0E\u0C0F]\u0C16\u0C4B|[\u0C0E\u0C0F]\u0C15\u0C4D\u0C15\u0C4B/g;
+const SCRIPT_VARIANTS = new RegExp(
+  [
+    // Telugu: ఎకో / ఏకో / ఎఖో / ఎక్కో — Sarvam rendered "Echo" as ఎకో in testing.
+    "[\u0C0E\u0C0F]\u0C15\u0C4B",
+    "[\u0C0E\u0C0F]\u0C16\u0C4B",
+    "[\u0C0E\u0C0F]\u0C15\u0C4D\u0C15\u0C4B",
+    // Devanagari (Hindi): एको / एखो / एक्को. Measured — a multilingual whisper
+    // transcribed spoken Hindi as "एको आज मौसम कैसा है" and the utterance was
+    // thrown away, because every check below works on [a-z] and Devanagari
+    // strips to nothing.
+    "\u090F\u0915\u094B",
+    "\u090F\u0916\u094B",
+    "\u090F\u0915\u094D\u0915\u094B",
+    // Cyrillic (Russian): Эхо / Эко / эхо / эко.
+    "[\u042D\u044D][\u0445\u043A]\u043E",
+    // Perso-Arabic: اکو / ایکو / ايكو / إيكو. Measured — whisper transcribed
+    // spoken Persian as "اکو ام روز هورچه تو رست". Both kafs are listed because
+    // Persian writes ک (U+06A9) and Arabic ك (U+0643), and transcripts mix them.
+    "[\u0627\u0623\u0625\u0622][\u064A\u06CC]?[\u06A9\u0643]\u0648",
+  ].join("|"),
+  "g"
+);
+
+/**
+ * The name has to be the WHOLE word, not the start of a longer one.
+ *
+ * These are substring rewrites — each match becomes " echo " — so an unanchored
+ * pattern turns the Persian "اکوسیستم" (ecosystem) into "echo سیستم" and wakes
+ * Echo on the word "ecosystem". The Latin path never had this problem because
+ * `VARIANTS` is an exact-match Set; a rewrite needs the boundary spelled out.
+ *
+ * `\b` is useless here — it is defined on [A-Za-z0-9_], so every Telugu or
+ * Persian letter counts as a boundary. Unicode letter lookarounds instead.
+ */
+const SCRIPT_VARIANTS_ANCHORED = new RegExp(`(?<!\\p{L})(?:${SCRIPT_VARIANTS.source})(?!\\p{L})`, "gu");
 
 const strip = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
 
@@ -74,10 +131,53 @@ function isName(token: string): boolean {
 /** Handles "hijavis" / "heyjarvis" — greeting and name fused into one token. */
 function isMergedGreetingAndName(token: string): boolean {
   const t = strip(token);
-  return PREFIXES.some((p) => t.startsWith(p) && t.length > p.length && isName(t.slice(p.length)));
+  if (FUSED_GREETING_AND_NAME.has(t)) return true;
+  if (PREFIXES.some((p) => t.startsWith(p) && t.length > p.length && isName(t.slice(p.length)))) return true;
+  // When the two words fuse, whisper garbles the GREETING too — "hay" for
+  // "hey" — and an exact prefix test throws the whole utterance away. One typo
+  // is allowed in the greeting, but the name half must still match tightly, so
+  // this cannot drag in unrelated words on its own.
+  for (let cut = 2; cut <= 5 && cut < t.length; cut++) {
+    if (!isName(t.slice(cut))) continue;
+    if (PREFIXES.some((p) => distance(t.slice(0, cut), p) <= 1)) return true;
+  }
+  return false;
 }
 
 const isPrefix = (token: string) => PREFIXES.includes(strip(token));
+
+/**
+ * What whisper leaves of the name after a greeting. "Hi Echo" runs together
+ * as "hi-e-ko" and the E is swallowed by the greeting: measured on this user's
+ * real captures as "Hi, Ko." (6 times), "Hi, Code." (twice), "Hi, Iko", "Hi, Co."
+ * and "Hi, go." — each one ignored, so they had to say it again. Only honoured
+ * straight after hi/hey/hello, where these are not ordinary words.
+ */
+const GREETED_NAME = new Set(["ko", "co", "go", "iko", "ico", "igo", "koh", "coh", "code", "aiko", "eiko"]);
+const NAME_GREETINGS = new Set(["hi", "hey", "hello"]);
+
+/**
+ * Whisper also hears "Echo" as "I go" — right when it stands alone ("I go.",
+ * "…as well, I go.", "So, I go, what…"), wrong inside a sentence, where it woke
+ * Echo on "can I go and compile?" and "if I go to…". So only a free-standing
+ * "I go" (punctuation or the end after it, no auxiliary before it) is the name.
+ */
+const I_GO = /(^|[^\p{L}'])(\p{L}+[,\s]+)?i go(?=\s*(?:[,.!?;:]|$))/giu;
+const NOT_A_NAME_BEFORE = new Set([
+  "can", "could", "shall", "should", "will", "would", "may", "might", "must", "do", "did", "does",
+  "if", "when", "then", "that", "and", "before", "after", "until", "let", "where", "why", "how",
+]);
+/** At the very start of an utterance, "I go" before a command word is the name: "I go check…". */
+const I_GO_COMMAND = /^\s*i go(?=\s+(?:check|open|tell|show|what|how|play|search|find|set|turn|call|read|close|start|stop|please)\b)/i;
+
+function normaliseIGo(text: string): string {
+  text = text.replace(I_GO_COMMAND, "echo");
+  return text.replace(I_GO, (whole, lead: string, prev: string | undefined) => {
+    const word = (prev ?? "").replace(/[,\s]+$/, "").toLowerCase();
+    if (word && NOT_A_NAME_BEFORE.has(word)) return whole;
+    return `${lead}${prev ?? ""}echo`;
+  });
+}
 
 export interface WakeMatch {
   /** Did the utterance start with the wake word? */
@@ -105,11 +205,11 @@ export function matchWakeWord(transcript: string): WakeMatch {
   let text = (transcript ?? "").replace(/\[.*?\]|\(.*?\)|\*.*?\*/g, " ").trim();
   
   // Normalize Whisper mishearings that span multiple tokens
-  text = text.replace(/\bi go\b/gi, "echo");
+  text = normaliseIGo(text);
 
   // Romanise the name out of a non-Latin transcript so the matching below sees
   // it. Only the name is rewritten — the command keeps its original script.
-  text = text.replace(SCRIPT_VARIANTS, " echo ").replace(/\s+/g, " ").trim();
+  text = text.replace(SCRIPT_VARIANTS_ANCHORED, " echo ").replace(/\s+/g, " ").trim();
   
   if (!text) return { matched: false, command: "" };
 
@@ -134,6 +234,8 @@ export function matchWakeWord(transcript: string): WakeMatch {
     if (containsName(tokens[i])) {
       consumed = 1;
     } else if (isPrefix(tokens[i]) && tokens[i + 1] && containsName(tokens[i + 1])) {
+      consumed = 2;
+    } else if (NAME_GREETINGS.has(strip(tokens[i])) && tokens[i + 1] && GREETED_NAME.has(strip(tokens[i + 1]))) {
       consumed = 2;
     }
     if (!consumed) continue;
