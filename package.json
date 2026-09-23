@@ -5,6 +5,8 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
+    "test": "node scripts/test-all.mjs",
+    "test:live": "node scripts/test-all.mjs --live",
     "build": "node build.mjs",
     "start": "npm run build && electron .",
     "dev": "node build.mjs --watch",
