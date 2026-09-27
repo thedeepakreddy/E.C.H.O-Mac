@@ -15,32 +15,12 @@ the web, runs code and answers out loud, narrating each step so you can watch it
                                   every action passes one RISK GATE: risky ones need your spoken "yes"
 ```
 
-**Contents**
+**Demo — the HUD state machine:** [`docs/echo-hud-states.mp4`](docs/echo-hud-states.mp4)
+(rendered from the shipping assets using the per-state values in `renderer/hud.css`).
 
-1. [Quick start](#1-quick-start)
-2. [What Echo can do](#2-what-echo-can-do)
-3. [Talking to Echo](#3-talking-to-echo)
-4. [Brains (the AI models)](#4-brains-the-ai-models)
-5. [Safety](#5-safety)
-6. [Memory and learning](#6-memory-and-learning)
-7. [Background agents](#7-background-agents)
-8. [Knowledge: web, intel and your Mac's health](#8-knowledge-web-intel-and-your-macs-health)
-9. [Phone remote and Telegram](#9-phone-remote-and-telegram)
-10. [The HUD and control panel](#10-the-hud-and-control-panel)
-11. [Full setup](#11-full-setup)
-12. [Configuration](#12-configuration)
-13. [Commands](#13-commands)
-14. [Testing](#14-testing)
-15. [How the code is organised](#15-how-the-code-is-organised)
-16. [Privacy: what stays on your Mac](#16-privacy-what-stays-on-your-mac)
-17. [Troubleshooting](#17-troubleshooting)
-18. [Debugging runs: journals and replay](#18-debugging-runs-journals-and-replay)
+**Engineering deep dive:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the mechanisms,
+the invariants that hold them together, and the failures each one exists to prevent.
 
----
-
-## 1. Quick start
-
-**Needs:** a Mac with Apple Silicon, Node.js 20+, [Homebrew](https://brew.sh).
 
 ```bash
 brew install cliclick whisper-cpp        # mouse/keyboard control + local speech-to-text
@@ -118,10 +98,11 @@ Echo detects which language you spoke, on your Mac, and answers in the matching 
   mistaken for Urdu or Hindi. It adds about 0.45 s, and only to turns Echo is actually answering.
 - **Settings:** `voice.realtime` and `voice.ttsEngine` in the config ([§12](#12-configuration)).
 
-**Available voices:** Piper (offline, fast: about 70 ms to first sound), macOS voices
-(`say`), Gemini voices, ElevenLabs, Sarvam (Indian languages; currently switched off).
-If a cloud voice fails mid-reply (offline, quota, outage), Echo **switches to Piper
-automatically** instead of going silent, and tries the cloud voice again after 60 seconds.
+That table is the map. For how the pieces actually behave — the loop's exit contract, the
+single gated path to every tool, task leases and crash recovery, deterministic replay, and
+the wake-word logic — see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+## Setup
 
 ---
 
