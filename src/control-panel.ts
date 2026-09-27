@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import type { BrowserWindow, IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { getControlWeather, type ControlWeatherRequest } from "./control-weather.js";
 import type { MissionState } from "./frontier/swarm.js";
+import { KEY_FIELDS, keyStatus, keysPath } from "./keystore.js";
+import { listFleet, grantableTools, MAX_CUSTOM as FLEET_MAX_CUSTOM } from "./frontier/fleet.js";
+import { recentIntel } from "./tools/intel-feeds.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -13,17 +16,46 @@ export interface ControlTask {
   startedAt: number; finishedAt?: number;
 }
 export interface ControlLog { id: number; at: number; kind: string; text: string }
+export interface ControlSettings {
+  brain: "claude" | "gemini" | "ollama" | "openai";
+  voice: {
+    ttsEnabled: boolean; wakeWord: boolean; conversationMode: boolean; bargeIn: boolean;
+    sttStreaming: boolean; ttsStreaming: boolean; sendAudioToBrain: boolean;
+    sttProvider: "whisper" | "sarvam" | "apple"; sttLanguage: string;
+    ttsEngine: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" | "gemini" | "piper";
+    maxSpokenSentences: number; conversationWindowMs: number;
+  };
+  hud: { startListeningOnLaunch: boolean };
+  memory: { enabled: boolean; cloudRecall: boolean; retentionDays: number };
+  helpers: { shadow: boolean; ghost: boolean; autoDebug: boolean; shadowIntervalSeconds: number };
+  dreaming: { enabled: boolean };
+  learning: { enabled: boolean; captureScreens: boolean; maxStepsPerTurn: number };
+  configPath: string;
+}
 export interface ControlAction {
   type: "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
-    "refresh-connections" | "switch-model" | "spawn-agent" | "assign-agent";
+    "refresh-connections" | "switch-model" | "spawn-agent" | "assign-agent" | "api-keys" | "save-settings" |
+    "save-api-keys" | "run-board" | "run-fleet-agent" | "stop-mission" | "stop-mission-task" |
+    "delete-mission" |
+    "save-agent" | "remove-agent" | "shutdown";
   text?: string; goal?: string; provider?: string; name?: string;
+  settings?: Partial<ControlSettings>;
+  /** For save-api-keys: env var name -> new value. A blank/omitted value leaves that key unchanged. */
+  apiKeys?: Record<string, string>;
+  /** For run-board: which fleet member ids get the task. */
+  agentIds?: string[];
+  /** For stop-mission / stop-mission-task / delete-mission. */
+  missionId?: string;
+  /** For save-agent: the fleet member being added or updated. */
+  agent?: { id: string; name: string; description: string; brief: string; tier: string; tools: string[] };
 }
-export interface ControlResult { ok: boolean; message?: string }
+export interface ControlResult { ok: boolean; message?: string; data?: Record<string, unknown> }
 export interface ControlRuntime {
   voiceEnabled: boolean;
   agents: Array<{ id: string; name: string; goal: string; status: string; startedAt: number; progress: string;
     missionId?: string; agentTaskId?: string; lane?: "knowledge" | "gui" }>;
   missions: MissionState[];
+  settings: ControlSettings;
   models: Array<{ id: string; label: string; model: string; active: boolean; available: boolean; reason?: string }>;
   connections: Array<{ name: string; status: string; tools: number | null; error?: string; lastActivityAt?: number }>;
 }
@@ -41,6 +73,14 @@ export class ControlTelemetry {
   private sequence = 0;
   private taskSequence = 0;
   private mcpActivity = new Map<string, number>();
+  /**
+   * Bumped on every mutation of `logs`/`tasks`. The renderer's dirty-check used
+   * to `JSON.stringify` the full arrays on every refresh tick to decide whether
+   * to re-render — paying for the content on every tick whether or not it had
+   * changed. A plain counter is a single number to compare instead.
+   */
+  logRevision = 0;
+  taskRevision = 0;
 
   observe(channel: string, payload: any): void {
     if (channel === "state") this.state = { ...this.state, ...payload };
@@ -55,7 +95,15 @@ export class ControlTelemetry {
     }
   }
   log(kind: string, text: string): void {
-    this.logs.push({ id: ++this.sequence, at: Date.now(), kind, text: text.slice(0, 12000) });
+    this.logRevision++;
+    // The panel only ever shows one truncated, single-line preview per entry
+    // (see .activity-copy in control-panel.css — nowrap + ellipsis); nothing
+    // else reads controlTelemetry.logs. The old 12000-char cap meant a single
+    // long assistant reply or tool result could sit in memory at ~12KB, times
+    // up to 240 entries — and that whole array got JSON.stringify'd by the
+    // renderer's dirty-check on every refresh tick. 500 is generous for a
+    // preview line and cuts the worst case by ~24x.
+    this.logs.push({ id: ++this.sequence, at: Date.now(), kind, text: text.slice(0, 500) });
     if (this.logs.length > 240) this.logs.splice(0, this.logs.length - 240);
   }
   tool(name: string): void {
@@ -67,6 +115,7 @@ export class ControlTelemetry {
     return this.mcpActivity.get(name.replace(/[^a-zA-Z0-9_]/g, "_"));
   }
   beginTask(title: string, agent = "Echo"): string {
+    this.taskRevision++;
     const id = `session-${++this.taskSequence}`;
     this.tasks.push({ id, title: title.slice(0, 2000), agent, startedAt: Date.now(),
       status: this.tasks.some((task) => task.agent === agent && task.status === "working") ? "queued" : "working" });
@@ -79,6 +128,7 @@ export class ControlTelemetry {
   finishTask(status: "done" | "failed" | "stopped", agent = "Echo"): void {
     const task = this.tasks.find((item) => item.agent === agent && item.status === "working");
     if (!task) return;
+    this.taskRevision++;
     task.status = status;
     task.finishedAt = Date.now();
     if (status === "done") this.completedTasks++;
@@ -86,15 +136,18 @@ export class ControlTelemetry {
     if (queued) queued.status = "working";
   }
   stopMainTasks(): void {
+    let changed = false;
     for (const task of this.tasks) {
       if (task.agent === "Echo" && (task.status === "working" || task.status === "queued")) {
         task.status = "stopped"; task.finishedAt = Date.now();
+        changed = true;
       }
     }
+    if (changed) this.taskRevision++;
   }
   snapshot(runtime: ControlRuntime) {
-    return { ...runtime, state: this.state, sessionStartedAt: this.sessionStartedAt,
-      logs: this.logs, tasks: this.tasks,
+    return { ...runtime, state: this.state, sessionStartedAt: this.sessionStartedAt, intel: recentIntel(),
+      logs: this.logs, tasks: this.tasks, logRevision: this.logRevision, taskRevision: this.taskRevision,
       analytics: { commands: this.commands, toolCalls: this.toolCalls, errors: this.errors,
         completedTasks: this.completedTasks, uptimeSeconds: Math.floor((Date.now() - this.sessionStartedAt) / 1000) } };
   }
@@ -148,7 +201,9 @@ export function openControlPanel(anchor?: BrowserWindow | null): void {
     if (publishTimer) clearTimeout(publishTimer);
     refreshTimer = null; publishTimer = null;
   });
-  refreshTimer = setInterval(publishControlUpdate, 1000);
+  // Runtime events publish immediately. This slow heartbeat only keeps
+  // time-based labels fresh when an idle session has no events at all.
+  refreshTimer = setInterval(publishControlUpdate, 15_000);
   refreshTimer.unref();
   void panel.loadFile(join(here, "..", "renderer", "control-panel.html"));
 }
@@ -189,5 +244,39 @@ export function wireControlPanel(deps: {
     if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
     return getControlWeather(request);
   });
+  ipcMain.handle("control:fleet", (event) => {
+    if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
+    return { members: listFleet(), grantableTools: grantableTools(), maxCustom: FLEET_MAX_CUSTOM };
+  });
+  ipcMain.handle("control:api-keys", (event) => {
+    if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
+    // Presence only, never a stored value — see keystore.ts's KEY_FIELDS/keyStatus.
+    // Continuous telemetry (control:update) never carries this; it is fetched
+    // only when the API-keys panel is actually opened.
+    return {
+      fields: KEY_FIELDS.map((f) => ({ env: f.env, label: f.label, help: f.help, url: f.url, optional: f.optional })),
+      status: keyStatus(),
+      path: keysPath,
+    };
+  });
   ipcMain.on("control:close", (event) => { if (authorized(event)) closeControlPanel(); });
+  // Diagnostic for the "the panel got slow" reports a code-reading pass
+  // couldn't reproduce: the renderer reports its own dropped compositor
+  // frames, which the main process's own event-loop-lag check (main.ts)
+  // cannot see — that one only catches the JS thread blocking, not GPU or
+  // compositor backlog from something like Osiris's WebGL globe competing
+  // for the same shared GPU process. Remove once the cause is found.
+  ipcMain.on("control:perf", (event, payload: { droppedMs?: number } | undefined) => {
+    if (!authorized(event) || !payload) return;
+    console.warn(`[perf] control panel renderer dropped a frame by ~${Math.round(payload.droppedMs ?? 0)}ms`);
+  });
+  ipcMain.on("control:open-url", (event, url: unknown) => {
+    // Only ever hand a real https link to the OS — same rule setup.ts uses for
+    // the same reason: the panel must never be a way to launch an arbitrary
+    // scheme or a local file path.
+    if (authorized(event) && typeof url === "string" && /^https:\/\//.test(url)) {
+      const { shell } = nodeRequire("electron") as typeof import("electron");
+      shell.openExternal(url);
+    }
+  });
 }

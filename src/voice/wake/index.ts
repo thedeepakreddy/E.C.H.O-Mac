@@ -91,6 +91,18 @@ export async function createWakeDetector(cfg: JarvisConfig, appRoot: string): Pr
  */
 const ACOUSTIC_TRUST = 0.45;
 
+/**
+ * Above this the spotter is trusted outright and whisper may not veto it.
+ *
+ * Whisper's opinion can be confidently WRONG, not just absent: "Hey Echo" came
+ * back as "Hayako" in testing, which contains no spelling of the name that any
+ * safe edit distance can reach — the closest split is three edits away on a
+ * four-letter word, and allowing that would also match "each" and "ache". A
+ * garbled transcript must not be able to overrule a spotter that is certain.
+ * Set high on purpose: the ONNX engine's own firing bar is 0.85.
+ */
+const ACOUSTIC_CERTAIN = 0.8;
+
 export function makeVerifier(cfg: JarvisConfig): (frames: Int16Array[], score?: number) => Promise<boolean> {
   let lastText = "";
   let repeats = 0;
@@ -113,13 +125,20 @@ export function makeVerifier(cfg: JarvisConfig): (frames: Int16Array[], score?: 
       return true;
     }
 
+    // Whisper does not answer silence with an empty string — it answers with
+    // punctuation: ".", "…", "。". That carries no word, so it is the same
+    // "no opinion" as returning nothing, and it must not be allowed to veto a
+    // confident acoustic match. Checking `!trimmed` alone missed it, and a
+    // lone "." was quietly rejecting real wakes.
+    const heardAWord = /[\p{L}\p{N}]/u.test(trimmed);
+
     // Identical output for two different candidates means whisper is reading
     // its own weights, not the microphone.
-    if (trimmed && trimmed === lastText) repeats++;
-    else { repeats = 0; lastText = trimmed; }
+    if (heardAWord && trimmed === lastText) repeats++;
+    else { repeats = 0; lastText = heardAWord ? trimmed : ""; }
     const artefact = repeats >= 1;
 
-    if (!trimmed || artefact) {
+    if (!heardAWord || artefact) {
       if (artefact && !warned) {
         warned = true;
         console.warn(
@@ -132,7 +151,14 @@ export function makeVerifier(cfg: JarvisConfig): (frames: Int16Array[], score?: 
       return score >= ACOUSTIC_TRUST;
     }
 
-    console.log(`[wake] candidate rejected by whisper: ${JSON.stringify(trimmed.slice(0, 40))}`);
+    // Whisper has a real opinion and it is not the name — but it can be wrong
+    // about audio it heard perfectly well, so a certain spotter still wins.
+    if (score >= ACOUSTIC_CERTAIN) {
+      console.log(`[wake] whisper read ${JSON.stringify(trimmed.slice(0, 40))}, but the spotter is ${score.toFixed(2)} — trusting it`);
+      return true;
+    }
+
+    console.log(`[wake] candidate rejected by whisper: ${JSON.stringify(trimmed.slice(0, 40))} (spotter ${score.toFixed(2)})`);
     return false;
   };
 }

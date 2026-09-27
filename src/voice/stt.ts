@@ -230,6 +230,52 @@ export async function transcribeLocal(wavPath: string, cfg: JarvisConfig): Promi
 }
 
 /**
+ * Below this probability of English, a turn is treated as another language.
+ *
+ * Deliberately low, and not "English is not the top language": measured on
+ * this user's real commands, accented English often has Urdu or Hindi scored
+ * just ABOVE English ("Echo, who is Razzie?" — ur 0.33, en 0.26), yet English
+ * never fell below 0.26 on any of 21 real English commands. Telugu, Hindi and
+ * Tamil scored English at 0.01–0.19.
+ */
+export const NOT_ENGLISH_BELOW = 0.2;
+
+export interface SpokenLanguage {
+  /** Whisper's most likely language code, e.g. "en", "te", "hi". */
+  language: string;
+  /** Whisper's probability that the speech is English, 0..1. */
+  english: number;
+}
+
+/**
+ * Which language was spoken, from the resident model (detect only — no
+ * decoding). ~450 ms, so it is run only for turns actually going to the brain,
+ * not for every capture the always-on microphone makes. Anything that cannot
+ * be measured counts as English.
+ */
+export async function detectSpokenLanguage(wavPath: string, cfg: JarvisConfig): Promise<SpokenLanguage> {
+  const english = { language: "en", english: 1 };
+  if (isEnglishOnlyModel(cfg) || !(await ensureServer(cfg))) return english;
+  try {
+    const form = new FormData();
+    form.append("file", new Blob([readFileSync(wavPath)]), "audio.wav");
+    form.append("response_format", "verbose_json");
+    form.append("language", "auto");
+    form.append("detect_language", "true");
+    const res = await fetch(`http://127.0.0.1:${serverPort}/inference`, { method: "POST", body: form });
+    if (!res.ok) return english;
+    // whisper-server writes raw control characters inside its JSON strings.
+    const data: any = JSON.parse((await res.text()).replace(/[\u0000-\u001f]/g, " "));
+    const probs: Record<string, number> = data?.language_probabilities ?? {};
+    const top = Object.entries(probs).sort((a, b) => b[1] - a[1])[0];
+    if (!top) return english;
+    return { language: top[0], english: Number(probs.en ?? 0) };
+  } catch {
+    return english;
+  }
+}
+
+/**
  * Transcribe raw 16 kHz frames with the local model — for the wake-word
  * verifier, which holds the last second of audio in memory rather than on disk.
  */

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Echo — Synaptic Field</title>
+<link rel="stylesheet" href="synapse-field.css" />
+<style>
+  :root { --cy: #58e8ff; --dim: #6d8894; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #04070a; color: #cfe9f2;
+    font: 12px/1.45 "SF Mono", ui-monospace, Menlo, monospace;
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+    border-bottom: 1px solid #0f2732; letter-spacing: .14em; font-size: 11px;
+  }
+  header .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--cy); box-shadow: 0 0 10px var(--cy); }
+  header .sp { flex: 1; }
+  header .stat { color: var(--dim); letter-spacing: .08em; }
+  header .stat b { color: var(--cy); font-weight: 600; }
+
+  #wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 18px; }
+  #field {
+    width: min(100%, 1500px); aspect-ratio: 1500 / 900;
+    border: 1px solid #10303d; border-radius: 6px;
+    box-shadow: 0 0 60px rgba(30,140,180,.14) inset, 0 20px 60px rgba(0,0,0,.6);
+  }
+
+  footer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #0f2732; flex-wrap: wrap; align-items: center; }
+  button {
+    background: #06131a; color: #9fc6d4; border: 1px solid #14404f; border-radius: 4px;
+    padding: 8px 14px; font: inherit; letter-spacing: .12em; cursor: pointer; transition: .16s;
+  }
+  button:hover { border-color: #2b7d99; color: #d9f4ff; }
+  button.on { background: #0c2e3b; border-color: var(--cy); color: #eaffff; box-shadow: 0 0 14px rgba(88,232,255,.25); }
+  footer .sp { flex: 1; }
+  .hint { color: #46626d; letter-spacing: .06em; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="dot"></span>
+    <span>ECHO · SYNAPTIC FIELD</span>
+    <span class="sp"></span>
+    <span class="stat">SOMA <b id="s-nodes">—</b></span>
+    <span class="stat">FIBRES <b id="s-cells">—</b></span>
+    <span class="stat">ACTIVE AP <b id="s-active">0</b></span>
+    <span class="stat">SPIKES <b id="s-spikes">0</b></span>
+    <span class="stat">BUILD <b id="s-build">—</b></span>
+    <span class="stat"><b id="s-fps">0</b> FPS</span>
+  </header>
+
+  <div id="wrap"><div id="field"></div></div>
+
+  <footer>
+    <button data-state="idle" class="on">IDLE</button>
+    <button data-state="listening">LISTENING</button>
+    <button data-state="thinking">THINKING</button>
+    <button data-state="speaking">SPEAKING</button>
+    <button data-state="acting">ACTING</button>
+    <button id="burst">BURST</button>
+    <span style="width:14px"></span>
+    <button data-map="dense" class="on">DENSE MAP</button>
+    <button data-map="cluster">CLUSTER MAP</button>
+    <span class="sp"></span>
+    <button id="zin">＋</button>
+    <button id="zout">－</button>
+    <button id="rot">↻</button>
+    <button id="reset">RESET VIEW</button>
+    <span class="hint" id="viewinfo">scroll = zoom · drag = pan · shift-drag / two-finger twist = rotate · double-click = reset</span>
+  </footer>
+
+  <script src="neuronmap-data.js"></script>
+  <script src="synapse-maps.js"></script>
+  <script src="synapse-field.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+
+    const MAPS = ECHO_SYNAPSE_MAPS;   // shared with the neural window + panel
+
+    let field, mapName = 'dense';
+
+    function load(name) {
+      mapName = name;
+      const host = $('field');
+      if (field) field.destroy();
+      host.innerHTML = '';
+      const m = MAPS[name];
+      host.style.aspectRatio = m.aspect;
+      document.querySelectorAll('[data-map]').forEach(b => b.classList.toggle('on', b.dataset.map === name));
+      field = window.field = new SynapseField(Object.assign({ host, imageSrc: m.src }, m));
+      wire();
+    }
+
+    function wire() {
+    field.ready.then(() => {
+      $('s-nodes').textContent = field.stats.somas;
+      $('s-cells').textContent = field.stats.fibres.toLocaleString();
+      field.onframe = s => {
+        $('s-active').textContent = s.active;
+        $('s-spikes').textContent = s.spikes;
+        $('s-fps').textContent = s.fps; $('s-build').textContent = (field.stats.buildMs||0) + 'ms';
+      };
+      field.onview = v => {
+        $('viewinfo').textContent =
+          'zoom ' + v.s.toFixed(2) + '× · rotation ' + Math.round(((v.r * 180 / Math.PI) % 360 + 360) % 360) + '°';
+      };
+      const cur = document.querySelector('[data-state].on');
+      field.setState(cur ? cur.dataset.state : 'idle');
+    });
+    }
+
+    const btns = [...document.querySelectorAll('[data-state]')];
+    function set(name) {
+      if (field) field.setState(name);
+      btns.forEach(b => b.classList.toggle('on', b.dataset.state === name));
+    }
+    btns.forEach(b => b.onclick = () => set(b.dataset.state));
+    $('burst').onclick = () => field.burst(10);
+    $('zin').onclick = () => field.zoomBy(1.35);
+    $('zout').onclick = () => field.zoomBy(1 / 1.35);
+    $('rot').onclick = () => field.rotateBy(30);
+    $('reset').onclick = () => field.resetView();
+    document.querySelectorAll('[data-map]').forEach(b => b.onclick = () => load(b.dataset.map));
+    load('dense');
+
+    addEventListener('keydown', e => {
+      const map = { '1': 'idle', '2': 'listening', '3': 'thinking', '4': 'speaking', '5': 'acting' };
+      if (map[e.key]) set(map[e.key]);
+      if (e.key.toLowerCase() === 'b') field.burst(10);
+      if (e.key === '+' || e.key === '=') field.zoomBy(1.25);
+      if (e.key === '-') field.zoomBy(1 / 1.25);
+      if (e.key === '[') field.rotateBy(-15);
+      if (e.key === ']') field.rotateBy(15);
+      if (e.key.toLowerCase() === 'r') field.resetView();
+    });
+  </script>
+</body>
+</html>

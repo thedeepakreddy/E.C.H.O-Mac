@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, copyFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { run } from "../tools/shell.js";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * A reversible log of everything Jarvis did.
@@ -32,7 +32,7 @@ export interface JournalEntry {
     | { type: "none"; why: string };
 }
 
-const DIR = join(homedir(), ".jarvis", "journal");
+const DIR = join(dataRoot(), "journal");
 const FILE = join(DIR, "actions.jsonl");
 const BACKUPS = join(DIR, "files");
 

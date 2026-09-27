@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { JarvisConfig } from "../config.js";
 import { GEMINI_MODEL_FALLBACKS, type AudioTurn } from "../brain/types.js";
+import { modelHealth } from "../brain/model-health.js";
 
 /**
  * The hearing pass: ears for a brain that has none.
@@ -110,7 +111,9 @@ export function parseHeard(raw: string): Heard | null {
  */
 export function hearingModels(cfg: JarvisConfig): string[] {
   const configured = cfg.gemini?.model?.trim();
-  return [...new Set([configured, ...GEMINI_MODEL_FALLBACKS].filter(Boolean) as string[])];
+  // Same health filter as the agent loop: a hearing pass that walks four dead
+  // models first is four round trips of latency on a spoken turn.
+  return modelHealth.ladder([configured, ...GEMINI_MODEL_FALLBACKS]);
 }
 
 /** A failure worth trying another model for, rather than giving up on. */
@@ -182,6 +185,10 @@ export async function listen(
         console.error(`[jarvis] hearing pass failed: ${message.slice(0, 200)}`);
         return null;
       }
+      // Record it here too: what the hearing pass learns about a model saves
+      // the agent loop the same discovery, and the other way round.
+      if (/404|NOT_FOUND|no longer available/i.test(message)) modelHealth.markDead(model, message);
+      else if (/429|RESOURCE_EXHAUSTED|quota/i.test(message)) modelHealth.markExhausted(model, message);
       console.warn(`[jarvis] hearing pass: ${model} unavailable, trying the next model`);
     }
   }

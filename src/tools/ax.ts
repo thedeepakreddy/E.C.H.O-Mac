@@ -65,7 +65,7 @@ function runHelper(args: string[], timeoutMs = 8000): Promise<string> {
   });
 }
 
-export async function dump(all = false): Promise<AxDump> {
+async function dumpUncached(all = false): Promise<AxDump> {
   if (!helperAvailable()) {
     return { app: "?", pid: 0, axAvailable: false, elements: [], error: "helper-not-built" };
   }
@@ -77,6 +77,44 @@ export async function dump(all = false): Promise<AxDump> {
   } catch (err: any) {
     return { app: "?", pid: 0, axAvailable: false, elements: [], error: String(err?.message ?? err) };
   }
+}
+
+/**
+ * AGI blueprint #10, scoped down from the original "guess arbitrary next tool
+ * calls": the one read this codebase's own GUI tools always pay for at the
+ * start of a task is this one, spawning the native helper and walking the
+ * whole accessibility tree — and the turn that needs it starts as soon as the
+ * user finishes speaking, well before the model's first tool call actually
+ * arrives. Firing it early hides that whole round trip.
+ *
+ * Single-use and short-lived on purpose: a target-finding tool being wrong
+ * about what is on screen RIGHT NOW is a correctness problem, not just a
+ * latency one, so a warm dump is only ever handed to the FIRST real `dump()`
+ * call within `WARM_TTL_MS` of the warm-up — long enough to plausibly still
+ * be this turn's opening read, short enough that nothing meaningful has
+ * usually happened on screen since. Every call after that takes a fresh
+ * accessibility read, exactly as before this existed.
+ */
+const WARM_TTL_MS = 1200;
+let warmed: { at: number; promise: Promise<AxDump> } | null = null;
+
+export function warmDump(): void {
+  if (warmed) return; // a warm-up already in flight; don't stack a second one
+  const promise = dumpUncached(false);
+  warmed = { at: Date.now(), promise };
+  // Nobody may ever consume this (the TTL lapses, or the turn needed no GUI
+  // tool) — an unhandled rejection from a speculative call must not surface.
+  promise.catch(() => {});
+}
+
+export async function dump(all = false): Promise<AxDump> {
+  if (!all && warmed && Date.now() - warmed.at < WARM_TTL_MS) {
+    const p = warmed.promise;
+    warmed = null; // single-use: the next call after this one reads fresh
+    return p;
+  }
+  warmed = null; // stale, or an `all` read the warm-up never covers
+  return dumpUncached(all);
 }
 
 /** Activate an element directly through the API (no mouse). Returns its label. */
@@ -98,7 +136,8 @@ const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(
  * field"). Scores exact and substring label hits, with a nudge from any role
  * word in the query, so "submit button" prefers an actual AXButton.
  */
-export function rank(elements: AxElement[], query: string): AxElement[] {
+/** Shared by `rank` and `rankScored` so the two can never drift apart. */
+function scoreElements(elements: AxElement[], query: string): Array<{ e: AxElement; score: number }> {
   const q = norm(query);
   const qWords = q.split(" ").filter((w) => w.length > 1 && !STOP.has(w));
 
@@ -131,8 +170,42 @@ export function rank(elements: AxElement[], query: string): AxElement[] {
       return { e, score };
     })
     .filter((r) => r.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((r) => r.e);
+    .sort((a, b) => b.score - a.score);
+}
+
+export function rank(elements: AxElement[], query: string): AxElement[] {
+  return scoreElements(elements, query).map((r) => r.e);
+}
+
+/**
+ * Same ranking as `rank`, with the score kept — the free confidence signal
+ * behind the AGI-blueprint "critic": `rank` was already computing exactly how
+ * well the top match fits before this, and discarding it. A click whose top
+ * score barely clears zero, or whose next candidate is nearly as good, is
+ * precisely a guess that a screenshot would later reveal as wrong — worth
+ * catching before it reaches the OS, not after.
+ */
+export function rankScored(elements: AxElement[], query: string): Array<{ element: AxElement; score: number }> {
+  return scoreElements(elements, query).map(({ e, score }) => ({ element: e, score }));
+}
+
+export interface CriticVerdict {
+  ok: boolean;
+  /** Present only when ok is false. */
+  reason?: "weak" | "ambiguous";
+}
+
+/**
+ * The critic's decision from `rankScored`'s output alone — exported so it can
+ * be tested against fabricated scores, without a real accessibility tree.
+ * See `rankScored`'s doc comment for what the two reasons mean.
+ */
+export function criticVerdict(scored: Array<{ element: AxElement; score: number }>): CriticVerdict {
+  if (!scored.length) return { ok: true }; // nothing to be confident or unsure about; the caller already handles "no matches"
+  const [top, second] = scored;
+  if (top.score < 20) return { ok: false, reason: "weak" };
+  if (second && second.score >= top.score * 0.85 && top.score < 90) return { ok: false, reason: "ambiguous" };
+  return { ok: true };
 }
 
 const STOP = new Set(["the", "a", "an", "on", "in", "click", "press", "button", "field", "my", "please", "that", "this"]);

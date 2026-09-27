@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self';" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ECHO — Desktop Intelligence</title>
+    <title>ECHO | Desktop Intelligence</title>
+    <link rel="stylesheet" href="synapse/synapse-field.css" />
     <link rel="stylesheet" href="control-panel.css" />
   </head>
   <body data-status="idle">
@@ -33,6 +34,17 @@
         <symbol id="icon-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" /></symbol>
         <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 0 0-14-3L3 8m1-5v5h5M4 16a8 8 0 0 0 14 3l3-3m-1 5v-5h-5" /></symbol>
         <symbol id="icon-location" viewBox="0 0 24 24"><path d="M20 10c0 6-8 11-8 11S4 16 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2.5" /></symbol>
+        <symbol id="icon-power" viewBox="0 0 24 24"><path d="M12 2v9m-6.4-6A9 9 0 1 0 18.4 5" /></symbol>
+        <symbol id="icon-crown" viewBox="0 0 24 24"><path d="M3 8l4 3 5-6 5 6 4-3-2 11H5Z" /><path d="M5 19h14" /></symbol>
+        <symbol id="icon-bars" viewBox="0 0 24 24"><path d="M5 21V10m7 11V4m7 17v-8" /></symbol>
+        <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Z" /><path d="m3 13 9 5 9-5" /></symbol>
+        <symbol id="icon-scale" viewBox="0 0 24 24"><path d="M12 3v18M7 7l-4 6a4 4 0 0 0 8 0Zm10 0-4 6a4 4 0 0 0 8 0ZM5 7h14" /></symbol>
+        <symbol id="icon-gauge" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8" /><path d="M12 13 16 9M6 13H4m16 0h-2m-6-9v2" /></symbol>
+        <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+        <symbol id="icon-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+        <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></symbol>
+        <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13" /></symbol>
+        <symbol id="icon-send" viewBox="0 0 24 24"><path d="m4 12 16-8-6 16-3-6-6-2Z" /></symbol>
       </defs>
     </svg>
 
@@ -49,28 +61,28 @@
           <button id="voice-toggle" class="quick-control" data-action="toggle-voice" type="button"><span class="control-ring"><svg><use href="#icon-mic" /></svg></span><small>Voice</small></button>
           <button class="quick-control" data-action="neural" type="button"><span class="control-ring"><svg><use href="#icon-network" /></svg></span><small>Neural Map</small></button>
           <button class="quick-control" data-action="osiris" type="button"><span class="control-ring"><svg><use href="#icon-orbit" /></svg></span><small>Osiris</small></button>
-          <button class="quick-control" data-action="settings" type="button"><span class="control-ring"><svg><use href="#icon-settings" /></svg></span><small>Settings</small></button>
+          <button class="quick-control" data-view="settings" type="button"><span class="control-ring"><svg><use href="#icon-settings" /></svg></span><small>Settings</small></button>
+          <button id="power-off" class="quick-control power-control" type="button" aria-haspopup="dialog" aria-controls="shutdown-dialog"><span class="control-ring"><svg><use href="#icon-power" /></svg></span><small>Power off</small></button>
           <button id="panel-close" class="quick-control close-control" type="button" aria-label="Close intelligence control"><span class="control-ring"><svg><use href="#icon-close" /></svg></span><small>Close</small></button>
         </nav>
       </header>
 
       <section id="overview-view" class="view overview-view active" data-view-panel="overview">
+        <div id="panel-core" class="panel-core">
+          <canvas id="core-canvas" role="img" aria-label="Live Echo presence"></canvas>
+        </div>
         <aside class="activity-pane">
           <div class="section-title"><h1>Live Activity</h1><span class="live-state"><i></i>Live</span></div>
           <div id="live-log" class="activity-list" aria-live="polite"><div class="empty-state">Waiting for live activity…</div></div>
+          <section class="neural-card" aria-label="Live synaptic field">
+            <header><span>Neural Field</span><b id="neural-card-ap">—</b></header>
+            <div id="neural-card" class="neural-card-stage"></div>
+          </section>
         </aside>
 
         <section class="core-stage" aria-label="Echo core status">
           <div class="core-crosshair" aria-hidden="true"></div>
           <div class="core-label"><span id="core-status">STANDBY</span><small id="active-model">Resolving route</small></div>
-          <div id="panel-core" class="panel-core" aria-label="Live Echo JARVIS reactor">
-            <div class="core-aura"></div>
-            <img class="core-layer core-base" src="../assets/reactor-jarvis.png" alt="Echo JARVIS core" />
-            <img class="core-layer core-mid" src="../assets/reactor-jarvis-mid.png" alt="" aria-hidden="true" />
-            <img class="core-layer core-outer" src="../assets/reactor-jarvis-outer.png" alt="" aria-hidden="true" />
-            <img class="core-layer core-center" src="../assets/reactor-jarvis-core.png" alt="" aria-hidden="true" />
-            <img class="core-layer core-sweep" src="../assets/reactor-jarvis-outer.png" alt="" aria-hidden="true" />
-          </div>
           <div class="analytics-strip" aria-label="Session analytics">
             <article><strong id="metric-commands">0</strong><span>Commands</span></article>
             <article><strong id="metric-tools">0</strong><span>Tool calls</span></article>
@@ -82,7 +94,7 @@
         <aside class="context-pane">
           <section class="weather-panel">
             <div class="weather-place"><span class="weather-glyph" aria-hidden="true"><i></i></span><div><strong id="weather-place">Resolving location…</strong><small id="weather-updated">LIVE WEATHER</small></div><button id="weather-locate" class="bare-icon" type="button" aria-label="Use device location"><svg><use href="#icon-location" /></svg></button></div>
-            <div class="weather-reading"><strong id="weather-temperature">—°</strong><div><span id="weather-condition">Waiting for live conditions</span><small>FEELS <b id="weather-feels">—</b> · HUMIDITY <b id="weather-humidity">—</b> · WIND <b id="weather-wind">—</b></small></div></div>
+            <div class="weather-reading"><strong id="weather-temperature">N/A</strong><div><span id="weather-condition">Waiting for live conditions</span><small>FEELS <b id="weather-feels">N/A</b> · HUMIDITY <b id="weather-humidity">N/A</b> · WIND <b id="weather-wind">N/A</b></small></div></div>
             <form id="weather-form" class="weather-search"><input id="weather-query" type="text" placeholder="Search location" autocomplete="off" /><button type="submit">SET</button></form>
           </section>
 
@@ -101,6 +113,11 @@
             <span class="route-summary"><span class="summary-icon"><svg><use href="#icon-brain" /></svg></span><span><strong id="route-name">No active route</strong><small id="route-model">Waiting for runtime</small></span><svg class="chevron"><use href="#icon-chevron" /></svg></span>
           </button>
 
+          <section class="context-section intel-section" aria-label="Open intelligence">
+            <span class="context-heading"><span><i></i>Intel</span><small id="intel-summary-count">Nothing asked yet</small></span>
+            <div id="intel-summary" class="intel-list"><span class="summary-empty">Ask about satellites, world news, what's nearby, a network, or exploited CVEs</span></div>
+          </section>
+
           <button class="context-section context-link compact connections-summary" type="button" data-view="models">
             <span class="context-heading"><span><i></i>Tool Connections</span><small id="connection-summary-count">0 configured</small></span>
             <span id="connection-summary" class="connection-dots"><span class="summary-empty">No external connections</span></span>
@@ -113,33 +130,60 @@
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
           <button class="active" type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
+          <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
           <div class="session-readout"><span>SESSION UPTIME</span><strong id="metric-uptime">00:00:00</strong></div>
         </aside>
 
         <section class="mission-workspace" aria-labelledby="mission-monitor-title">
           <div class="workspace-heading mission-heading">
-            <div><h1 id="mission-monitor-title">Mission Monitor</h1><p>Dependency-aware work, Results, and verification</p></div>
-            <label class="mission-picker" for="mission-select"><span>Mission</span><select id="mission-select" aria-label="Select a mission"><option value="">No missions</option></select></label>
+            <div><h1 id="mission-monitor-title">Agents</h1><p id="ops-subtitle">Your fleet, one task, every report</p></div>
+            <div class="ops-subnav" role="tablist" aria-label="Agent view">
+              <button type="button" class="ops-tab active" data-ops-view="board" role="tab" aria-selected="true">Board</button>
+              <button type="button" class="ops-tab" data-ops-view="missions" role="tab" aria-selected="false">Missions</button>
+            </div>
+            <div class="zoom-control" role="group" aria-label="Zoom agents panel">
+              <button type="button" id="agents-zoom-out" title="Zoom out" aria-label="Zoom out"><svg><use href="#icon-minus" /></svg></button>
+              <span id="agents-zoom-level">100%</span>
+              <button type="button" id="agents-zoom-in" title="Zoom in" aria-label="Zoom in"><svg><use href="#icon-plus" /></svg></button>
+            </div>
+            <label class="mission-picker" for="mission-select" hidden><span>Mission</span><select id="mission-select" aria-label="Select a mission"><option value="">No missions</option></select></label>
           </div>
-          <div id="mission-panel" class="mission-panel" aria-live="polite"><div class="empty-state large"><strong>No agent missions yet</strong><span>Long tasks delegated by Echo will appear here with live execution details.</span></div></div>
-        </section>
 
-        <aside class="operations-rail">
-          <section class="echo-workspace" aria-labelledby="echo-activity-title">
-            <div class="workspace-heading small"><div><h2 id="echo-activity-title">Echo Activity</h2><p id="task-summary-count">0 active</p></div><div id="task-legend" class="task-legend"></div></div>
-            <div id="task-list" class="task-list compact"><div class="empty-state">No Echo task activity in this session.</div></div>
+          <section id="board-view" class="agent-board" data-ops-panel="board">
+            <div class="board-stage">
+              <div class="board-column" id="board-column-left"></div>
+
+              <div class="board-task-node">
+                <div class="board-task-body">
+                  <div id="board-answer" class="board-answer" hidden>
+                    <p class="board-answer-goal" id="board-answer-goal"></p>
+                    <div class="board-answer-text" id="board-answer-text"></div>
+                  </div>
+                  <textarea id="board-task" class="board-task-input" rows="3"
+                    placeholder="Describe the outcome you want, with any context and constraints…"></textarea>
+                </div>
+                <div class="board-task-status">
+                  <span id="board-status-text">Ready when you are.</span>
+                </div>
+                <div class="board-task-tools">
+                  <button type="button" class="board-round" id="board-select-all" title="Select every agent" aria-label="Select every agent"><svg><use href="#icon-network" /></svg></button>
+                  <button type="button" class="board-round" id="board-toggle-output" title="Show or hide every agent's output" aria-label="Toggle all output"><svg><use href="#icon-eye" /></svg></button>
+                  <button type="button" class="board-round primary" id="board-run" title="Run this task" aria-label="Run task"><svg><use href="#icon-send" /></svg></button>
+                  <button type="button" class="board-round primary danger" id="board-stop" title="Stop the board" aria-label="Stop the board" hidden><svg><use href="#icon-stop" /></svg></button>
+                </div>
+              </div>
+
+              <div class="board-column" id="board-column-right"></div>
+            </div>
+
+            <div class="board-dock">
+              <button type="button" id="board-manage" title="Your agents" aria-label="Your agents"><svg><use href="#icon-agent" /></svg>Manage agents</button>
+              <button type="button" id="board-clear" title="Clear the board and start again" aria-label="Clear the board"><svg><use href="#icon-trash" /></svg></button>
+            </div>
           </section>
-          <section class="agent-workspace" aria-labelledby="connected-agents-title">
-            <div class="workspace-heading small"><div><h2 id="connected-agents-title">Connected Agents</h2><p id="agent-count">0 / 4 active</p></div></div>
-            <div id="agent-list" class="agent-list"><div class="empty-state">No background agents connected.</div></div>
-            <form id="agent-form" class="agent-form">
-              <label for="agent-target">Assign focused work</label>
-              <select id="agent-target" aria-label="Agent target"><option value="">Deploy a new agent</option></select>
-              <textarea id="agent-goal" rows="3" placeholder="Describe a focused task…"></textarea>
-              <button type="submit"><span>Assign task</span><svg><use href="#icon-arrow" /></svg></button>
-            </form>
-          </section>
-        </aside>
+
+          <div id="mission-panel" class="mission-panel" data-ops-panel="missions" hidden aria-live="polite"><div class="empty-state large"><strong>No agent missions yet</strong><span>Long tasks delegated by Echo will appear here with live execution details.</span></div></div>
+        </section>
       </section>
 
       <section id="models-view" class="view routing-view" data-view-panel="models" hidden>
@@ -170,17 +214,207 @@
         </aside>
       </section>
 
+      <section id="settings-view" class="view settings-view" data-view-panel="settings" hidden>
+        <aside class="section-nav" aria-label="Control panel sections">
+          <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
+          <button class="active" type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
+        </aside>
+
+        <section class="settings-workspace" aria-labelledby="settings-title">
+          <div class="workspace-heading settings-heading">
+            <div><h1 id="settings-title">Settings</h1><p>Models, voice, memory, and autonomous behavior</p></div>
+            <span id="settings-save-state" class="settings-save-state">Synced with Echo</span>
+          </div>
+
+          <form id="settings-form" class="settings-form">
+            <fieldset class="settings-section">
+              <legend>General</legend>
+              <label class="setting-row" for="settings-brain">
+                <span><strong>Default brain</strong><small>Model route used for new requests</small></span>
+                <select id="settings-brain" name="brain">
+                  <option value="claude">Claude</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="ollama">Ollama</option>
+                  <option value="openai">OpenAI</option>
+                </select>
+              </label>
+              <label class="setting-row switch-row" for="settings-start-listening">
+                <span><strong>Listen on launch</strong><small>Open the microphone after Echo starts</small></span>
+                <input id="settings-start-listening" name="startListeningOnLaunch" type="checkbox" />
+              </label>
+            </fieldset>
+
+            <fieldset class="settings-section">
+              <legend>Voice</legend>
+              <div class="settings-grid">
+                <label class="setting-row switch-row" for="settings-tts-enabled"><span><strong>Spoken responses</strong><small>Read answers aloud</small></span><input id="settings-tts-enabled" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-wake-word"><span><strong>Wake word</strong><small>Listen for “Echo”</small></span><input id="settings-wake-word" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-conversation-mode"><span><strong>Conversation mode</strong><small>Continue listening after replies</small></span><input id="settings-conversation-mode" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-barge-in"><span><strong>Barge in</strong><small>Interrupt speech when you talk</small></span><input id="settings-barge-in" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-stt-streaming"><span><strong>Streaming recognition</strong><small>Transcribe while you speak</small></span><input id="settings-stt-streaming" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-tts-streaming"><span><strong>Streaming speech</strong><small>Start speaking before the full answer</small></span><input id="settings-tts-streaming" type="checkbox" /></label>
+              </div>
+              <label class="setting-row switch-row privacy-setting" for="settings-send-audio"><span><strong>Send audio to the brain</strong><small>Allows configured cloud models to receive voice audio. Keep off for local-only transcription.</small></span><input id="settings-send-audio" type="checkbox" /></label>
+              <div class="settings-grid compact-fields">
+                <label class="field-control" for="settings-stt-provider"><span>Speech recognition</span><select id="settings-stt-provider"><option value="whisper">Whisper</option><option value="apple">Apple Speech</option><option value="sarvam">Sarvam</option></select></label>
+                <label class="field-control" for="settings-stt-language"><span>Recognition language</span><input id="settings-stt-language" type="text" inputmode="text" maxlength="12" placeholder="en or auto" /></label>
+                <label class="field-control" for="settings-tts-engine"><span>Speech engine</span><select id="settings-tts-engine"><option value="mac">macOS</option><option value="elevenlabs">ElevenLabs</option><option value="fakeyou">FakeYou</option><option value="local-clone">Local clone</option><option value="sarvam">Sarvam</option><option value="gemini">Gemini</option><option value="piper">Piper (offline)</option></select></label>
+                <label class="field-control" for="settings-max-spoken"><span>Max spoken sentences</span><input id="settings-max-spoken" type="number" min="0" max="50" step="1" /></label>
+                <label class="field-control" for="settings-conversation-window"><span>Conversation window (seconds)</span><input id="settings-conversation-window" type="number" min="2" max="60" step="1" /></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="settings-section">
+              <legend>Memory</legend>
+              <div class="settings-grid">
+                <label class="setting-row switch-row" for="settings-memory-enabled"><span><strong>Long-term memory</strong><small>Recall useful context across sessions</small></span><input id="settings-memory-enabled" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-cloud-recall"><span><strong>Cloud recall</strong><small>Allow memory context in cloud prompts</small></span><input id="settings-cloud-recall" type="checkbox" /></label>
+              </div>
+              <label class="field-control inline-field" for="settings-retention-days"><span>Retention period (days)</span><input id="settings-retention-days" type="number" min="0" max="3650" step="1" /></label>
+            </fieldset>
+
+            <fieldset class="settings-section">
+              <legend>Background intelligence</legend>
+              <div class="settings-grid">
+                <label class="setting-row switch-row" for="settings-shadow"><span><strong>Shadow mode</strong><small>Periodically observe and assist</small></span><input id="settings-shadow" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-ghost"><span><strong>Ghost mode</strong><small>Run proactive background checks</small></span><input id="settings-ghost" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-auto-debug"><span><strong>Auto debug</strong><small>Watch for and explain runtime failures</small></span><input id="settings-auto-debug" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-dreaming"><span><strong>Dreaming</strong><small>Consolidate useful memory while idle</small></span><input id="settings-dreaming" type="checkbox" /></label>
+              </div>
+              <label class="field-control inline-field" for="settings-shadow-interval"><span>Shadow interval (seconds)</span><input id="settings-shadow-interval" type="number" min="15" max="3600" step="5" /></label>
+            </fieldset>
+
+            <fieldset class="settings-section">
+              <legend>Learning</legend>
+              <div class="settings-grid">
+                <label class="setting-row switch-row" for="settings-learning-enabled"><span><strong>Learn from turns</strong><small>Store successful action trajectories</small></span><input id="settings-learning-enabled" type="checkbox" /></label>
+                <label class="setting-row switch-row" for="settings-capture-screens"><span><strong>Capture screens</strong><small>Save visual steps during learning</small></span><input id="settings-capture-screens" type="checkbox" /></label>
+              </div>
+              <label class="field-control inline-field" for="settings-max-steps"><span>Maximum learned steps per turn</span><input id="settings-max-steps" type="number" min="0" max="1000" step="1" /></label>
+            </fieldset>
+
+            <div class="settings-actions">
+              <button id="settings-reset" class="secondary-button" type="button">Reset unsaved changes</button>
+              <button id="settings-save" class="primary-button" type="submit">Save settings</button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="settings-detail">
+          <div class="route-orbit settings-orbit" aria-hidden="true"><span><svg><use href="#icon-settings" /></svg></span><i></i><i></i><i></i></div>
+          <section>
+            <div class="section-title compact-title"><h2>Storage &amp; security</h2></div>
+            <p>Settings are saved in Echo’s private user-data folder, so app updates will not overwrite them.</p>
+            <code id="settings-config-path">Resolving settings path…</code>
+          </section>
+          <section class="settings-note">
+            <strong>Restart-sensitive options</strong>
+            <p>Wake word, screen capture, and speech-engine changes are saved immediately and take full effect the next time Echo starts.</p>
+          </section>
+          <section class="settings-note warning-note">
+            <strong>Privacy</strong>
+            <p>Screen capture and cloud audio are disabled unless you explicitly enable them here.</p>
+          </section>
+          <button id="open-api-keys" class="api-key-button" type="button"><svg><use href="#icon-plug" /></svg><span><strong>API Keys</strong><small>Manage provider credentials</small></span><svg><use href="#icon-chevron" /></svg></button>
+        </aside>
+      </section>
+
       <footer class="command-deck">
-        <div class="deck-status"><span><i></i><b id="system-state">INITIALIZING</b></span><small id="clock">--:--:--</small></div>
+        <div class="deck-status"><span><i></i><b id="system-state">INITIALIZING</b></span><small id="clock">00:00:00</small></div>
         <form id="command-form" class="command-form">
           <label for="command-input" class="sr-only">Type a command for Echo</label>
           <input id="command-input" type="text" placeholder="Ask, plan, search, or command…" autocomplete="off" spellcheck="false" />
           <button id="send-command" type="submit" aria-label="Send command"><svg><use href="#icon-arrow" /></svg></button>
         </form>
-        <div class="deck-meta"><span id="core-agent-count">0 AGENTS</span><small id="voice-state">VOICE —</small></div>
+        <div class="deck-meta"><span id="core-agent-count">0 AGENTS</span><small id="voice-state">VOICE OFF</small></div>
         <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
       </footer>
     </main>
+    <dialog id="shutdown-dialog" class="power-dialog" aria-labelledby="shutdown-title" aria-describedby="shutdown-description">
+      <form method="dialog">
+        <span class="power-dialog-icon" aria-hidden="true"><svg><use href="#icon-power" /></svg></span>
+        <div>
+          <h2 id="shutdown-title">Power off Echo?</h2>
+          <p id="shutdown-description">Echo will stop its current work, close every MCP connection, release voice services, and then shut down. MCP starts automatically when Echo is opened again.</p>
+        </div>
+        <div class="power-dialog-actions">
+          <button id="shutdown-cancel" class="secondary-button" value="cancel">Cancel</button>
+          <button id="shutdown-confirm" class="danger-button" value="confirm">Close MCP &amp; power off</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="api-keys-dialog" class="api-keys-dialog" aria-labelledby="api-keys-title">
+      <form id="api-keys-form">
+        <header class="api-keys-header">
+          <span class="power-dialog-icon" aria-hidden="true"><svg><use href="#icon-plug" /></svg></span>
+          <div>
+            <h2 id="api-keys-title">API Keys</h2>
+            <p>Stored at <code id="api-keys-path">~/.jarvis/keys.env</code>, readable only by you. Leave a field blank to keep what is already saved — nothing is ever shown back in plain text here.</p>
+          </div>
+        </header>
+        <div id="api-keys-list" class="api-keys-list"><div class="empty-state">Loading…</div></div>
+        <p class="api-keys-feedback" id="api-keys-feedback" role="status" aria-live="polite"></p>
+        <div class="power-dialog-actions">
+          <button id="api-keys-close" class="secondary-button" type="button">Close</button>
+          <button id="api-keys-save" class="primary-button" type="submit">Save keys</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="fleet-dialog" class="fleet-dialog" aria-labelledby="fleet-title">
+      <div class="fleet-head">
+        <div><span class="fleet-eyebrow">Fleet</span><h2 id="fleet-title">Your agents</h2></div>
+        <button id="fleet-close" class="fleet-close" type="button" aria-label="Close"><svg><use href="#icon-close" /></svg></button>
+      </div>
+      <div class="fleet-body">
+        <p class="fleet-error" id="fleet-error" role="alert" hidden></p>
+
+        <div id="fleet-browse">
+          <section class="fleet-group">
+            <h3>Added by you</h3>
+            <div id="fleet-mine" class="fleet-list"><p class="fleet-empty">None yet. An agent is a name, a brief, and the tools it is allowed to use.</p></div>
+            <button id="fleet-add-open" class="fleet-add" type="button"><svg><use href="#icon-plus" /></svg><span>Add an agent</span></button>
+          </section>
+          <section class="fleet-group">
+            <h3>Echo's own</h3>
+            <div id="fleet-theirs" class="fleet-list built-in"></div>
+            <p class="fleet-note">These ship with Echo and cannot be edited, so a change here can never leave you without a working fleet.</p>
+          </section>
+        </div>
+
+        <form id="fleet-form" class="fleet-form" hidden>
+          <label><span>Name</span><input id="fleet-name" maxlength="40" placeholder="Tax" autocomplete="off" /></label>
+          <label><span>Id</span><input id="fleet-id" maxlength="24" placeholder="tax" autocomplete="off" /></label>
+          <label class="fleet-wide"><span>What it does</span><input id="fleet-description" maxlength="160" placeholder="Answers questions about our filings." autocomplete="off" /></label>
+          <label class="fleet-wide">
+            <span>Brief</span>
+            <textarea id="fleet-brief" rows="7" placeholder="You answer questions about our tax filings.&#10;&#10;- Cite the filing year for anything you assert.&#10;- Say when a figure is an estimate rather than filed.&#10;- Refuse to guess at numbers you have not been given."></textarea>
+            <small>Its standing instructions. Sent with every task this agent runs.</small>
+          </label>
+          <label><span>Tier</span>
+            <select id="fleet-tier">
+              <option value="fast">Fast — local, free</option>
+              <option value="balanced" selected>Balanced — your default brain</option>
+              <option value="deep">Deep — strongest reasoning</option>
+            </select>
+          </label>
+          <fieldset class="fleet-wide">
+            <legend>Tools</legend>
+            <div id="fleet-tools" class="fleet-tool-grid"></div>
+            <small>Read-only tools only. Writing files, running commands, and directing other agents are not available to agents you add.</small>
+          </fieldset>
+          <div class="fleet-actions">
+            <button type="button" id="fleet-cancel" class="secondary-button">Cancel</button>
+            <button type="submit" id="fleet-save" class="primary-button"><svg><use href="#icon-plus" /></svg>Add agent</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+    <script src="humanoid-core.js"></script>
+    <script src="synapse/neuronmap-data.js"></script>
+    <script src="synapse/synapse-maps.js"></script>
+    <script src="synapse/synapse-field.js"></script>
     <script src="control-panel.js"></script>
   </body>
 </html>

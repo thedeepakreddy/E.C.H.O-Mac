@@ -68,6 +68,8 @@ export const READ_ONLY = new Set([
   "list_research_queue",
   "phone_remote_status",
   "search_long_term_memory",
+  "web_search",
+  "system_sitrep",
   // Reading a live Osiris feed is a GET against a public intelligence API.
   "osiris_intel",
   "search_audio_log",
@@ -564,6 +566,73 @@ export function classify(
     return { tier: "medium", reason: `fetch ${firstString(input, ["url"]) ?? "a page"}` };
   }
 
-  // Unknown tool: treat as medium rather than silently trusting it.
+  // Unknown tool: judge it by what its NAME says it does.
+  return byCapability(tool, input);
+}
+
+/**
+ * Split a tool name into words, whatever convention it was written in.
+ *
+ * `GMAIL_SEND_EMAIL`, `githubDeleteRepo` and `supabase.execute-sql` all have to
+ * reduce to the same kind of token list, because the verb is the only thing
+ * that says what the tool DOES. Note `\b` is useless here: `_` is a word
+ * character, so `\bsend\b` never matches inside `GMAIL_SEND_EMAIL`.
+ */
+function toolWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // camelCase -> camel Case
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+}
+
+/**
+ * Verbs that decide the tier, worst first.
+ *
+ * The fallback used to be a flat `medium`, written when an unrecognised tool
+ * was a rare event — and medium is executed with no confirmation. That
+ * assumption breaks the moment an MCP aggregator is connected: one server can
+ * add hundreds of tools at once, most of which write to something that
+ * matters. Measured against the shape those tools actually have,
+ * `GMAIL_SEND_EMAIL`, `GITHUB_DELETE_A_REPOSITORY`, `SUPABASE_EXECUTE_SQL` and
+ * `STRIPE_CREATE_PAYMENT` every one came back medium — Echo would have sent
+ * the mail, dropped the repo, run the SQL and taken the payment without
+ * asking once.
+ *
+ * This is the same lesson as `rm` vs `unlink` and the shortcuts hole: name the
+ * CAPABILITY, not the tool. A word list is a blunt instrument, but the failure
+ * it prevents is irreversible and the failure it causes is one extra question.
+ */
+const CAPABILITY: Array<[RiskTier, string[], string]> = [
+  ["high", ["delete", "destroy", "drop", "purge", "erase", "wipe", "remove", "revoke", "terminate", "uninstall", "truncate", "reset"], "delete something"],
+  ["high", ["send", "email", "mail", "message", "post", "publish", "tweet", "notify", "sms", "reply", "dm", "broadcast", "invite", "share"], "send something to someone"],
+  ["high", ["pay", "payment", "charge", "refund", "transfer", "invoice", "checkout", "subscribe", "purchase", "order", "billing"], "move money"],
+  ["high", ["merge", "deploy", "release", "rollback", "revert", "force", "restart", "reboot", "shutdown", "scale"], "change something already running"],
+  ["high", ["execute", "exec", "eval", "sql", "shell", "command", "script"], "execute code"],
+  ["high", ["grant", "permission", "role", "policy", "key", "secret", "token", "credential", "password"], "change access"],
+  ["medium", ["create", "update", "write", "insert", "patch", "upload", "rename", "move", "copy", "add", "set", "edit", "modify", "close", "open", "start", "stop"], "change something"],
+  ["low", ["get", "list", "read", "search", "find", "fetch", "show", "describe", "lookup", "count", "check", "status", "info", "view", "query"], "read something"],
+];
+
+/**
+ * What a tool's name implies, when nothing else is known about it.
+ *
+ * Deliberately worst-match-wins: `LIST_AND_DELETE` is a delete. A tool that
+ * reads AND writes is a write.
+ */
+export function byCapability(tool: string, input: Record<string, unknown> = {}): RiskAssessment {
+  const words = new Set(toolWords(tool));
+  for (const [tier, verbs, what] of CAPABILITY) {
+    const hit = verbs.find((v) => words.has(v));
+    if (!hit) continue;
+    // A read verb only wins if nothing heavier matched, which the ordering
+    // above already guarantees by the time we reach it.
+    return {
+      tier,
+      reason: tier === "low" ? `${speakable(tool, 40)} only reads` : `${what} — ${speakable(tool, 40)}`,
+      detail: JSON.stringify(input).slice(0, 200),
+    };
+  }
+  // Nothing recognisable in the name: unchanged from before, medium.
   return { tier: "medium", reason: `run ${tool}` };
 }

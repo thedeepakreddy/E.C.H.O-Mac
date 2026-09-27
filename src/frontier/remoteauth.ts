@@ -1,7 +1,7 @@
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * The password that guards remote control of the machine.
@@ -25,7 +25,7 @@ import { join } from "node:path";
 
 // Overridable so tests can set a password in a throwaway directory rather than
 // writing a real credential into the user's ~/.jarvis.
-const DIR = process.env.JARVIS_REMOTE_DIR || join(homedir(), ".jarvis");
+const DIR = process.env.JARVIS_REMOTE_DIR || dataRoot();
 const FILE = join(DIR, "remote.json");
 
 export const remoteAuthPath = FILE;

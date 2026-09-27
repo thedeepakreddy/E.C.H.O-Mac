@@ -69,5 +69,12 @@ ok(!!describeAction("some_new_tool", {})?.line, "an unlisted tool still shows so
 // Dangerous actions are coloured so the pause has a visible cause.
 ok(describeAction("send_sms_message", { recipient: "x" })?.kind === "stop", "outward-facing actions are flagged");
 
+// A screen-sized transparent window is exceptionally expensive when it
+// repaints continuously. It should animate only while Echo is active.
+ok(css.includes('body[data-render-mode="active"] #scanlines'), "scanlines animate only during active work");
+ok((js.match(/setInterval\(drawMatrix,\s*50\)/g) ?? []).length === 1, "Matrix has only one guarded scheduler");
+ok(js.includes("if (!matrixTimer) matrixTimer = setInterval(drawMatrix, 50)"), "Matrix rendering starts only in away mode");
+ok(js.includes("clearInterval(matrixTimer)"), "Matrix rendering stops when away mode ends");
+
 console.log(`\n${pass}/${pass + fail} overlay checks passed\n`);
 process.exit(fail ? 1 : 0);

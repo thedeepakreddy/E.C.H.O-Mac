@@ -6,9 +6,12 @@
  *   npm run panelpreview
  */
 import { app, BrowserWindow, ipcMain } from "electron";
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+app.setPath("userData", resolve(tmpdir(), "echo-control-panel-preview"));
 const now = Date.now();
 const result = (summary, label) => ({
   status: "completed",
@@ -47,13 +50,61 @@ const snapshot = {
   tasks: [{ id: "session-1", title: mission.goal, status: "working", agent: "Echo", startedAt: mission.createdAt }],
   agents: [{ id: "launch-brief.draft", name: "Echo Agent 9", goal: mission.tasks.draft.goal, status: "working", startedAt: mission.tasks.draft.startedAt, progress: "Structuring the decision and risk sections from verified inputs.", missionId: mission.id, agentTaskId: "draft", lane: "knowledge" }],
   missions: [mission],
+  settings: {
+    brain: "gemini",
+    voice: { ttsEnabled: true, wakeWord: true, conversationMode: true, bargeIn: true, sttStreaming: true, ttsStreaming: true, sendAudioToBrain: false, sttProvider: "whisper", sttLanguage: "en", ttsEngine: "mac", maxSpokenSentences: 6, conversationWindowMs: 12000 },
+    hud: { startListeningOnLaunch: false },
+    memory: { enabled: true, cloudRecall: false, retentionDays: 90 },
+    helpers: { shadow: false, ghost: false, autoDebug: true, shadowIntervalSeconds: 60 },
+    dreaming: { enabled: true },
+    learning: { enabled: true, captureScreens: false, maxStepsPerTurn: 100 },
+    configPath: "/Users/preview/.jarvis/config.json",
+  },
   models: [{ id: "gemini", label: "Gemini", model: "gemini-3.7-flash", active: true, available: true }],
   connections: [{ name: "workspace", status: "active", tools: 12, lastActivityAt: now - 8_000 }],
   analytics: { commands: 1, toolCalls: 17, errors: 0, completedTasks: 0, uptimeSeconds: 3200 },
 };
 
+const fleet = {
+  members: [
+    { id: "lead", name: "Lead", description: "Synthesises the team's work into one answer.", brief: "Lead", tier: "deep", tools: [], custom: false },
+    { id: "research", name: "Research", description: "Finds and verifies facts from approved sources.", brief: "Research", tier: "balanced", tools: [], custom: false },
+    { id: "plan", name: "Plan", description: "Breaks a goal into concrete steps.", brief: "Plan", tier: "balanced", tools: [], custom: false },
+    { id: "write", name: "Write", description: "Drafts the concise deliverable.", brief: "Write", tier: "balanced", tools: [], custom: false },
+    { id: "review", name: "Review", description: "Checks the draft against acceptance criteria.", brief: "Review", tier: "balanced", tools: [], custom: false },
+    { id: "analyse", name: "Analyse", description: "Surfaces risks and open questions.", brief: "Analyse", tier: "deep", tools: [], custom: false },
+    { id: "sidekick", name: "Sidekick", description: "A custom preview agent with a couple of tools.", brief: "You help with quick lookups.", tier: "fast", tools: ["recall", "read_local_file"], custom: true },
+  ],
+  grantableTools: ["recall", "read_local_file", "list_ui_elements", "search_my_past", "read_clipboard"],
+  maxCustom: 6,
+};
+const boardMission = {
+  schemaVersion: 1,
+  id: "board-preview",
+  taskId: "mission.board-preview",
+  goal: "Summarise this week's launch readiness",
+  status: "running",
+  scope: {},
+  createdAt: now - 60_000,
+  updatedAt: now - 2_000,
+  tasks: {
+    research: { id: "research", goal: "Summarise this week's launch readiness", dependsOn: [], lane: "knowledge", budget, status: "completed", recoveryAttempts: 0, actorName: "Research", startedAt: now - 55_000, result: result("Found eleven relevant facts across three approved sources, all cross-checked.", "research-notes.md") },
+    analyse: { id: "analyse", goal: "Summarise this week's launch readiness", dependsOn: [], lane: "knowledge", budget, status: "working", recoveryAttempts: 0, actorName: "Analyse", startedAt: now - 30_000 },
+    write: { id: "write", goal: "Summarise this week's launch readiness", dependsOn: [], lane: "knowledge", budget, status: "pending", recoveryAttempts: 0 },
+  },
+};
+snapshot.missions.push(boardMission);
+snapshot.agents.push({ id: "board-preview.analyse", name: "Analyse", goal: boardMission.goal, status: "working", startedAt: boardMission.tasks.analyse.startedAt, progress: "Weighing three open risks against the research notes.", missionId: boardMission.id, agentTaskId: "analyse", lane: "knowledge" });
+
 ipcMain.handle("control:snapshot", () => structuredClone(snapshot));
-ipcMain.handle("control:action", () => ({ ok: true, message: "Preview mode" }));
+ipcMain.handle("control:action", (_event, action) => {
+  if (action?.type === "save-settings" && action.settings) snapshot.settings = { ...snapshot.settings, ...action.settings, configPath: snapshot.settings.configPath };
+  if (action?.type === "run-board" || action?.type === "run-fleet-agent") return { ok: true, message: "Preview mode", data: { missionId: boardMission.id } };
+  if (action?.type === "save-agent" || action?.type === "remove-agent" || action?.type === "stop-mission" || action?.type === "stop-mission-task") return { ok: true, message: "Preview mode" };
+  return { ok: true, message: action?.type === "save-settings" ? "Settings saved in preview mode." : action?.type === "shutdown" ? "Preview shutdown path verified." : "Preview mode" };
+});
+ipcMain.handle("control:fleet", () => structuredClone(fleet));
+ipcMain.handle("control:api-keys", () => ({ fields: [], values: {} }));
 ipcMain.handle("control:weather", () => ({ status: "ok", place: "Preview Lab", temperature: 21, feelsLike: 20, humidity: 43, wind: 7, condition: "Clear", source: "timezone-estimate", updatedAt: now }));
 ipcMain.on("control:close", () => app.quit());
 
@@ -62,7 +113,8 @@ app.whenReady().then(async () => {
     width: 1180,
     height: 760,
     title: "ECHO — Mission Monitor Preview",
-    backgroundColor: "#030809",
+    transparent: true,
+    backgroundColor: "#00000000",
     webPreferences: {
       preload: resolve(root, "dist", "preload.cjs"),
       sandbox: true,
@@ -74,7 +126,44 @@ app.whenReady().then(async () => {
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   await window.loadFile(resolve(root, "renderer", "control-panel.html"));
-  await window.webContents.executeJavaScript("document.querySelector('[data-view=tasks]').click()", true);
+  const previewView = process.env.ECHO_PANEL_VIEW || "tasks";
+  const previewState = await window.webContents.executeJavaScript(`(() => {
+    setView(${JSON.stringify(previewView)});
+    return [...document.querySelectorAll("[data-view-panel]")].map((panel) => ({ view: panel.dataset.viewPanel, hidden: panel.hidden }));
+  })()`, true);
+  console.log(`[panel-preview] view ${JSON.stringify(previewState)}`);
+  if (process.env.ECHO_PANEL_SCREENSHOT) {
+    if (process.env.ECHO_PANEL_POWER_DIALOG === "1") {
+      await window.webContents.executeJavaScript('document.getElementById("power-off").click()', true);
+    }
+    await window.webContents.executeJavaScript("new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame)))", true);
+    // Some panels settle after first paint (the synaptic field builds on idle).
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, Number(process.env.ECHO_PANEL_DELAY_MS) || 400));
+    const image = await window.webContents.capturePage();
+    await writeFile(process.env.ECHO_PANEL_SCREENSHOT, image.toPNG());
+    console.log(`[panel-preview] screenshot ${process.env.ECHO_PANEL_SCREENSHOT}`);
+    app.quit();
+  }
+  if (process.env.ECHO_PANEL_SMOKE === "1") {
+    const smoke = await window.webContents.executeJavaScript(`(async () => {
+      const checkbox = document.getElementById("settings-start-listening");
+      const saveButton = document.getElementById("settings-save");
+      document.getElementById("power-off").click();
+      const powerDialogOpen = document.getElementById("shutdown-dialog").open;
+      document.getElementById("shutdown-cancel").click();
+      checkbox.click();
+      const dirtyState = document.getElementById("settings-save-state").textContent;
+      document.getElementById("settings-form").requestSubmit();
+      const deadline = Date.now() + 2000;
+      while (saveButton.disabled && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      const latest = await window.echoControl.snapshot();
+      return { powerDialogOpen, dirtyState, savedState: document.getElementById("settings-save-state").textContent,
+        persisted: latest.settings.hud.startListeningOnLaunch === checkbox.checked,
+        saveEnabled: !saveButton.disabled };
+    })()`, true);
+    console.log(`[panel-smoke] ${JSON.stringify(smoke)}`);
+    app.quit();
+  }
 });
 
 app.on("window-all-closed", () => app.quit());

@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { KEY_FIELDS, readKeys, writeKeys, applyKeys, keysPath } from "./keystore.js";
+import { KEY_FIELDS, readKeys, saveKeys, keysPath } from "./keystore.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -85,18 +85,12 @@ export function wireSetupIpc(onSaved?: () => void): void {
 
   e.ipcMain.handle("setup:save", (_evt: unknown, values: Record<string, string>) => {
     try {
-      const existing = readKeys();
       // A blank field means "leave what is already saved", so reopening the
-      // window and pressing save does not silently wipe every key.
-      const merged: Record<string, string> = { ...existing };
-      for (const f of KEY_FIELDS) {
-        const v = (values?.[f.env] ?? "").trim();
-        if (v) merged[f.env] = v;
-      }
-      writeKeys(merged);
-      applyKeys();
+      // window and pressing save does not silently wipe every key. Shared with
+      // the control panel's API-keys section — see keystore.ts's saveKeys.
+      const { count } = saveKeys(values ?? {});
       onSaved?.();
-      return { ok: true, count: Object.keys(merged).length };
+      return { ok: true, count };
     } catch (err: any) {
       return { ok: false, error: String(err?.message ?? err) };
     }

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Looking things up while you sleep.
@@ -40,7 +40,7 @@ export const MAX_ATTEMPTS = 3;
 /** Questions waiting at once. */
 export const MAX_QUEUE = 12;
 
-export function researchDir(root: string = join(homedir(), ".jarvis")): string {
+export function researchDir(root: string = dataRoot()): string {
   return join(root, "research");
 }
 

@@ -11,6 +11,8 @@ import {
 import type { AudioTurn, BrainExecutionLimits, SendOptions } from "./types.js";
 import { stripAudioParts } from "../voice/audio-turn.js";
 import { TOOLS, ToolDef } from "../tools/registry.js";
+import { selectToolNames } from "./tool-router.js";
+import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
 import { runGated } from "../safety/gate.js";
 import { recordLLM, approxTokens } from "../agent-replay/runtime.js";
 import { resolveToolName } from "./localtools.js";
@@ -121,7 +123,9 @@ function unknownToolAdvice(called: string, known: string[]): string {
 export class OpenAIBrain extends Brain {
   private ai: OpenAI;
   private contents: any[] = [];
-  private functionDeclarations = TOOLS.map(toFunctionDeclaration);
+  private functionDeclarations: any[];
+  /** This turn's pruned subset (AGI blueprint #9), or null to send them all. Recomputed once per runLoop(). */
+  private activeFunctionDeclarations: any[] | null = null;
   private busy = false;
   private aborted = false;
   private mcpInitialized = false;
@@ -137,6 +141,9 @@ export class OpenAIBrain extends Brain {
   constructor(private cfg: JarvisConfig, apiKey: string, private readonly limits: BrainExecutionLimits = {}) {
     super();
     this.ai = new OpenAI({ apiKey });
+    // See gemini.ts's constructor for why this is a hard filter, not a hint.
+    const allowed = this.limits.allowedTools;
+    this.functionDeclarations = (allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS).map(toFunctionDeclaration);
     this.systemPrompt = buildSystemPrompt(
       undefined,
       cfg.voice?.sendAudioToBrain ? AUDIO_TURN_GUIDANCE : undefined,
@@ -186,6 +193,18 @@ export class OpenAIBrain extends Brain {
     this.lastSend = opts ?? {};
     if (this.memory.begin(userText, opts)) this.contents = [];
     if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
+    // How the user is doing changes how a reply should read, and it changes
+    // between turns — so it rides along with each message rather than being
+    // baked into the system prompt at startup. Silent in the ordinary case: a
+    // fresh state contributes nothing.
+    //
+    // This was wired into the Claude brain only, so the same person got a
+    // different Echo depending on which model was answering — the exact drift
+    // `buildSystemPrompt` exists to prevent.
+    noteActivity();
+    const style = styleFor(assess());
+    if (style) userText = `${userText}\n\n[context: ${style}]`;
+
     
     const content: any[] = [];
     if (audio && this.hearsAudio) {
@@ -301,6 +320,18 @@ export class OpenAIBrain extends Brain {
     this.turnAbort = new AbortController();
     this.emitEvent("status", "thinking");
 
+    // Tool pruning (AGI blueprint #9) — see gemini.ts's runLoop for the same
+    // pattern and why it is computed once per turn rather than per iteration.
+    if (this.cfg.agi?.toolPruning?.enabled) {
+      const lastUserText = [...this.contents].reverse().find((c) => c.role === "user")?.content ?? "";
+      const keep = await selectToolNames(String(lastUserText), this.cfg.agi.toolPruning.topK).catch(() => null);
+      this.activeFunctionDeclarations = keep
+        ? this.functionDeclarations.filter((d: any) => keep.has(d.function?.name) || this.mcpTools.has(d.function?.name))
+        : null;
+    } else {
+      this.activeFunctionDeclarations = null;
+    }
+
     const log = currentLoop();
     let exitReason: ExitReason | null = null;
     let exitDetail: string | undefined;
@@ -349,7 +380,7 @@ export class OpenAIBrain extends Brain {
             const request = {
               model: currentModel,
               messages: [systemMessage, ...this.contents],
-              tools: this.functionDeclarations.length > 0 ? (this.functionDeclarations as any) : undefined,
+              tools: (this.activeFunctionDeclarations ?? this.functionDeclarations).length > 0 ? ((this.activeFunctionDeclarations ?? this.functionDeclarations) as any) : undefined,
             };
             
             log?.enterState("awaiting_llm", `openai:${currentModel}`);

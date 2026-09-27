@@ -21,6 +21,7 @@ import {
   toolNameFor,
   type ClientFactory,
 } from "./brain/mcp.js";
+import { runShutdown, setShutdownHandler } from "./lifecycle.js";
 
 let pass = 0;
 const failures: string[] = [];
@@ -68,7 +69,27 @@ console.log("  reading mcp.json");
     },
   }));
   ok(Object.keys(mixed).length === 1 && !!mixed.good, "an entry with no command is dropped, the rest survive");
-  ok(mixed.good.args?.[0] === "hi" && mixed.good.env?.K === "v", "command, args and env are carried through");
+  const good = mixed.good as Extract<typeof mixed.good, { command: string }>;
+  ok(good.args?.[0] === "hi" && good.env?.K === "v", "command, args and env are carried through");
+}
+
+console.log("  caching by path + mtime (the control panel calls this ~16x/sec)");
+{
+  // loadMcpConfig always builds a fresh object via JSON.parse — so identical
+  // OBJECT IDENTITY across two calls is only possible if the second call
+  // never touched the parser at all, i.e. the mtime-keyed cache served it.
+  // That is the actual thing worth proving: not "same content" (deep-equal
+  // would pass even re-parsing every time) but "did the work happen again".
+  const path = writeConfig("cached.json", { mcpServers: { a: { command: "/bin/echo" } } });
+  const first = loadMcpConfig(path);
+  const second = loadMcpConfig(path);
+  ok(first === second, "an unchanged file returns the SAME object — no re-parse on repeated calls");
+
+  // A real edit (new mtime) must still be picked up, not stuck on the cache.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  writeConfig("cached.json", { mcpServers: { a: { command: "/bin/echo" }, b: { command: "/bin/cat" } } });
+  const updated = loadMcpConfig(path);
+  ok(updated !== first && Object.keys(updated).length === 2, "editing the file on disk invalidates the cache on the next call");
 }
 
 console.log("  naming tools the model can actually call");
@@ -198,6 +219,17 @@ console.log("  servers are shut down, not abandoned");
   await first.close();
   ok(openMcpServerCount() === 0, "the owner closes its own set");
   await closeMcpServers();
+}
+
+console.log("  app shutdown waits for asynchronous cleanup");
+{
+  let cleanupFinished = false;
+  setShutdownHandler(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    cleanupFinished = true;
+  });
+  await runShutdown();
+  ok(cleanupFinished, "the app exit boundary awaits MCP-capable cleanup before returning");
 }
 
 console.log(`\n${pass}/${pass + failures.length} MCP checks passed\n`);

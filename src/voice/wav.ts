@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 /** Write mono 16-bit PCM frames to a WAV file the whisper CLI can read. */
 export async function writeWav(
@@ -30,4 +31,23 @@ export async function writeWav(
   buf.writeUInt32LE(dataBytes, 40);
   Buffer.from(pcm.buffer, pcm.byteOffset, dataBytes).copy(buf, 44);
   await writeFile(path, buf);
+}
+
+/**
+ * Read a mono PCM16 WAV back to raw samples.
+ *
+ * Walks the chunk list rather than assuming the data starts at byte 44: a
+ * `say`-rendered file carries a LIST/INFO chunk first, and a fixed offset reads
+ * that header as audio — which sounds like a click and transcribes as nothing.
+ */
+export function readWavPcm(path: string): Buffer {
+  const buf = readFileSync(path);
+  let off = 12; // past "RIFF<size>WAVE"
+  while (off + 8 <= buf.length) {
+    const id = buf.toString("ascii", off, off + 4);
+    const size = buf.readUInt32LE(off + 4);
+    if (id === "data") return buf.subarray(off + 8, Math.min(off + 8 + size, buf.length));
+    off += 8 + size + (size % 2); // chunks are word-aligned
+  }
+  throw new Error(`no data chunk in ${path}`);
 }

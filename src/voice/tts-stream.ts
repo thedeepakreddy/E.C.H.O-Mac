@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
-import { readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { JarvisConfig } from "../config.js";
 import { withProsody } from "./prosody.js";
+import { getAppPath } from "../utils/appPath.js";
 
 /**
  * Streaming text-to-speech: sentences in, PCM out, as soon as each is ready.
@@ -43,6 +44,17 @@ export function languageOf(text: string): "te-IN" | "hi-IN" | "en-IN" {
   if (/[ఀ-౿]/.test(text)) return "te-IN";
   if (/[ऀ-ॿ]/.test(text)) return "hi-IN";
   return "en-IN";
+}
+
+/** Mostly Latin letters? Piper's voices are English, so anything else needs another voice. */
+export function isLatinText(text: string): boolean {
+  let latin = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (/[A-Za-z\u00C0-\u024F]/.test(ch)) latin++;
+    else if (/\p{L}/u.test(ch)) other++;
+  }
+  return other <= latin;
 }
 
 /** Raw linear16 may or may not come wrapped in a WAV header; take the samples either way. */
@@ -311,6 +323,211 @@ export class ElevenLabsTtsStream extends EventEmitter implements TtsStream {
   }
 }
 
+// ---- Piper, a local neural voice ------------------------------------------------
+
+export const DEFAULT_PIPER_VOICE = "en_GB-alan-medium";
+
+export interface PiperPaths {
+  python: string;
+  worker: string;
+  model: string;
+  sampleRate: number;
+}
+
+/** Where the Piper install and the chosen voice live, or null if either is missing. */
+export function piperPaths(voice = DEFAULT_PIPER_VOICE, root = getAppPath()): PiperPaths | null {
+  const name = voice.replace(/[^a-zA-Z0-9_.-]/g, "");
+  const python = join(root, "vendor", "piper", ".venv", "bin", "python");
+  const worker = join(root, "scripts", "piper_worker.py");
+  const model = join(root, "vendor", "piper", "voices", `${name}.onnx`);
+  if (!name || ![python, worker, model, `${model}.json`].every(existsSync)) return null;
+  try {
+    const rate = Number(JSON.parse(readFileSync(`${model}.json`, "utf8"))?.audio?.sample_rate);
+    return { python, worker, model, sampleRate: rate > 0 ? rate : 22050 };
+  } catch {
+    return null;
+  }
+}
+
+const PIPER_READY = 0xffffffff;
+
+/**
+ * One long-lived Piper process per voice, shared by every turn: loading a voice
+ * takes ~0.75 s, a sentence after that ~50-150 ms to first audio. Sentences go
+ * through it one at a time, so cancelling a turn wastes at most the sentence
+ * already being synthesised.
+ */
+export class PiperWorker {
+  private static workers = new Map<string, PiperWorker>();
+
+  static for(paths: PiperPaths): PiperWorker {
+    let w = PiperWorker.workers.get(paths.model);
+    if (!w || w.dead) {
+      w = new PiperWorker(paths);
+      PiperWorker.workers.set(paths.model, w);
+    }
+    return w;
+  }
+
+  readonly ready: Promise<void>;
+  private child: ReturnType<typeof spawn>;
+  private buf: Buffer = Buffer.alloc(0);
+  private nextId = 1;
+  private queue: Array<{ id: number; text: string }> = [];
+  private inflight: number | null = null;
+  private handlers = new Map<number, { audio: (pcm: Buffer) => void; done: (err?: string) => void }>();
+  private dead = false;
+
+  private constructor(paths: PiperPaths) {
+    this.child = spawn(paths.python, [paths.worker, paths.model], { stdio: ["pipe", "pipe", "pipe"] });
+    let markReady!: () => void;
+    let markFailed!: (err: Error) => void;
+    this.ready = new Promise<void>((resolve, reject) => {
+      markReady = resolve;
+      markFailed = reject;
+    });
+    const timer = setTimeout(() => markFailed(new Error("piper did not load its voice within 20s")), 20_000);
+    this.ready.then(() => clearTimeout(timer), () => clearTimeout(timer));
+    this.ready.catch(() => {});
+    this.child.stdout!.on("data", (d: Buffer) => this.onData(d, markReady));
+    this.child.stderr!.on("data", (d: Buffer) => console.log(`[piper] ${String(d).trim()}`));
+    const die = (why: string) => {
+      if (this.dead) return;
+      this.dead = true;
+      markFailed(new Error(why));
+      for (const h of this.handlers.values()) h.done(why);
+      this.handlers.clear();
+      this.queue = [];
+    };
+    this.child.on("error", (err) => die(`piper failed to start: ${err.message}`));
+    this.child.on("exit", (code) => die(`piper exited (${code})`));
+  }
+
+  /** Speak one text; audio arrives in pieces, then `done` once. Returns an id for cancel(). */
+  request(text: string, audio: (pcm: Buffer) => void, done: (err?: string) => void): number {
+    const id = this.nextId++;
+    if (this.nextId >= PIPER_READY) this.nextId = 1;
+    if (this.dead) {
+      done("piper is not running");
+      return id;
+    }
+    this.handlers.set(id, { audio, done });
+    this.queue.push({ id, text });
+    this.pump();
+    return id;
+  }
+
+  /** Drop a request: unsent ones never go out, the one in flight is ignored as it finishes. */
+  cancel(id: number): void {
+    this.queue = this.queue.filter((q) => q.id !== id);
+    this.handlers.delete(id);
+  }
+
+  private pump(): void {
+    if (this.inflight !== null || !this.queue.length || this.dead) return;
+    const next = this.queue.shift()!;
+    this.inflight = next.id;
+    this.child.stdin!.write(JSON.stringify({ id: next.id, text: next.text }) + "\n");
+  }
+
+  private onData(d: Buffer, markReady: () => void): void {
+    this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d;
+    while (this.buf.length >= 8) {
+      const id = this.buf.readUInt32LE(0);
+      const len = this.buf.readUInt32LE(4);
+      if (this.buf.length < 8 + len) break;
+      const pcm = this.buf.subarray(8, 8 + len);
+      this.buf = this.buf.subarray(8 + len);
+      if (id === PIPER_READY) {
+        markReady();
+        continue;
+      }
+      const h = this.handlers.get(id);
+      if (len > 0) {
+        h?.audio(Buffer.from(pcm));
+        continue;
+      }
+      this.handlers.delete(id);
+      if (this.inflight === id) this.inflight = null;
+      h?.done();
+      this.pump();
+    }
+  }
+
+  stop(): void {
+    this.child.kill("SIGTERM");
+  }
+}
+
+export class PiperTtsStream extends EventEmitter implements TtsStream {
+  readonly name = "piper";
+  readonly sampleRate: number;
+  private worker: PiperWorker;
+  private outstanding = new Map<number, number>();
+  private closing: (() => void) | null = null;
+  private aborted = false;
+
+  constructor(paths: PiperPaths) {
+    super();
+    this.sampleRate = paths.sampleRate;
+    this.worker = PiperWorker.for(paths);
+  }
+
+  open(): Promise<void> {
+    return this.worker.ready;
+  }
+
+  speak(text: string, sentence: number): void {
+    if (this.aborted) return;
+    const id = this.worker.request(
+      text,
+      (pcm) => {
+        if (!this.aborted) this.emit("audio", { pcm, sampleRate: this.sampleRate, sentence } satisfies TtsAudio);
+      },
+      (err) => {
+        this.outstanding.delete(sentence);
+        if (this.aborted) return;
+        if (err) this.emit("error", err);
+        this.emit("sentenceDone", sentence);
+        if (!this.outstanding.size && this.closing) {
+          const c = this.closing;
+          this.closing = null;
+          c();
+        }
+      }
+    );
+    this.outstanding.set(sentence, id);
+  }
+
+  close(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (!this.outstanding.size) return resolve();
+      this.closing = resolve;
+    });
+  }
+
+  abort(): void {
+    this.aborted = true;
+    for (const id of this.outstanding.values()) this.worker.cancel(id);
+    this.outstanding.clear();
+    const c = this.closing;
+    this.closing = null;
+    if (c) c();
+  }
+}
+
+/**
+ * The voice to use when the configured one cannot speak: Piper if it is
+ * installed (a real voice, fully offline), otherwise macOS `say`.
+ */
+export function offlineTtsStream(cfg: JarvisConfig): TtsStream {
+  const paths = piperPaths(cfg.voice.piperVoice);
+  return paths ? new PiperTtsStream(paths) : new SayTtsStream(cfg.voice.ttsVoice);
+}
+
+/** Engines that run on this machine, so there is nothing further to fall back to. */
+export const OFFLINE_STREAMS = new Set(["piper", "say"]);
+
 // ---- macOS `say`, rendered to PCM ---------------------------------------------
 
 /**
@@ -401,20 +618,155 @@ export class SayTtsStream extends EventEmitter implements TtsStream {
   }
 }
 
+/**
+ * Gemini's voice, usable by ANY brain.
+ *
+ * The realtime path (voice/realtime.ts) gives Echo this voice, but it does so by
+ * running the whole turn on Gemini Live — hearing, thinking and speaking — which
+ * means it also REPLACES whichever brain is configured. That is the right trade
+ * when Gemini is the brain, and the wrong one when the user picked Claude and
+ * wants Claude's reasoning.
+ *
+ * This is the other half: a plain text-to-speech engine on the same prebuilt
+ * voices, so Claude, OpenAI or a local model can think and still speak in
+ * Echo's voice. Measured ~2s for a short sentence, ~4.5s for a long one, and
+ * the pipeline speaks sentence by sentence, so all but the first overlap with
+ * the previous sentence playing.
+ *
+ * Returns 24 kHz mono PCM16 — the same format the player already takes from the
+ * realtime path, so nothing downstream changes.
+ */
+export class GeminiTtsStream extends EventEmitter implements TtsStream {
+  readonly name = "gemini-tts";
+  readonly sampleRate = 24000;
+  private queue: Array<{ text: string; sentence: number }> = [];
+  private running = false;
+  private aborted = false;
+  private closing: (() => void) | null = null;
+  private readonly controllers = new Set<AbortController>();
+
+  constructor(
+    private readonly apiKey: string,
+    private readonly voiceName: string,
+    private readonly model: string
+  ) {
+    super();
+  }
+
+  async open(): Promise<void> {
+    /* stateless REST; nothing to open */
+  }
+
+  speak(text: string, sentence: number): void {
+    if (this.aborted) return;
+    this.queue.push({ text, sentence });
+    void this.pump();
+  }
+
+  private async pump(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    try {
+      while (this.queue.length && !this.aborted) {
+        const { text, sentence } = this.queue.shift()!;
+        const ac = new AbortController();
+        this.controllers.add(ac);
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              signal: ac.signal,
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: withProsody(text) }] }],
+                generationConfig: {
+                  responseModalities: ["AUDIO"],
+                  speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: this.voiceName } } },
+                },
+              }),
+            }
+          );
+          const body: any = await res.json();
+          const b64 = body?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (!b64) {
+            // Never silently drop a sentence: a turn that half-speaks reads as
+            // Echo breaking off mid-thought.
+            this.emit("error", `gemini tts: ${String(body?.error?.message ?? `no audio (HTTP ${res.status})`).slice(0, 120)}`);
+            this.emit("sentenceDone", sentence);
+            continue;
+          }
+          if (this.aborted) break;
+          this.emit("audio", { pcm: Buffer.from(b64, "base64"), sampleRate: this.sampleRate, sentence } satisfies TtsAudio);
+          this.emit("sentenceDone", sentence);
+        } catch (err: any) {
+          if (!this.aborted) this.emit("error", `gemini tts: ${String(err?.message ?? err).slice(0, 120)}`);
+          this.emit("sentenceDone", sentence);
+        } finally {
+          this.controllers.delete(ac);
+        }
+      }
+    } finally {
+      this.running = false;
+      if (this.closing && !this.queue.length) {
+        const c = this.closing;
+        this.closing = null;
+        c();
+      }
+    }
+  }
+
+  close(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (!this.running && !this.queue.length) return resolve();
+      this.closing = resolve;
+    });
+  }
+
+  abort(): void {
+    this.aborted = true;
+    this.queue = [];
+    for (const ac of this.controllers) { try { ac.abort(); } catch { /* ignore */ } }
+    this.controllers.clear();
+    const c = this.closing;
+    this.closing = null;
+    if (c) c();
+  }
+}
+
 /** The stream for the configured engine, or null when that engine cannot stream. */
 export function createTtsStream(cfg: JarvisConfig, firstText: string): TtsStream | null {
   if (cfg.voice.ttsStreaming === false || !cfg.voice.ttsEnabled) return null;
   switch (cfg.voice.ttsEngine) {
     case "sarvam": {
       const key = process.env.SARVAM_API_KEY;
-      return key ? new SarvamTtsStream(cfg, key, firstText) : new SayTtsStream(cfg.voice.ttsVoice);
+      return key ? new SarvamTtsStream(cfg, key, firstText) : offlineTtsStream(cfg);
     }
     case "elevenlabs": {
       const key = process.env.ELEVENLABS_API_KEY;
-      return key && cfg.voice.elevenLabsVoiceId ? new ElevenLabsTtsStream(cfg.voice.elevenLabsVoiceId, key) : new SayTtsStream(cfg.voice.ttsVoice);
+      return key && cfg.voice.elevenLabsVoiceId ? new ElevenLabsTtsStream(cfg.voice.elevenLabsVoiceId, key) : offlineTtsStream(cfg);
+    }
+    case "gemini": {
+      const key = process.env[cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"];
+      return key
+        ? new GeminiTtsStream(
+            key,
+            cfg.voice.realtime?.voice ?? "Kore",
+            cfg.voice.geminiTtsModel ?? "gemini-3.1-flash-tts-preview"
+          )
+        : offlineTtsStream(cfg);
     }
     case "mac":
       return new SayTtsStream(cfg.voice.ttsVoice);
+    case "piper": {
+      // Piper speaks English only; Telugu, Hindi and other scripts go to
+      // Gemini's voice — the same one Gemini Live answers in.
+      const key = process.env[cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"];
+      if (!isLatinText(firstText) && key) {
+        return new GeminiTtsStream(key, cfg.voice.realtime?.voice ?? "Charon", cfg.voice.geminiTtsModel ?? "gemini-3.1-flash-tts-preview");
+      }
+      return offlineTtsStream(cfg);
+    }
     default:
       return null; // fakeyou / local-clone keep the file path
   }

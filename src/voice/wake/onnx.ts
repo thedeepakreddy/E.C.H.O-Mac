@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import type { WakeDetector, WakeDetection } from "./detector.js";
+import { disableOrtTelemetry } from "../../utils/ortEnv.js";
 
 /**
  * openWakeWord-format keyword models through onnxruntime-node.
@@ -57,6 +58,7 @@ export class OnnxWake implements WakeDetector {
     if (!keywordPath || !existsSync(keywordPath) || !existsSync(melPath) || !existsSync(embPath)) return null;
     let ort: any;
     try {
+      disableOrtTelemetry(); // must precede the native load — see utils/ortEnv.ts
       ort = await import("onnxruntime-node");
     } catch {
       return null;

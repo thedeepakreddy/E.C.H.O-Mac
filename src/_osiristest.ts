@@ -13,6 +13,7 @@
  */
 import {
   DEFAULT_LAYERS,
+  DEFAULT_RADIUS_KM,
   FEEDS,
   HOSTED_BASE,
   LAYER_IDS,
@@ -21,6 +22,7 @@ import {
   ago,
   openingLayers,
   configuredBase,
+  geocodePlace,
   isHosted,
   layersFromUrl,
   layersUrl,
@@ -30,6 +32,7 @@ import {
   resolveLayers,
   speakList,
   summarize,
+  type LocationFilter,
 } from "./tools/osiris-intel.js";
 import { TOOLS } from "./tools/registry.js";
 import { classify } from "./safety/risk.js";
@@ -168,6 +171,74 @@ console.log("  a feed becomes something Echo can say");
   ok(summarize("earthquakes", { earthquakes: [{ magnitude: 5, place: "<script>x</script>", time: Date.now() }] }).html
       .includes("&lt;script&gt;"),
      "feed text is escaped before it reaches the HUD pane");
+}
+
+console.log("  a report can be narrowed to a place");
+{
+  // A filter centered on the equator/prime-meridian with a deliberately
+  // unambiguous "near" point (~55km away) and "far" point (~1500km away),
+  // rather than real city coordinates, so the radius math is exact and the
+  // test doesn't depend on guessing a real distance right.
+  const near: LocationFilter = { lat: 0, lng: 0, radiusKm: DEFAULT_RADIUS_KM, label: "the origin" };
+  ok(DEFAULT_RADIUS_KM > 0 && DEFAULT_RADIUS_KM < 1000, "the default radius is a real, sane number");
+
+  const quakes = summarize(
+    "earthquakes",
+    { earthquakes: [
+      { magnitude: 6.2, place: "near the origin", lat: 0, lng: 0.5, time: Date.now() },
+      { magnitude: 8.0, place: "far away", lat: 10, lng: 10, time: Date.now() },
+    ] },
+    near
+  );
+  ok(/1 earthquake/.test(quakes.speech) && /near the origin/i.test(quakes.speech),
+     "only the nearby quake is counted, even though the far one is bigger");
+  ok(!/8\.0/.test(quakes.speech), "the far quake never leads the answer once a place is given");
+
+  const noneNear = summarize(
+    "earthquakes",
+    { earthquakes: [{ magnitude: 8.0, place: "far away", lat: 10, lng: 10, time: Date.now() }] },
+    near
+  );
+  ok(/No earthquakes/.test(noneNear.speech) && /1 elsewhere/.test(noneNear.speech),
+     "zero nearby is reported distinctly from zero on the whole feed");
+
+  const flights = summarize(
+    "flights",
+    { commercial_flights: [{ lat: 0, lng: 0.2 }, { lat: 50, lng: 50 }], military_flights: [{ lat: 0, lng: -0.1 }] },
+    near
+  );
+  ok(/2 aircraft near the origin/.test(flights.speech), "only in-radius aircraft are counted across every category");
+
+  const news = summarize(
+    "news",
+    { news: [
+      { title: "Unrest reported near the origin today", risk_score: 5 },
+      { title: "Completely unrelated story elsewhere", risk_score: 9 },
+    ] },
+    near
+  );
+  ok(/1 story mentioning the origin/.test(news.speech), "news is matched by mention, since it carries no coordinates");
+
+  const conflicts = summarize(
+    "conflicts",
+    { zones: [
+      { label: "NEAR WAR", severity: "war", lat: 0, lng: 0.1, eventCount: 3 },
+      { label: "FAR WAR", severity: "war", lat: -40, lng: -40, eventCount: 9 },
+    ] },
+    near
+  );
+  ok(/1 conflict zone near the origin/.test(conflicts.speech) && /NEAR WAR/.test(conflicts.speech) && !/FAR WAR/.test(conflicts.speech),
+     "conflict zones outside the radius are dropped, not just deprioritised");
+
+  // Feeds with no location concept at all say so, rather than silently
+  // ignoring the place and reporting the global picture as if it were local.
+  for (const feedId of ["status", "satellites", "space_weather", "cyber"]) {
+    const withPlace = summarize(feedId, { satellites: [1], stats: {}, threats: [{ id: "CVE-1" }] }, near);
+    ok(/isn't|aren't|not broken down/i.test(withPlace.speech),
+       `${feedId} says it can't be narrowed to a place, instead of pretending it did`);
+  }
+
+  ok(typeof geocodePlace === "function", "geocodePlace is exported for the tool to resolve a place into coordinates");
 }
 
 console.log("  small things said out loud");

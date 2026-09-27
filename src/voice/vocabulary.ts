@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Vocabulary hint given to the speech recogniser before it listens.
@@ -61,7 +62,7 @@ function shortcutPhrases(appRoot: string): string[] {
 }
 
 function workflowNames(): string[] {
-  const dir = join(homedir(), ".jarvis", "workflows");
+  const dir = join(dataRoot(), "workflows");
   if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir)
@@ -116,13 +117,35 @@ const HALLUCINATIONS = [
   /^\s*\[.*\]\s*$/,
   /^\s*\(.*\)\s*$/,
   /^\s*♪+\s*$/,
+  // Whisper invents this on near-silence (seen three times on different days,
+  // at a level of ~20), and because it contains the name it woke Echo.
+  /^\s*this is echo'?s nouveau[.!]?\s*$/i,
 ];
+
+/**
+ * Scripts Echo is actually spoken to in, beyond the Latin alphabet.
+ *
+ * The vowel test below strips everything outside `a-z` before looking for a
+ * vowel, so ANY transcript written in another script reduced to an empty string
+ * and was thrown away as noise. A Telugu question — "ఈరోజు వాతావరణం ఎలా ఉంది?" —
+ * never reached the brain at all; nor would Hindi, Persian, Russian, Arabic or
+ * Chinese. Echo simply went quiet, which is indistinguishable from not hearing.
+ *
+ * Named scripts rather than "any non-ASCII letter" on purpose: whisper's own
+ * failure output for audio it cannot read is repeated LATIN letters with
+ * diacritics (a real capture came back as "Ḥ Ḥ Ḥ Ḥ"), and that IS noise. It
+ * stays caught by the vowel rule.
+ */
+const SPOKEN_SCRIPTS =
+  /[\p{Script=Telugu}\p{Script=Devanagari}\p{Script=Cyrillic}\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Greek}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Tamil}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Bengali}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Thai}]/u;
 
 /** True when a transcript is almost certainly noise rather than speech. */
 export function isHallucination(text: string): boolean {
   const t = (text ?? "").trim();
   if (!t) return true;
   if (HALLUCINATIONS.some((re) => re.test(t))) return true;
+  // Written in a script the vowel test below cannot read: real speech.
+  if (SPOKEN_SCRIPTS.test(t)) return false;
   // A single short token with no vowel is not a real command.
   const letters = t.replace(/[^a-z]/gi, "");
   return letters.length < 2 || !/[aeiou]/i.test(letters);

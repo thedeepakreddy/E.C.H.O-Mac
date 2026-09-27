@@ -3,21 +3,23 @@ import { readFileSync, writeFileSync, existsSync, appendFileSync } from "node:fs
 import { exec } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join, isAbsolute } from "node:path";
-import { loadConfig, JarvisConfig } from "./config.js";
+import { loadConfig, setActiveConfig, JarvisConfig } from "./config.js";
 import { loadEnv } from "./env.js";
-import { applyKeys, needsSetup } from "./keystore.js";
+import { applyKeys, needsSetup, saveKeys } from "./keystore.js";
 import { openSetupWindow, wireSetupIpc, closeSetupWindow } from "./setup.js";
 import { createBrain, Brain, type Provider } from "./brain/index.js";
 import { PROVIDER_LABELS, parseBrainSwitch, unavailableReason } from "./brain/switching.js";
-import { VoiceListener } from "./voice/listener.js";
-import { transcribe, transcribeLocal, warmUpStt, stopSttServer } from "./voice/stt.js";
+import { VoiceListener, scheduleCaptureCleanup, sweepOldCaptures } from "./voice/listener.js";
+import { transcribe, transcribeLocal, detectSpokenLanguage, warmUpStt, stopSttServer, NOT_ENGLISH_BELOW } from "./voice/stt.js";
 import { audioTurnFor, describeTurn } from "./voice/audio-turn.js";
 import { listen, useHearingBridge, withTone } from "./voice/hearing.js";
 import { matchWakeWord, isNameOnly } from "./voice/wakeword.js";
 import { isHallucination } from "./voice/vocabulary.js";
+import { stripEchoWords, classifyInterjection, isStopIntent } from "./voice/interjection.js";
 import { currentContext } from "./memory/context.js";
 import { memoryService } from "./memory/service.js";
-import { memoryRoot, atomicWrite } from "./memory/paths.js";
+import { record } from "./cognition/episodic.js";
+import { dataRoot, memoryRoot, atomicWrite } from "./memory/paths.js";
 import { enforceRetention } from "./memory/deletion.js";
 import { ProviderMemoryContext } from "./memory/provider-context.js";
 import { executeMemoryCommand, isMemoryCommand } from "./memory/commands.js";
@@ -38,11 +40,16 @@ import type { AudioTurn } from "./brain/types.js";
 import { prefetch } from "./brain/prefetch.js";
 import { closeOrbitalPanel } from "./orbital.js";
 import { closeOsirisPanel, isOsirisOpen, isOsirisPinned, openOsirisPanel, reloadOsiris, setOsirisPinned } from "./osiris.js";
-import { closeNeuralCore, openNeuralCore } from "./neural.js";
+import { closeNeuralCore, forwardToNeural, openNeuralCore } from "./neural.js";
 import { confirmations, ConfirmationBroker } from "./safety/confirm.js";
 import { classify } from "./safety/risk.js";
 import { shellQuote } from "./safety/shellquote.js";
 import { matchReflex } from "./frontier/reflex.js";
+import * as autoreflex from "./frontier/autoreflex.js";
+import { RealtimeVoiceSession, realtimeAvailable, realtimeUnavailableReason, REALTIME_OUTPUT_RATE, REALTIME_VOICE_GUIDANCE } from "./voice/realtime.js";
+import { SpeechClock, isSelfAudio } from "./voice/speech-clock.js";
+import { readWavPcm } from "./voice/wav.js";
+import { buildSystemPrompt } from "./brain/types.js";
 import { replay } from "./frontier/replay.js";
 import { replayWithGate } from "./frontier/gatedreplay.js";
 import { Workflow } from "./frontier/demonstrate.js";
@@ -87,14 +94,18 @@ import { openApp, typeText } from "./tools/computer-actions.js";
 import * as ax from "./tools/ax.js";
 import { installProcessHandlers, pendingRecoveries, recordRendererError } from "./agent-replay/runtime.js";
 import { swarm } from "./frontier/swarm.js";
-import { loadMcpConfig } from "./brain/mcp.js";
+import { listFleet, addFleetMember, removeFleetMember, grantableTools, getFleetMember, MAX_CUSTOM as FLEET_MAX_CUSTOM, type NewAgent } from "./frontier/fleet.js";
+import { brainProjectHint, makeFleetBrain as fleetBrainFactory } from "./frontier/fleet-brain.js";
+import { closeMcpServers, loadMcpConfig } from "./brain/mcp.js";
 import {
   controlTelemetry,
   observeControlEvent,
   openControlPanel,
+  publishControlUpdate,
   wireControlPanel,
   type ControlAction,
   type ControlRuntime,
+  type ControlSettings,
 } from "./control-panel.js";
 
 // Before anything else boots. A rejection thrown during startup — a missing
@@ -105,6 +116,7 @@ import {
 installProcessHandlers();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const ECHO_ICON_PATH = join(__dirname, "..", "assets", "echo-icon.png");
 
 let win: BrowserWindow | null = null;
 let cfg: JarvisConfig;
@@ -178,9 +190,243 @@ function abortSttStreams(why: string) {
 let telegram: TelegramBridge | null = null;
 let lastBrainStatus = "idle";
 let lastAssistantText = "";
+/**
+ * AGI blueprint #12 (dynamic IQ scaling): consecutive failed turns on the free
+ * local model. Scoped to whole turns, not individual tool calls within one —
+ * the blueprint's "2 tool errors in a row -> hot-swap" needs a signal inside a
+ * turn that nothing here currently emits, and inventing one meant threading a
+ * new cross-cutting event out of gate.ts through three different brain event
+ * systems. A turn is the coarser, already-wired signal: `finishTurn` already
+ * runs at the end of every one. The escalation only changes which brain the
+ * NEXT command reaches — it does not retry the failed turn itself, because
+ * blindly re-issuing a multi-step GUI task on a different brain risks
+ * repeating whatever the first attempt already did before it failed.
+ */
+/**
+ * The turn autoReflex is currently recording, if any.
+ *
+ * matchReflex() has always been wired on the READ side (see the cache-hit
+ * branch below), but the only caller of saveReflex is autoreflex.ts, which
+ * nothing imported — so the cache could never be written and the fast path was
+ * a permanent miss. ~/.jarvis/reflex/ did not even exist. Every repeated
+ * command paid a full model round trip forever. This is the missing bridge.
+ */
+let autoReflexTurn: { command: string; capture: autoreflex.TurnCapture } | null = null;
+
+/**
+ * Speech-to-speech voice, when `voice.realtime.enabled` is on.
+ *
+ * The turn runs on a model that takes audio in and gives audio out, instead of
+ * mic -> STT -> text -> brain -> text -> TTS. The captured audio goes to the
+ * model as audio, so tone and emphasis survive, and the reply comes back spoken
+ * rather than re-synthesised from bare text.
+ *
+ * Deliberately hooked at the UTTERANCE, not at the microphone. Full duplex
+ * would mean replacing the wake word, the VAD and the barge-in machinery all at
+ * once — the most delicate code in the app, and the source of its last two
+ * voice bugs. This keeps every one of them and swaps only what happens between
+ * "a capture finished" and "Echo speaks".
+ *
+ * Tools are still executed by Echo through the risk gate; see voice/realtime.ts.
+ */
+let realtime: RealtimeVoiceSession | null = null;
+let realtimeSaid = "";
+/**
+ * Realtime audio is still coming out of the speaker.
+ *
+ * `turnComplete` means the MODEL stopped generating, not that Echo stopped
+ * talking — the player still has queued audio. Treating the two as the same
+ * opened the conversation window while Echo was mid-sentence.
+ *
+ * The first fix waited for the player's `drained` event, and that was worse:
+ * `drained` did not arrive, so `realtimeSpeaking` stuck at true, and because
+ * `echoIsSpeaking()` reads it, `maybeAutoListen()` returned early forever. The
+ * conversation window then never opened AT ALL and every single turn needed the
+ * wake word again — a regression on the behaviour it was meant to improve.
+ *
+ * So the end of speech is now COMPUTED, not awaited. The audio is 24 kHz mono
+ * PCM16, a known 48000 bytes per second, so the bytes handed to the player say
+ * exactly how long they take to play. `drained` is still honoured when it comes
+ * (it ends the turn earlier), and a hard cap guarantees the flag always clears.
+ * Nothing about re-arming the microphone should depend on an event that may
+ * never fire.
+ */
+/**
+ * When Echo's own voice last stopped coming out of the speaker.
+ *
+ * Belt AND braces against the self-conversation loop. Pausing capture (below)
+ * is the real fix, but a single missed pause does not degrade gracefully here —
+ * it is an infinite loop of PAID audio round trips, Echo answering itself until
+ * a human notices. So any capture that BEGAN while Echo was talking is dropped
+ * on arrival, whatever the listener did.
+ *
+ * MONOTONIC, because `CaptureMeta.captureStartAt` is `performance.now()`. The
+ * first version of this used `Date.now()` and compared the two directly: a
+ * monotonic reading (~34000, milliseconds since start) is always smaller than a
+ * wall-clock one (~1.79e12), so EVERY capture looked like it began during
+ * Echo's speech. Echo went permanently deaf after its first reply — the log
+ * showed the user's own questions discarded as `echo_self_audio` fifty seconds
+ * after Echo had stopped talking. Two clocks are not comparable; use the one
+ * the value being compared against actually came from.
+ */
+let echoSpokeUntil = 0; // performance.now() units — see above
+
+/**
+ * What Echo has said aloud since this turn began.
+ *
+ * Hardware echo cancellation does not work on this machine, so a recording
+ * made while Echo is talking contains Echo as well as whoever interrupted it.
+ * This is the copy that gets subtracted back out — see `stripEchoWords`.
+ *
+ * Capped, and that cap is load-bearing rather than tidiness: the subtraction
+ * deletes any three words the user says that Echo also said, so an unbounded
+ * transcript of a long session would eventually start eating real commands.
+ */
+let spokenThisReply = "";
+const SPOKEN_MEMORY_CHARS = 2000;
+function noteSpoken(text: string): void {
+  spokenThisReply = `${spokenThisReply} ${text}`.slice(-SPOKEN_MEMORY_CHARS);
+}
+/** Everything Echo's voice could have leaked into the microphone, on either speech path. */
+function echoesOfMyself(): string {
+  return `${spokenThisReply} ${speech?.spokenSoFar() ?? ""} ${realtimeSaid}`;
+}
+
+/** Heard over a reply, held until that reply has finished saying its piece. */
+let pendingInterjection: { wavPath: string; meta: CaptureMeta; transcript: string } | null = null;
+
+const realtimeClock = new SpeechClock(
+  { bytesPerSecond: REALTIME_OUTPUT_RATE * 2 }, // mono PCM16
+  () => {
+    // Echo has stopped talking: capture may resume. See the pause in the
+    // 'audio' handler for why this matters so much on the realtime path.
+    echoSpokeUntil = performance.now();
+    listener?.setPaused(false);
+    voiceSession.noteSpeaking(false);
+    setStatus(lastBrainStatus);
+    maybeAutoListen();
+  }
+);
+
+/** Did this capture start while Echo was speaking? Then it is Echo's own voice. */
+function isEchoTalkingToItself(meta: UtteranceMeta): boolean {
+  return isSelfAudio({
+    speaking: realtimeClock.speaking,
+    captureStartAt: meta.captureStartAt,
+    spokeUntil: echoSpokeUntil,
+  });
+}
+
+async function ensureRealtime(): Promise<RealtimeVoiceSession | null> {
+  if (realtime?.active) return realtime;
+  const key = process.env[cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"];
+  if (!key) return null;
+  const session = new RealtimeVoiceSession(cfg, key, {
+    workingDir: cfg.control.workingDir,
+    // The SHARED builder, not the bare persona: the three text brains had
+    // already drifted once over exactly this, with Gemini loading no memories
+    // at all. A fourth path with its own prompt would repeat it.
+    //
+    // The guidance appended here does not replace any of it — it corrects the
+    // parts written for a text-then-TTS pipeline, which a model that speaks
+    // directly otherwise reads as an instruction to start speaking Telugu.
+    instruction: buildSystemPrompt(undefined, REALTIME_VOICE_GUIDANCE, false),
+  });
+  session.on("heard", (t: string) => send("state", { hearing: t }));
+  session.on("said", (t: string) => {
+    realtimeSaid += t;
+    send("message", { kind: "assistant", text: realtimeSaid });
+  });
+  session.on("audio", (pcm: Buffer) => {
+    // PAUSE CAPTURE WHILE ECHO SPEAKS. Both pipeline paths already do this and
+    // the realtime path did not, which produced a genuine infinite loop: the
+    // conversation window leaves the mic open with no wake word required, so
+    // Echo's own voice was captured as the next command, answered, spoken,
+    // captured again — Echo talking to itself, in alternating languages, until
+    // someone stopped it. Every cycle is a paid audio round trip.
+    //
+    // setPaused only suspends CAPTURE, not hearing, so barge-in still works —
+    // and it is also what seeds the listener's echo-peak baseline, which is
+    // what stops Echo's own voice registering as the user interrupting.
+    if (!realtimeClock.speaking) {
+      listener?.setPaused(true);
+      voiceSession.noteSpeaking(true);
+    }
+    realtimeClock.noteAudio(pcm.length);
+    setStatus("speaking");
+    player?.play(pcm, REALTIME_OUTPUT_RATE, 0);
+  });
+  session.on("tool", (name: string) => send("message", { kind: "action", text: `Running ${name}` }));
+  // The model stopped because the user cut in; drop whatever is still queued.
+  session.on("interrupted", () => { try { player?.stop(); } catch { /* ignore */ } });
+  session.on("turnComplete", () => {
+    if (realtimeSaid.trim()) lastAssistantText = realtimeSaid.trim();
+    realtimeSaid = "";
+    finishTurn("success", "realtime turn completed");
+    // Only re-arm the mic once the SPEAKER is quiet, not when the model
+    // stopped generating. The clock calls back when that happens.
+    realtimeClock.noteTurnComplete();
+  });
+  session.on("error", (m: string) => {
+    console.error(`[realtime] ${m}`);
+    send("notice", { level: "error", text: `Realtime voice: ${m}` });
+  });
+  session.on("closed", () => { realtime = null; realtimeClock.noteDrained(); });
+  // `drained` only ever ENDS a turn early — it is never depended on, because it
+  // did not arrive and that is what broke the conversation window.
+  player?.on("drained", () => realtimeClock.noteDrained());
+  session.on("interrupted", () => realtimeClock.noteDrained());
+  await session.connect();
+  realtime = session;
+  return session;
+}
+
+/**
+ * Send one finished capture to the realtime model as AUDIO.
+ *
+ * Returns false when the session could not be opened, so the caller falls back
+ * to the ordinary pipeline rather than dropping the turn — a voice that goes
+ * silent because a preview model was unavailable is worse than a slow one.
+ */
+async function dispatchToRealtime(wavPath: string, turn: Turn | null): Promise<boolean> {
+  try {
+    const session = await ensureRealtime();
+    if (!session) return false;
+    realtimeSaid = "";
+    // A reset skips the clock's callback, so release the mic here too — an
+    // abandoned turn must never leave capture paused for the rest of the session.
+    if (realtimeClock.speaking) { listener?.setPaused(false); voiceSession.noteSpeaking(false); }
+    realtimeClock.reset(); // never inherit the last turn's speaking state
+    voiceSession.noteBrainSend(turn, "(audio)", "gemini-live");
+    setStatus("thinking");
+    const pcm = readWavPcm(wavPath);
+    // 100ms of 16 kHz mono PCM16 per message, as the provider expects.
+    for (let off = 0; off < pcm.length; off += 3200) {
+      const slice = pcm.subarray(off, Math.min(off + 3200, pcm.length));
+      session.push(new Int16Array(slice.buffer, slice.byteOffset, slice.length / 2));
+    }
+    session.endOfSpeech();
+    return true;
+  } catch (err: any) {
+    console.error(`[realtime] dispatch failed, falling back: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/** End the recording started for this turn, if one is open. Never throws. */
+function endAutoReflex(success: boolean): void {
+  const open = autoReflexTurn;
+  if (!open) return;
+  autoReflexTurn = null;
+  void autoreflex
+    .endTurn(open.command, open.capture, success, app.getAppPath())
+    .catch((err) => console.error("[autoreflex] endTurn failed:", (err as any)?.message ?? err));
+}
+
+let ollamaFailureStreak = 0;
 let expectAnswer = false;
 /** Holds the detected project between memory init and brain creation. */
-const createBrainProjectHint: { value?: string } = {};
+const createBrainProjectHint = brainProjectHint;
 
 /**
  * The scope every turn is remembered and recalled under.
@@ -207,6 +453,8 @@ async function refreshScope(): Promise<void> {
 function send(channel: string, payload: any) {
   win?.webContents.send(channel, payload);
   observeControlEvent(channel, payload);
+  // The neural core's firing rate IS Echo's state, so it rides the same events.
+  forwardToNeural(channel, payload);
 }
 
 function setStatus(status: string, extra: Record<string, any> = {}) {
@@ -277,6 +525,7 @@ function createWindow() {
   win = new BrowserWindow({
     width,
     height,
+    icon: ECHO_ICON_PATH,
     x: workArea.x + workArea.width - width - 20,
     y: workArea.y + workArea.height - height - 20,
     frame: false,
@@ -336,11 +585,40 @@ interface UtteranceMeta {
   speechEndAt?: number;
   /** Streaming STT already produced the transcript while the user spoke. */
   transcript?: string;
+  /**
+   * Recorded over Echo's own reply and already vetted as a real interruption
+   * by the interjection path, so the self-audio guard must not drop it — that
+   * guard exists for captures nobody has looked at yet.
+   */
+  overlap?: boolean;
 }
 
-/** The whole utterance is an instruction to stop, not something for the brain. */
-function isStopIntent(command: string): boolean {
-  return /^(?:(?:hey|ok|okay)\s+)?(?:echo[,!.]?\s*)?(?:stop|cancel|never\s*mind|shut up|be quiet|quiet|enough|hold on|hang on|wait)(?:\s+(?:it|that|please|echo))?[.!]?$/i.test(command.trim());
+
+/**
+ * AGI blueprint #13 (implicit RLHF), the guardrailed version: the whole
+ * utterance being praise or complaint, in the same "match the WHOLE trimmed
+ * command" style as isStopIntent above — substring-matching "thanks" inside a
+ * real, longer instruction ("thanks, and also open Mail") would misfire on
+ * every polite request. Recorded through episodic memory's existing scoring
+ * (cognition/episodic.ts, wired to every brain's prompt via factsForPrompt),
+ * never by rewriting the persona or any system prompt directly — a single
+ * sarcastic "thanks" or a "no" aimed at something else can never do more than
+ * nudge a decayed, ranked memory the user can see and correct with `forget`,
+ * the same as anything else Echo remembers.
+ */
+// Fully anchored start-to-end (bar optional trailing punctuation), the same
+// discipline isStopIntent above uses — apostrophes are optional throughout
+// because STT routinely drops them ("thats fast", "that didnt work").
+const POSITIVE_FEEDBACK =
+  /^(?:thanks?(?:\s+echo)?|thank\s*you(?:\s+echo)?|nice|perfect|great(?:\s*job)?|awesome|exactly|love\s*it|good\s*job|well\s*done|that(?:'?s|\s+is)\s+(?:fast|quick|great|perfect|awesome|helpful))[.!]?$/i;
+const NEGATIVE_FEEDBACK =
+  /^(?:that(?:'?s|\s+is)\s+wrong|not\s+what\s+i\s+(?:asked|wanted)|you\s+messed\s+(?:it|that)\s+up|that\s+didn'?t\s+work|wrong)[.!]?$/i;
+
+function detectFeedback(command: string): 1 | -1 | 0 {
+  const t = command.trim();
+  if (POSITIVE_FEEDBACK.test(t)) return 1;
+  if (NEGATIVE_FEEDBACK.test(t)) return -1;
+  return 0;
 }
 
 /**
@@ -357,9 +635,28 @@ function awaitCommand(turn: Turn) {
   listener?.triggerListen({ turnId: turn.id, wake: turn.wake, noSpeechMs: DEFAULT_NO_SPEECH_MS });
 }
 
+/**
+ * Is Echo producing audio right now, on EITHER speech path?
+ *
+ * There are two, and only one of them is `tts`. With a streaming engine
+ * (sarvam/elevenlabs/mac + ttsStreaming, which is the default) the reply is
+ * spoken sentence-by-sentence by SpeechStream as the deltas arrive, and
+ * `brain.on("text")` then returns early at `speech.ackBlock()` — so `tts.say()`
+ * is never called for a streamed reply and `tts.isSpeaking()` stays false the
+ * entire time Echo is talking.
+ *
+ * Asking `tts` alone therefore answered "no" during every streamed reply, which
+ * is what left the control panel's humanoid idle while Echo spoke, let a brain
+ * `status` event overwrite the speaking state, and let `maybeAutoListen()` arm
+ * the microphone at turnEnd while audio was still playing.
+ */
+function echoIsSpeaking(): boolean {
+  return tts.isSpeaking() || speech?.isSpeaking === true || realtimeClock.speaking;
+}
+
 /** Status to fall back to when a capture came to nothing. */
 function idleStatus(): string {
-  return tts.isSpeaking() ? "speaking" : lastBrainStatus;
+  return echoIsSpeaking() ? "speaking" : lastBrainStatus;
 }
 
 /**
@@ -368,10 +665,26 @@ function idleStatus(): string {
  */
 function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = null, modality: "voice" | "text" = "voice") {
   controlTelemetry.beginTask(text);
+  publishControlUpdate();
   voiceSession.noteBrainSend(turn, text, (brain as any).provider ?? cfg.brain);
   speech?.newTurn();
+  spokenThisReply = ""; // a new answer: the old one can no longer be in the room
   // Open the TTS socket while the model thinks, so the first sentence does not wait for it.
   if (cfg.voice.ttsEnabled) speech?.warm(text);
+  // Speculative execution (AGI blueprint #10), scoped to the one read-only
+  // call GUI tasks always pay for at the start: see ax.ts's warmDump doc
+  // comment for why this is single-use and short-lived rather than a general
+  // tool-call predictor.
+  if (cfg.agi.speculative.enabled) ax.warmDump();
+  // Second time you ask for something like this, record the steps so the reflex
+  // cache can answer instantly next time. Records nothing on a first-time ask,
+  // never steals an in-progress learn_workflow session, and only ever saves on
+  // an explicit yes at the end of a SUCCESSFUL turn.
+  endAutoReflex(false); // a turn starting means any previous one is over
+  void autoreflex
+    .beginTurn(text, cfg.agi.autoReflex, app.getAppPath())
+    .then((capture) => { if (capture.capturing) autoReflexTurn = { command: text, capture }; })
+    .catch((err) => console.error("[autoreflex] beginTurn failed:", (err as any)?.message ?? err));
   brain.send(text, audio, { modality, turnId: turn?.id, scope: currentScope() });
 }
 
@@ -381,6 +694,15 @@ function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = nu
  */
 async function handleUtterance(wavPath: string, needsWakeWord = false, meta: UtteranceMeta = {}) {
   const t0 = Date.now();
+  // Echo's own voice, captured while it was speaking. Dropped before anything
+  // is transcribed or sent: on the realtime path this is the difference between
+  // one reply and Echo holding a conversation with itself, in alternating
+  // languages, at the cost of a paid audio round trip per turn.
+  if (realtimeAvailable(cfg) && !meta.overlap && isEchoTalkingToItself(meta)) {
+    console.log("[realtime] ignoring a capture that began while Echo was speaking");
+    voiceLog.event("capture.discarded", { turnId: meta.turnId, reason: "echo_self_audio" });
+    return;
+  }
   // A turn exists already when the capture was started deliberately (a wake, a
   // click, speech inside the window). An always-on capture only becomes a
   // turn once its transcript proves it was addressed to Echo.
@@ -431,6 +753,19 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
   }
   if (turn) voiceLog.event("stt.final", { turnId: turn.id, engine: sttEngine, ms: Date.now() - t0, text: text.slice(0, 80) });
   console.log(`[echo] transcript (${Date.now() - t0}ms): ${JSON.stringify(text)}`);
+  // Gemini Live for other languages, the ordinary pipeline for English. The
+  // language check costs ~450 ms, so it runs only once a turn is really going
+  // to be answered — never for room audio the wake word has not claimed.
+  let liveDecision: Promise<boolean> | null = null;
+  const useLive = (): Promise<boolean> => {
+    if (!realtimeAvailable(cfg)) return Promise.resolve(false);
+    if (cfg.voice.realtime?.languages !== "non-english") return Promise.resolve(true);
+    return (liveDecision ??= detectSpokenLanguage(wavPath, cfg).then((heard) => {
+      const other = heard.english < NOT_ENGLISH_BELOW;
+      console.log(`[echo] spoken language: ${heard.language} (English ${heard.english.toFixed(2)}) — ${other ? "Gemini Live" : "normal pipeline"}`);
+      return other;
+    }));
+  };
 
   let command = text.replace(/\[.*?\]|\(.*?\)/g, "").trim();
 
@@ -510,7 +845,15 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
     setStatus("thinking");
 
     // They only said the name: open the mic for the command.
-    if (isNameOnly(rest)) {
+    //
+    // Except on the realtime path, where the transcript is NOT evidence about
+    // what was said — only that Echo was addressed. Whisper's Telugu is poor,
+    // and its initial prompt is stuffed with "Echo"/"Hey Echo" to help wake
+    // detection, so an utterance it cannot read comes back as literally "Echo."
+    // and looks like a bare name. A full Telugu question was being answered
+    // with "Yes?" while the audio that actually contained it was thrown away —
+    // and Gemini Live, which hears the recording itself, understands it fine.
+    if (isNameOnly(rest) && !(await useLive())) {
       awaitCommand(turn);
       return;
     }
@@ -539,7 +882,10 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
       stampCapture(turn);
       voiceLog.event("stt.final", { turnId: turn.id, engine: sttEngine, ms: Date.now() - t0 });
     }
-    if (isNameOnly(command) && meta.wake !== "answer") {
+    // Same reasoning as above: on the realtime path the audio goes to the model
+    // regardless, because the transcript may simply not be able to spell what
+    // was said.
+    if (isNameOnly(command) && meta.wake !== "answer" && !(await useLive())) {
       awaitCommand(turn);
       return;
     }
@@ -550,6 +896,34 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
   if (isStopIntent(command)) {
     stopEverything(`you said ${JSON.stringify(command)}`);
     return;
+  }
+
+  // Implicit feedback on what Echo just said or did — recorded, not answered,
+  // when the whole utterance IS the feedback (see detectFeedback's comment).
+  if (cfg.agi.feedback.enabled && lastAssistantText) {
+    const sentiment = detectFeedback(command);
+    if (sentiment !== 0) {
+      try {
+        record({
+          kind: sentiment > 0 ? "outcome" : "correction",
+          text:
+            sentiment > 0
+              ? `You were pleased: "${command}" — about: ${lastAssistantText.slice(0, 150)}`
+              : `You pushed back: "${command}" — about: ${lastAssistantText.slice(0, 150)}`,
+          importance: sentiment > 0 ? 0.5 : undefined, // negative feedback keeps defaultImportance's own high correction weight
+        });
+      } catch (err) {
+        console.error("[echo] feedback not recorded:", (err as any)?.message ?? err);
+      }
+      if (sentiment > 0) {
+        send("notice", { level: "info", text: "🙂" });
+        setStatus(idleStatus());
+        return;
+      }
+      // Negative feedback still goes to the brain as a real message — "that's
+      // wrong" is usually the start of a correction the model needs to act on,
+      // not only a signal to remember.
+    }
   }
 
   // Hear the turn rather than only reading it. The same recording, read by a
@@ -578,6 +952,17 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
   // Whisper returns "" or markers like [BLANK_AUDIO] for silence. Say so rather
   // than going quiet, which is indistinguishable from being ignored.
   if (command.length < 2) {
+    // On the realtime path an unreadable transcript is NOT evidence of silence.
+    // This capture was addressed to Echo — the wake word matched, or the mic
+    // opened deliberately — and whisper simply could not spell what followed:
+    // its Telugu is poor and its initial prompt is stuffed with "Echo", so a
+    // Telugu question comes back as the single word "Echo." and looks empty.
+    //
+    // Gemini Live hears the recording itself, so hand it the audio and let it
+    // answer. It also covers a genuine bare "Echo" — it just replies as a
+    // person would instead of Echo silently dropping the turn, which is what
+    // the user experienced as "it listens and then goes quiet".
+    if ((await useLive()) && (await dispatchToRealtime(wavPath, turn))) return;
     console.log("[echo] nothing intelligible in that utterance — ignoring");
     if (!needsWakeWord) send("notice", { level: "warn", text: "I didn't catch that." });
     voiceLog.event("capture.discarded", { turnId: turn.id, reason: "empty" });
@@ -776,6 +1161,9 @@ If you see any popups blocking your view, close them before continuing.`;
   if (heard) console.log(`[echo] sending ${describeTurn(heard)} of audio to the brain`);
   // A brain that heard the turn needs no note about it; one that didn't gets
   // what the hearing pass noticed, which is the whole point of that pass.
+  // Speech-to-speech first when it is on: the model hears the recording itself,
+  // so tone and emphasis reach it instead of being flattened into a transcript.
+  if ((await useLive()) && (await dispatchToRealtime(wavPath, turn))) return;
   dispatchToBrain(heard ? command : withTone(command, tone), heard ?? undefined, turn);
 }
 
@@ -852,7 +1240,10 @@ function endConversation(why = "stopped") {
  * conversation window so the user can simply keep talking.
  */
 function maybeAutoListen() {
-  if (tts.isSpeaking()) return;
+  if (echoIsSpeaking()) return;
+  // Something was said over the reply and held until it had finished. That IS
+  // the next turn, so it runs before the mic is reopened for a different one.
+  if (drainPendingInterjection()) return;
   if (expectAnswer || awaitingCommand) {
     // Echo asked something, or heard only its name: open the mic explicitly
     // and give up quietly if nothing follows.
@@ -868,6 +1259,12 @@ function maybeAutoListen() {
 
 /** Everything stops: speech, the brain, the conversation. The one path for every stop control. */
 function stopEverything(why: string) {
+  // Anything held back to be answered after the reply is part of what is being
+  // stopped. Draining it later would answer a question the user has abandoned.
+  if (pendingInterjection) {
+    scheduleCaptureCleanup(pendingInterjection.wavPath);
+    pendingInterjection = null;
+  }
   const heard = speech?.spokenSoFar() ?? "";
   voiceSession.cancel("stop", why);
   abortSttStreams(why);
@@ -882,6 +1279,7 @@ function stopEverything(why: string) {
   // Being stopped mid-task is the user saying this was going wrong. Recording
   // it as a success would teach exactly the behaviour they just cut short.
   finishTurn("rejected", why);
+  endAutoReflex(false);
   controlTelemetry.stopMainTasks();
   send("notice", { level: "info", text: "Stopped." });
 }
@@ -939,7 +1337,7 @@ function wireBrain() {
   brain.on("status", (s: string) => {
     lastBrainStatus = s;
     narrateState(s);
-    if (!tts.isSpeaking()) setStatus(s);
+    if (!echoIsSpeaking()) setStatus(s);
   });
   brain.on("turnEnd", () => {
     lastBrainStatus = "idle";
@@ -948,7 +1346,10 @@ function wireBrain() {
     // Reaching the end of a turn without an error is the weakest useful success
     // signal. It is provisional: an "undo that" a moment later overrides it.
     finishTurn("success", "turn completed");
+    endAutoReflex(true);
+    ollamaFailureStreak = 0;
     controlTelemetry.finishTask("done");
+    publishControlUpdate();
     telegram?.finishTurn();
     voiceSession.noteBrainDone();
     // If TTS is off there is no speech-finished callback, so arm the mic now.
@@ -958,9 +1359,30 @@ function wireBrain() {
     console.error(`[jarvis] brain error: ${msg}`);
     remoteRecord(`Error: ${msg}`, "stop");
     finishTurn("failure", msg.slice(0, 200));
+    endAutoReflex(false);
     controlTelemetry.finishTask("failed");
+    publishControlUpdate();
     telegram?.finishTurn();
     send("notice", { level: "error", text: msg });
+    maybeEscalateBrain();
+  });
+}
+
+/** See the `ollamaFailureStreak` comment above for what this does and does not do. */
+function maybeEscalateBrain(): void {
+  const esc = cfg.agi.escalation;
+  const provider = (brain as any)?.provider ?? cfg.brain;
+  if (!esc.enabled || provider !== "ollama") {
+    ollamaFailureStreak = 0; // only ever counts a streak ON ollama
+    return;
+  }
+  ollamaFailureStreak++;
+  if (ollamaFailureStreak < esc.failureThreshold) return;
+  ollamaFailureStreak = 0;
+  console.log(`[jarvis] local model failed ${esc.failureThreshold} turn(s) in a row — escalating to Claude`);
+  void switchBrain("claude").then((message) => {
+    send("notice", { level: "info", text: `Escalated to Claude after repeated local failures. ${message}` });
+    tts.say("The local model kept failing, so I've switched to Claude to take over from here.");
   });
 }
 
@@ -971,18 +1393,154 @@ function wireBrain() {
  * comment keys, and rewriting it wholesale from a runtime object is how those
  * get quietly reordered or dropped.
  */
+function mutableConfigPath(): string {
+  return join(dataRoot(), "config.json");
+}
+
+function readMutableConfigBase(): Record<string, any> {
+  for (const configPath of [mutableConfigPath(), join(app.getAppPath(), "config.json")]) {
+    try {
+      if (existsSync(configPath)) return JSON.parse(readFileSync(configPath, "utf8"));
+    } catch (err: any) {
+      console.error(`[jarvis] could not read ${configPath}: ${err?.message ?? err}`);
+    }
+  }
+  return {};
+}
+
+function writeMutableConfig(configData: Record<string, any>): void {
+  atomicWrite(mutableConfigPath(), `${JSON.stringify(configData, null, 2)}\n`);
+}
+
 function persistBrainChoice(provider: Provider): void {
-  const configPath = join(app.getAppPath(), "config.json");
   try {
-    if (!existsSync(configPath)) return;
-    const configData = JSON.parse(readFileSync(configPath, "utf8"));
+    const configData = readMutableConfigBase();
     if (configData.brain === provider) return;
     configData.brain = provider;
-    writeFileSync(configPath, JSON.stringify(configData, null, 2), "utf8");
+    writeMutableConfig(configData);
   } catch (err: any) {
     // Not fatal: the brain has already changed for this session.
     console.error(`[jarvis] could not save the brain choice: ${err?.message ?? err}`);
   }
+}
+
+function controlSettings(): ControlSettings {
+  return {
+    brain: cfg.brain,
+    voice: {
+      ttsEnabled: cfg.voice.ttsEnabled,
+      wakeWord: cfg.voice.wakeWord,
+      conversationMode: cfg.voice.conversationMode,
+      bargeIn: cfg.voice.bargeIn,
+      sttStreaming: cfg.voice.sttStreaming !== false,
+      ttsStreaming: cfg.voice.ttsStreaming !== false,
+      sendAudioToBrain: cfg.voice.sendAudioToBrain === true,
+      sttProvider: cfg.voice.sttProvider ?? "whisper",
+      sttLanguage: cfg.voice.sttLanguage ?? "en",
+      ttsEngine: cfg.voice.ttsEngine ?? "mac",
+      maxSpokenSentences: cfg.voice.maxSpokenSentences ?? 6,
+      conversationWindowMs: cfg.voice.conversationWindowMs ?? 12000,
+    },
+    hud: { startListeningOnLaunch: cfg.hud.startListeningOnLaunch },
+    memory: {
+      enabled: cfg.memory.enabled,
+      cloudRecall: cfg.memory.cloudRecall,
+      retentionDays: cfg.memory.retentionDays,
+    },
+    helpers: {
+      shadow: cfg.helpers.shadow,
+      ghost: cfg.helpers.ghost,
+      autoDebug: cfg.helpers.autoDebug,
+      shadowIntervalSeconds: cfg.helpers.shadowIntervalSeconds,
+    },
+    dreaming: { enabled: cfg.dreaming.enabled },
+    learning: {
+      enabled: cfg.learning.enabled,
+      captureScreens: cfg.learning.captureScreens,
+      maxStepsPerTurn: cfg.learning.maxStepsPerTurn,
+    },
+    configPath: mutableConfigPath(),
+  };
+}
+
+function validatedControlSettings(input: Partial<ControlSettings> | undefined): ControlSettings {
+  const current = controlSettings();
+  const boolean = (value: unknown, fallback: boolean) => typeof value === "boolean" ? value : fallback;
+  const number = (value: unknown, fallback: number, min: number, max: number) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.round(parsed))) : fallback;
+  };
+  const choice = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
+    allowed.includes(value as T) ? value as T : fallback;
+  const language = String(input?.voice?.sttLanguage ?? current.voice.sttLanguage).trim().toLowerCase();
+  return {
+    brain: choice(input?.brain, ["claude", "gemini", "ollama", "openai"] as const, current.brain),
+    voice: {
+      ttsEnabled: boolean(input?.voice?.ttsEnabled, current.voice.ttsEnabled),
+      wakeWord: boolean(input?.voice?.wakeWord, current.voice.wakeWord),
+      conversationMode: boolean(input?.voice?.conversationMode, current.voice.conversationMode),
+      bargeIn: boolean(input?.voice?.bargeIn, current.voice.bargeIn),
+      sttStreaming: boolean(input?.voice?.sttStreaming, current.voice.sttStreaming),
+      ttsStreaming: boolean(input?.voice?.ttsStreaming, current.voice.ttsStreaming),
+      sendAudioToBrain: boolean(input?.voice?.sendAudioToBrain, current.voice.sendAudioToBrain),
+      sttProvider: choice(input?.voice?.sttProvider, ["whisper", "sarvam", "apple"] as const, current.voice.sttProvider),
+      sttLanguage: /^[a-z]{2,3}(?:-[a-z]{2,4})?$/.test(language) || language === "auto" ? language : current.voice.sttLanguage,
+      ttsEngine: choice(input?.voice?.ttsEngine, ["mac", "fakeyou", "elevenlabs", "local-clone", "sarvam", "gemini", "piper"] as const, current.voice.ttsEngine),
+      maxSpokenSentences: number(input?.voice?.maxSpokenSentences, current.voice.maxSpokenSentences, 0, 50),
+      conversationWindowMs: number(input?.voice?.conversationWindowMs, current.voice.conversationWindowMs, 2000, 60000),
+    },
+    hud: { startListeningOnLaunch: boolean(input?.hud?.startListeningOnLaunch, current.hud.startListeningOnLaunch) },
+    memory: {
+      enabled: boolean(input?.memory?.enabled, current.memory.enabled),
+      cloudRecall: boolean(input?.memory?.cloudRecall, current.memory.cloudRecall),
+      retentionDays: number(input?.memory?.retentionDays, current.memory.retentionDays, 0, 3650),
+    },
+    helpers: {
+      shadow: boolean(input?.helpers?.shadow, current.helpers.shadow),
+      ghost: boolean(input?.helpers?.ghost, current.helpers.ghost),
+      autoDebug: boolean(input?.helpers?.autoDebug, current.helpers.autoDebug),
+      shadowIntervalSeconds: number(input?.helpers?.shadowIntervalSeconds, current.helpers.shadowIntervalSeconds, 15, 3600),
+    },
+    dreaming: { enabled: boolean(input?.dreaming?.enabled, current.dreaming.enabled) },
+    learning: {
+      enabled: boolean(input?.learning?.enabled, current.learning.enabled),
+      captureScreens: boolean(input?.learning?.captureScreens, current.learning.captureScreens),
+      maxStepsPerTurn: number(input?.learning?.maxStepsPerTurn, current.learning.maxStepsPerTurn, 0, 1000),
+    },
+    configPath: mutableConfigPath(),
+  };
+}
+
+async function saveControlSettings(input: Partial<ControlSettings> | undefined): Promise<string> {
+  const next = validatedControlSettings(input);
+  const blocked = unavailableReason(next.brain, process.env, cfg.gemini.apiKeyEnv, cfg.openai.apiKeyEnv);
+  if (blocked) throw new Error(`${PROVIDER_LABELS[next.brain]} is unavailable: ${blocked}. Add the key under API Keys first.`);
+  const data = readMutableConfigBase();
+  data.brain = next.brain;
+  data.voice = { ...(data.voice ?? {}), ...next.voice };
+  data.hud = { ...(data.hud ?? {}), ...next.hud };
+  data.memory = { ...(data.memory ?? {}), ...next.memory };
+  data.helpers = { ...(data.helpers ?? {}), ...next.helpers };
+  data.dreaming = { ...(data.dreaming ?? {}), ...next.dreaming };
+  data.learning = { ...(data.learning ?? {}), ...next.learning };
+  writeMutableConfig(data);
+
+  const previousProvider = ((brain as any)?.provider ?? cfg.brain) as Provider;
+  Object.assign(cfg.voice, next.voice);
+  Object.assign(cfg.hud, next.hud);
+  Object.assign(cfg.memory, next.memory);
+  Object.assign(cfg.helpers, next.helpers);
+  Object.assign(cfg.dreaming, next.dreaming);
+  Object.assign(cfg.learning, next.learning);
+  tts.setEnabled(next.voice.ttsEnabled);
+  setDreamingEnabled(next.dreaming.enabled);
+  configureLearning(next.learning);
+  if (next.helpers.shadow) startShadowMode(tts, next.helpers.shadowIntervalSeconds); else stopShadowMode();
+  if (next.helpers.ghost) startGhostMode(tts); else stopGhostMode();
+  if (next.helpers.autoDebug) startAutoDebug(tts); else stopAutoDebug();
+  const providerMessage = previousProvider === next.brain ? "" : await switchBrain(next.brain);
+  publishControlUpdate();
+  return `${providerMessage ? `${providerMessage} ` : ""}Settings saved. Voice output and background helpers are live; wake, capture, and engine changes apply after restart.`;
 }
 
 /**
@@ -1003,7 +1561,7 @@ async function switchBrain(target: Provider): Promise<string> {
   const label = PROVIDER_LABELS[target] ?? target;
   if (current === target) return `Already running on ${label}.`;
 
-  const blocked = unavailableReason(target, process.env, cfg.gemini?.apiKeyEnv);
+  const blocked = unavailableReason(target, process.env, cfg.gemini?.apiKeyEnv, cfg.openai?.apiKeyEnv);
   if (blocked) return `I can't switch to ${label} — ${blocked}. Staying on ${PROVIDER_LABELS[current] ?? current}.`;
 
   try {
@@ -1162,8 +1720,14 @@ async function wireVoice() {
         : "Push-to-talk ready. Click the reactor core or press ⌘⇧J to talk.",
     });
   });
-  listener.on("discarded", (reason: string, meta?: { turnId?: string; wake?: WakeKind; captureStartAt?: number }) => {
+  listener.on("discarded", (reason: string, meta?: { turnId?: string; wake?: WakeKind; captureStartAt?: number; overlap?: boolean }) => {
     console.log(`[echo] audio discarded: ${reason}`);
+    if (meta?.overlap) {
+      // A recording started over a reply that came to nothing. Saying "I
+      // couldn't hear you" here would be Echo interrupting ITSELF to complain
+      // about a noise the user never made.
+      return;
+    }
     if (meta?.captureStartAt !== undefined) {
       sttStreams.get(meta.captureStartAt)?.stream.abort();
       sttStreams.delete(meta.captureStartAt);
@@ -1213,6 +1777,7 @@ async function wireVoice() {
     }
   });
   listener.on("bargein", (level: number, bar: number) => onBargeIn(level, bar));
+  listener.on("interjection", (wav: string, meta: CaptureMeta) => void onInterjection(wav, meta));
   listener.on("wakeCandidate", () => send("state", { wakeCandidate: true }));
   listener.on("wake", (det: { engine: string; score: number; at: number }) => {
     resetIdleTimer();
@@ -1239,16 +1804,19 @@ async function wireVoice() {
   });
   listener.on("level", (n: number) => send("level", n));
   listener.on("utterance", (wav: string, needsWakeWord: boolean, meta: any) =>
-    void voiceSession.enqueue("utterance", () =>
-      handleUtterance(wav, needsWakeWord, {
-        turnId: meta?.turnId,
-        wake: meta?.wake,
-        captureStartAt: meta?.captureStartAt,
-        speechStartAt: meta?.speechStartAt,
-        speechEndAt: meta?.speechEndAt,
-      })
-    )
+    void voiceSession
+      .enqueue("utterance", () =>
+        handleUtterance(wav, needsWakeWord, {
+          turnId: meta?.turnId,
+          wake: meta?.wake,
+          captureStartAt: meta?.captureStartAt,
+          speechStartAt: meta?.speechStartAt,
+          speechEndAt: meta?.speechEndAt,
+        })
+      )
+      .finally(() => scheduleCaptureCleanup(wav))
   );
+  void sweepOldCaptures().then((n) => n && console.log(`[voice] removed ${n} old voice captures from the temp folder`));
   listener.on("unavailable", (reason: string) =>
     send("notice", { level: "warn", text: reason })
   );
@@ -1257,7 +1825,7 @@ async function wireVoice() {
   voiceSession.on("window", (open: boolean) => {
     listener?.setSessionOpen(open);
     send("state", { session: open });
-    if (!open && !tts.isSpeaking()) setStatus(lastBrainStatus);
+    if (!open && !echoIsSpeaking()) setStatus(lastBrainStatus);
   });
 
   warmUpStt(cfg); // load the STT model now, not on the first command
@@ -1265,11 +1833,27 @@ async function wireVoice() {
 }
 
 /**
- * The user spoke over Echo. Stop the voice at once and listen — but leave the
- * brain working: talking over a reply is usually a new instruction ("no, the
- * other one"), and "stop" is recognised as such when the words come back.
+ * Someone is talking over Echo.
+ *
+ * The old answer was to cut the voice off the instant anything cleared the
+ * barge-in bar. That threw away the rest of an answer nobody had heard yet,
+ * and it fired on a door, a laugh, a chair — because "louder than Echo" is not
+ * the same as "addressed to Echo", and nothing had looked at the words yet.
+ *
+ * So by default Echo keeps talking and starts recording instead. The reply
+ * runs to the end of its script while what was said over it is transcribed in
+ * parallel, and that becomes the next turn — or, if it turns out to have been
+ * nothing, nobody ever knows it happened. Asking for silence still gets
+ * silence: `onInterjection` cuts the voice the moment the words come back and
+ * say so. See `voice/interjection.ts`.
  */
 function onBargeIn(level: number, bar: number) {
+  if ((cfg.voice.bargeInMode ?? "finish") === "finish" && listener) {
+    console.log(`[echo] someone spoke over the reply (level ${level} over ${bar}) — listening without stopping`);
+    voiceLog.event("barge_in.deferred", { turnId: voiceSession.current?.id, level, bar });
+    listener.captureInterjection(voiceSession.current?.id);
+    return;
+  }
   console.log(`[echo] barge-in (level ${level} over ${bar}) — stopping speech`);
   const heard = speech?.spokenSoFar() ?? "";
   voiceSession.cancel("bargein", `level ${level} over ${bar}`);
@@ -1280,6 +1864,83 @@ function onBargeIn(level: number, bar: number) {
   awaitingCommand = null;
   const turn = voiceSession.beginTurn("bargein");
   listener?.triggerListen({ turnId: turn.id, wake: "bargein", noSpeechMs: 2500 });
+}
+
+/**
+ * Work out what was said over the reply, while the reply keeps playing.
+ *
+ * The recording holds two voices and this is where they are separated: Echo
+ * knows its own script, so its words are subtracted and whatever is left is
+ * the person. Nothing left means nothing was said.
+ */
+async function onInterjection(wavPath: string, meta: CaptureMeta) {
+  let heard = "";
+  try {
+    // Always the local model, whatever the configured provider. Most of these
+    // turn out to be a chair scraping, and a recording of Echo's own voice
+    // should not be paid for or leave the machine to find that out.
+    heard = await transcribeLocal(wavPath, cfg);
+  } catch (err: any) {
+    console.error(`[echo] could not transcribe what I heard over the reply: ${err?.message ?? err}`);
+    scheduleCaptureCleanup(wavPath);
+    return;
+  }
+  const said = stripEchoWords(heard, echoesOfMyself()).trim();
+  const verdict = isHallucination(said) ? "noise" : classifyInterjection(said);
+  console.log(`[echo] over the reply: ${JSON.stringify(heard)} -> ${JSON.stringify(said)} (${verdict})`);
+  voiceLog.event("interjection", {
+    turnId: meta.turnId,
+    verdict,
+    heard: heard.slice(0, 60),
+    said: said.slice(0, 60),
+  });
+
+  if (verdict === "noise") {
+    // A door, a laugh, or Echo's own voice arriving back. The reply was never
+    // in danger — not cutting it here is the entire point of this path.
+    scheduleCaptureCleanup(wavPath);
+    return;
+  }
+  if (verdict === "stop") {
+    stopEverything(`asked to stop mid-reply: ${said.slice(0, 40)}`);
+    scheduleCaptureCleanup(wavPath);
+    return;
+  }
+  // A real instruction. Hold it until the reply has finished its script, then
+  // it goes through the ordinary command path like anything else.
+  if (pendingInterjection) scheduleCaptureCleanup(pendingInterjection.wavPath);
+  pendingInterjection = { wavPath, meta, transcript: said };
+  // The reply may have ended while this was being transcribed, in which case
+  // nothing is going to call maybeAutoListen() again on our behalf.
+  if (!echoIsSpeaking()) drainPendingInterjection();
+}
+
+/**
+ * The reply has finished. Answer what was said over it.
+ *
+ * Returns true when it has taken the turn, so the caller does not also open
+ * the microphone for a different one.
+ */
+function drainPendingInterjection(): boolean {
+  const held = pendingInterjection;
+  if (!held) return false;
+  pendingInterjection = null;
+  console.log(`[echo] finished speaking — now answering what I heard over it: ${JSON.stringify(held.transcript)}`);
+  const turn = voiceSession.beginTurn("bargein");
+  void voiceSession
+    .enqueue("interjection", () =>
+      handleUtterance(held.wavPath, false, {
+        turnId: turn.id,
+        wake: "bargein",
+        captureStartAt: held.meta.captureStartAt,
+        speechStartAt: held.meta.speechStartAt,
+        speechEndAt: held.meta.speechEndAt,
+        transcript: held.transcript,
+        overlap: true,
+      })
+    )
+    .finally(() => scheduleCaptureCleanup(held.wavPath));
+  return true;
 }
 
 /** Say anything that was held back, once the moment is right. */
@@ -1307,14 +1968,28 @@ async function wireTts() {
     setStatus(speaking ? "speaking" : lastBrainStatus);
     // Echo just finished — open the mic for an answer, or the conversation window.
     if (!speaking) maybeAutoListen();
-  }, { speaker: cfg.voice.sarvamSpeaker, pace: cfg.voice.sarvamPace });
-  tts.onAudioStart((text) =>
-    voiceLog.event("tts.first_audio", { turnId: voiceSession.brainTurnId ?? voiceSession.current?.id, sentence: text.slice(0, 40) })
-  );
+  }, { speaker: cfg.voice.sarvamSpeaker, pace: cfg.voice.sarvamPace }, cfg.voice.piperVoice);
+  tts.onAudioStart((text) => {
+    // Both speech paths reach here as each sentence starts playing, which is
+    // exactly the text that can leak into the microphone from now on.
+    noteSpoken(text);
+    voiceLog.event("tts.first_audio", { turnId: voiceSession.brainTurnId ?? voiceSession.current?.id, sentence: text.slice(0, 40) });
+  });
   if (player && cfg.voice.ttsStreaming !== false && ["sarvam", "elevenlabs", "mac"].includes(cfg.voice.ttsEngine ?? "mac")) {
     speech = new SpeechStream(cfg, player, { maxSentences: () => cfg.voice.maxSpokenSentences ?? 6 });
     speech.on("sentence", (text: string, i: number) => voiceLog.event("llm.text", { turnId: voiceSession.brainTurnId ?? undefined, sentence: text.slice(0, 50), chars: i }));
     speech.on("capped", () => console.log("[voice] spoken reply capped — the rest stays on screen"));
+    // SpeechStream has always emitted this; nothing consumed it. Without it the
+    // streamed path had no speech-start/-finished signal at all, so the mic was
+    // never paused for capture, the session never learned Echo was talking, and
+    // the HUD and control panel never left the previous state. Mirrors the Tts
+    // callback above so both paths behave identically.
+    speech.on("speaking", (on: boolean) => {
+      listener?.setPaused(on);
+      voiceSession.noteSpeaking(on);
+      setStatus(on ? "speaking" : lastBrainStatus);
+      if (!on) maybeAutoListen();
+    });
     tts.attachStream(speech);
     console.log("[voice] streaming speech: on");
   } else {
@@ -1347,6 +2022,7 @@ function controlRuntime(): ControlRuntime {
     voiceEnabled: cfg.voice.ttsEnabled,
     agents: swarm.list(),
     missions: swarm.listMissions(),
+    settings: controlSettings(),
     models: (["claude", "gemini", "ollama", "openai"] as Provider[]).map((id) => ({
       id,
       label: PROVIDER_LABELS[id] ?? id,
@@ -1364,7 +2040,11 @@ function controlRuntime(): ControlRuntime {
   };
 }
 
-async function handleControlAction(action: ControlAction): Promise<{ ok: boolean; message?: string }> {
+function makeFleetBrain() {
+  return fleetBrainFactory(cfg);
+}
+
+async function handleControlAction(action: ControlAction): Promise<{ ok: boolean; message?: string; data?: Record<string, unknown> }> {
   switch (action.type) {
     case "command": {
       const command = String(action.text ?? "").trim();
@@ -1381,7 +2061,27 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
       tts.setEnabled(cfg.voice.ttsEnabled);
       return { ok: true, message: `Spoken responses ${cfg.voice.ttsEnabled ? "enabled" : "muted"}.` };
     case "settings":
-      openSetupWindow(); return { ok: true };
+      return { ok: true, message: "Settings are open in the control panel." };
+    case "api-keys":
+      openSetupWindow(); return { ok: true, message: "API key setup opened." };
+    case "save-api-keys": {
+      const { count, changed } = saveKeys(action.apiKeys ?? {});
+      if (!changed.length) return { ok: true, message: "No changes — every field was left blank." };
+      return {
+        ok: true,
+        message: `Saved ${changed.length} key${changed.length === 1 ? "" : "s"} (${count} total configured). ` +
+          `A brain already running with the old key picks up the new one next time you switch to it or restart Echo.`,
+      };
+    }
+    case "save-settings":
+      return { ok: true, message: await saveControlSettings(action.settings) };
+    case "shutdown": {
+      // Let the invoke response reach the renderer so it can show a clear
+      // shutting-down state, then enter the single graceful quit path below.
+      const timer = setTimeout(() => requestAppShutdown("control panel"), 120);
+      timer.unref();
+      return { ok: true, message: "Closing MCP connections and shutting down Echo…" };
+    }
     case "neural":
       openNeuralCore(); return { ok: true };
     case "osiris":
@@ -1390,7 +2090,7 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
       return { ok: true, message: "Connection configuration refreshed." };
     case "switch-model": {
       const target = action.provider as Provider;
-      if (!(["claude", "gemini", "ollama"] as string[]).includes(target)) return { ok: false, message: "Unknown model route." };
+      if (!(["claude", "gemini", "ollama", "openai"] as string[]).includes(target)) return { ok: false, message: "Unknown model route." };
       const before = ((brain as any)?.provider ?? cfg.brain) as Provider;
       const message = await switchBrain(target);
       const after = ((brain as any)?.provider ?? cfg.brain) as Provider;
@@ -1399,17 +2099,7 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
     case "spawn-agent": {
       const goal = String(action.goal ?? "").trim();
       if (!goal) return { ok: false, message: "Describe the task to assign." };
-      const result = swarm.spawn(goal, {
-        makeBrain: (identity, task) => {
-          const clone = createBrain(cfg, {
-            identity,
-            maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
-            limits: { maxIterations: task?.budget.maxIterations },
-          }).brain as any;
-          clone.projectHint = (createBrainProjectHint as any).value;
-          return clone;
-        },
-      });
+      const result = swarm.spawn(goal, { makeBrain: makeFleetBrain() });
       return result.ok ? { ok: true, message: `${result.name} deployed.` } : { ok: false, message: result.reason ?? "Agent could not be deployed." };
     }
     case "assign-agent": {
@@ -1417,6 +2107,65 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
       const goal = String(action.goal ?? "").trim();
       if (!name || !goal) return { ok: false, message: "Choose an agent and enter a task." };
       return swarm.send(name, goal) ? { ok: true, message: `Task assigned to ${name}.` } : { ok: false, message: `${name} is not active.` };
+    }
+    case "run-board": {
+      const goal = String(action.goal ?? "").trim();
+      const agentIds = [...new Set((action.agentIds ?? []).map((id) => String(id).trim()).filter(Boolean))];
+      if (!goal) return { ok: false, message: "Describe the task for the board." };
+      if (!agentIds.length) return { ok: false, message: "Select at least one agent for the board." };
+      const unknown = agentIds.filter((id) => !getFleetMember(id));
+      if (unknown.length) return { ok: false, message: `Unknown agent(s): ${unknown.join(", ")}.` };
+      const submitted = swarm.submitMission(
+        { id: `board-${Date.now()}`, goal, tasks: agentIds.map((id) => ({ id, goal, profile: id, lane: "knowledge" as const })) },
+        { makeBrain: makeFleetBrain() }
+      );
+      return submitted.ok
+        ? { ok: true, message: `Board dispatched to ${agentIds.length} agent${agentIds.length === 1 ? "" : "s"}.`, data: { missionId: submitted.missionId } }
+        : { ok: false, message: submitted.reason ?? "The board could not be dispatched." };
+    }
+    case "run-fleet-agent": {
+      const agentId = String(action.name ?? "").trim();
+      const goal = String(action.goal ?? "").trim();
+      const member = getFleetMember(agentId);
+      if (!member) return { ok: false, message: "Unknown agent." };
+      if (!goal) return { ok: false, message: `Describe the task for ${member.name}.` };
+      const submitted = swarm.submitMission(
+        { id: `solo-${agentId}-${Date.now()}`, goal, tasks: [{ id: agentId, goal, profile: agentId, lane: "knowledge" }] },
+        { makeBrain: makeFleetBrain() }
+      );
+      return submitted.ok
+        ? { ok: true, message: `Sent to ${member.name}.`, data: { missionId: submitted.missionId } }
+        : { ok: false, message: submitted.reason ?? `${member.name} could not be dispatched.` };
+    }
+    case "stop-mission":
+      return swarm.cancelMission(String(action.missionId ?? "").trim())
+        ? { ok: true, message: "Mission stopped." }
+        : { ok: false, message: "That mission is not running." };
+    case "stop-mission-task":
+      return swarm.cancelMissionTask(String(action.missionId ?? "").trim(), String(action.name ?? "").trim())
+        ? { ok: true, message: "Stopped." }
+        : { ok: false, message: "That agent is not running." };
+    case "delete-mission": {
+      // Deleting a running mission stops it first — see swarm.forgetMission.
+      const removed = swarm.forgetMission(String(action.missionId ?? "").trim());
+      if (!removed.ok) return { ok: false, message: "That mission no longer exists." };
+      return { ok: true, message: removed.cancelled ? "Mission stopped and deleted." : "Mission deleted." };
+    }
+    case "save-agent": {
+      try {
+        const saved = addFleetMember((action.agent ?? {}) as NewAgent);
+        return { ok: true, message: `Saved "${saved.name}".` };
+      } catch (err: any) {
+        return { ok: false, message: String(err?.message ?? err) };
+      }
+    }
+    case "remove-agent": {
+      try {
+        removeFleetMember(String(action.name ?? "").trim());
+        return { ok: true, message: "Removed." };
+      } catch (err: any) {
+        return { ok: false, message: String(err?.message ?? err) };
+      }
     }
     default:
       return { ok: false, message: "Unsupported control action." };
@@ -1449,9 +2198,24 @@ function wireShortcuts() {
 
 // Only ever one Jarvis. A second instance would spawn a rival brain and fight
 // the first one for the microphone, while leaving two reactors on screen.
-if (!app.requestSingleInstanceLock()) {
+//
+// That is exactly what happened, for a long time, because `app.quit()` is
+// ASYNCHRONOUS and this is top-level module code with nowhere to return to:
+// execution carried straight on past it, `whenReady` fired, and the second
+// instance booted in full — microphone, speech, brain, HUD. Worse, the
+// `before-quit` handler below calls `event.preventDefault()` to run an async
+// teardown, so the quit this line asked for was then actively delayed. The
+// result was two Echos answering the same room, replying to each other, each
+// one paying for its own model calls.
+//
+// `app.exit()` is the immediate form: it does not emit before-quit or
+// will-quit, so nothing can hold it open. The flag is belt and braces — if the
+// process somehow survives long enough to reach `whenReady`, that handler
+// returns instead of starting a second assistant.
+const isPrimaryInstance = app.requestSingleInstanceLock();
+if (!isPrimaryInstance) {
   console.log("[jarvis] already running — focusing the existing window");
-  app.quit();
+  app.exit(0);
 }
 
 app.on("second-instance", () => {
@@ -1460,7 +2224,36 @@ app.on("second-instance", () => {
   win.focus();
 });
 
+// Event-loop lag monitor: for "the control panel got slow" reports that a
+// code-reading pass can't reproduce (checked and ruled out: render() cost,
+// duplicate IPC listeners, stale timers — all fine under synthetic load).
+// This measures the one thing a renderer-side investigation cannot see: the
+// MAIN process's own JS thread falling behind schedule, which is exactly
+// what makes every window's IPC-backed button feel slow at once, since they
+// all share this one event loop. Logged with what was actually running at
+// the time, so the next occurrence is evidence instead of a guess.
+let lastLagCheckAt = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const drift = now - lastLagCheckAt - 1000;
+  lastLagCheckAt = now;
+  if (drift > 150) {
+    const activeMissions = swarm.list().filter((a) => a.status === "working").length;
+    console.warn(
+      `[perf] main process stalled ~${drift}ms (provider=${cfg.brain}, osiris=${isOsirisOpen()}, agents working=${activeMissions})`
+    );
+  }
+}, 1000).unref();
+
 app.whenReady().then(async () => {
+  // A losing second instance must never reach any of this. See the lock above.
+  if (!isPrimaryInstance) return;
+  // Development runs use Electron's generic icon unless the Dock is updated
+  // explicitly. assets/echo.icns is ready for a future packaged build; other
+  // desktop platforms pick up the BrowserWindow icon above.
+  if (process.platform === "darwin" && existsSync(ECHO_ICON_PATH)) {
+    app.dock.setIcon(ECHO_ICON_PATH);
+  }
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['*://*.youtube.com/*', '*://*.youtube-nocookie.com/*'] },
     (details, callback) => {
@@ -1484,12 +2277,18 @@ app.whenReady().then(async () => {
 
   const loaded = loadEnv(app.getAppPath());
   if (loaded.length) console.log(`[jarvis] .env loaded (${loaded.join(", ")})`);
-
   cfg = loadConfig(app.getAppPath());
+  setActiveConfig(cfg); // deep modules (gate.ts's critic, tool pruning, escalation, …) read the live config through this
   voiceLog.init(app.getAppPath());
   voiceSession = new VoiceSession({ windowMs: () => (cfg.voice?.conversationMode === false ? 0 : cfg.voice?.conversationWindowMs ?? 12000) });
   voiceSession.on("turnSummary", (summary) => console.log(`[voice] ${describeSummary(summary)}`));
   console.log(`[jarvis] config loaded (brain=${cfg.brain})`);
+  {
+    // Next to the brain line on purpose: the two together are what explain
+    // which path a spoken turn will actually take.
+    const why = realtimeUnavailableReason(cfg);
+    if (why) console.warn(`[realtime] ${why}`);
+  }
 
   // Teach-by-demonstration capture. Opt-in: it is the one part of Jarvis that
   // deliberately stores what was on screen, so it should never start unasked.
@@ -1694,6 +2493,17 @@ app.whenReady().then(async () => {
       });
       if (recovered) console.warn(`[echo:recovery] resumed ${task.actor.name} task ${task.taskId}`);
     }
+
+    // Anything that did NOT come back above cannot still be running: its
+    // wall-time timer died with the process that armed it. Close those out so
+    // the board shows what is true, rather than agents that stopped existing
+    // when Echo exited.
+    {
+      const closed = swarm.reconcileAbandoned({ makeBrain: () => { throw new Error("unused"); } } as any);
+      if (closed.tasks) {
+        console.warn(`[echo:recovery] closed ${closed.tasks} abandoned Agent Task(s) across ${closed.missions} mission(s)`);
+      }
+    }
     
     // Futuristic Features: Background Tasks
     startRewind();
@@ -1760,14 +2570,29 @@ app.whenReady().then(async () => {
  * launchd. An orphaned `say` is what makes a restarting Jarvis appear to answer
  * in two overlapping voices: the old one is still talking when the new one starts.
  */
-function shutdown() {
+let shutdownPromise: Promise<void> | null = null;
+let shutdownComplete = false;
+
+async function shutdown(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
   try {
     globalShortcut.unregisterAll();
   } catch {
     /* already gone */
   }
   listener?.stop();
-  brain?.stop();
+  // stop() closes the selected brain's own MCP connection. Await it before
+  // Electron exits: starting an async close from will-quit and immediately
+  // ending the process is how uvx workers became orphaned.
+  try {
+    await brain?.stop();
+  } catch (err) {
+    console.error("[jarvis] brain shutdown failed:", err);
+  }
+  // Clones and any partially-started connection are registered globally in
+  // the MCP layer, so this is the final ownership backstop.
+  await closeMcpServers().catch((err) => console.error("[jarvis] MCP shutdown failed:", err));
   tts?.stop(); // kills the in-flight `say`/afplay child
   telegram?.stop();
   stopSttServer(); // don't leave the whisper server holding the model
@@ -1779,7 +2604,7 @@ function shutdown() {
   stopShadowMode();
   // Quitting must close the listening port. Leaving a socket open after the
   // app is gone would be a hole nobody could see to close.
-  void stopRemote();
+  await stopRemote().catch(() => {});
   stopCaptureBridge();
   destroyOverlayWindow();
   closeOrbitalPanel();
@@ -1809,6 +2634,20 @@ function shutdown() {
   } catch {
     /* nothing more to do on the way out */
   }
+  })();
+  return shutdownPromise;
+}
+
+function requestAppShutdown(source: string): void {
+  if (shutdownComplete) {
+    app.quit();
+    return;
+  }
+  console.log(`[jarvis] graceful shutdown requested by ${source}`);
+  void shutdown().finally(() => {
+    shutdownComplete = true;
+    app.quit();
+  });
 }
 
 // What the phone's stop button actually does. Registered here because this is
@@ -1858,7 +2697,13 @@ function handleTelegramCommand(text: string): void {
   }
 }
 
-app.on("will-quit", shutdown);
+// Electron does not await will-quit handlers. Hold before-quit exactly once,
+// finish asynchronous MCP teardown, then allow the second quit attempt.
+app.on("before-quit", (event) => {
+  if (shutdownComplete) return;
+  event.preventDefault();
+  requestAppShutdown("application quit");
+});
 // Reachable from the switch_brain tool, which force-exits and would otherwise
 // leave the speech process and whisper server orphaned.
 setShutdownHandler(shutdown);

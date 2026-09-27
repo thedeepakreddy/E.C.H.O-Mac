@@ -11,6 +11,8 @@ import { capture } from "../safety/snapshot.js";
 import { confirmations } from "../safety/confirm.js";
 import { observeAction } from "../frontier/observe.js";
 import { runGated, decide, DENIAL_MESSAGE } from "../safety/gate.js";
+import { LOCAL_TOOL_NAMES } from "./localtools.js";
+import { ROUTER_ALWAYS_INCLUDE } from "./tool-router.js";
 import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
 import type { JarvisConfig } from "../config.js";
 import { loadMcpConfig } from "./mcp.js";
@@ -108,7 +110,41 @@ export class ClaudeBrain extends Brain {
   }
 
   private buildMcpServer() {
-    const sdkTools = TOOLS.map((t) =>
+    // A restricted agent (frontier/fleet.ts) never sees a disallowed Echo tool
+    // offered at all. That alone would not stop it reaching the SDK's OWN
+    // built-ins (Bash, Write, Edit, WebFetch) — those never pass through this
+    // list — so `gate()` below denies any tool outside the allowlist too,
+    // Echo's or the SDK's, as the guaranteed second layer.
+    const allowed = this.limits.allowedTools;
+
+    /**
+     * Tool pruning for the Claude brain (AGI blueprint #9).
+     *
+     * The other three brains prune per TURN, choosing the top-K tools by
+     * embedding similarity to what was just said. That cannot work here: the
+     * SDK owns the session and the tool list is fixed when `query()` is called,
+     * so a per-turn list would mean tearing down the conversation every turn.
+     *
+     * The SDK offers something better instead — DEFERRED LOADING. A tool marked
+     * `alwaysLoad: false` stays out of the prompt until the model asks for it
+     * through tool search, so the prompt carries the tools Echo reaches for
+     * constantly and the long tail costs nothing until it is wanted. Unlike
+     * top-K pruning nothing becomes unreachable; a deferred tool is one search
+     * away rather than absent.
+     *
+     * The always-loaded set is the shortlist the local model already uses
+     * (localtools.ts) plus the router's own ALWAYS_INCLUDE — seeing, pointing,
+     * typing, memory and confirmation. Those are what a spoken command needs in
+     * the first round trip; deferring them is what the `alwaysLoad: true` below
+     * was added to prevent in the first place, and that stays true.
+     *
+     * Off unless `agi.toolPruning.enabled`, in which case every tool is loaded
+     * exactly as before.
+     */
+    const pruning = this.cfg.agi?.toolPruning?.enabled === true;
+    const core = new Set([...LOCAL_TOOL_NAMES, ...ROUTER_ALWAYS_INCLUDE]);
+
+    const sdkTools = (allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS).map((t) =>
       tool(
         t.name,
         t.description,
@@ -140,18 +176,22 @@ export class ClaudeBrain extends Brain {
           content.push({ type: "text", text: JSON.stringify({ status: out.status, data: out.data, error: out.error, verification: out.verification, callId: out.callId }) });
           content.push({ type: "text", text: this.memory.packet() });
           return { content, isError: out.status === "failed" || out.status === "timeout" || out.status === "uncertain" };
-        }
+        },
+        // `searchHint` is what tool search matches a deferred tool on, so it
+        // has to describe the tool in the words someone would ask for it in.
+        pruning ? { alwaysLoad: core.has(t.name), searchHint: `${t.name.replace(/_/g, " ")} — ${t.description.slice(0, 160)}` } : undefined
       )
     );
     return createSdkMcpServer({
       name: "jarvis",
       version: "1.0.0",
       tools: sdkTools,
-      // Keep the computer-control tools in the prompt permanently. Without
-      // this the SDK defers them behind a ToolSearch call, costing a whole
-      // extra model round trip before Jarvis can even take a screenshot —
-      // very noticeable when every command is spoken.
-      alwaysLoad: true,
+      // Server-level alwaysLoad is OR'd with the per-tool flag, so leaving it
+      // true would pin EVERY tool in the prompt and silently undo the pruning
+      // above. When pruning is off it stays true, which is the original
+      // behaviour: keep the computer-control tools loaded rather than pay a
+      // whole extra model round trip before Echo can even take a screenshot.
+      alwaysLoad: !pruning,
     });
   }
 
@@ -228,6 +268,13 @@ export class ClaudeBrain extends Brain {
     input: Record<string, unknown>,
     _options: { signal: AbortSignal }
   ): Promise<{ behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }> {
+    if (this.limits.allowedTools && !this.limits.allowedTools.has(bareToolName(toolName))) {
+      // The one choke point every SDK tool call passes through — including its
+      // own native Bash/Write/Edit, which never appear in Echo's own TOOLS and
+      // so could not be filtered out of the MCP server above. This is what
+      // makes the restriction real rather than advisory.
+      return { behavior: "deny", message: "This agent was not given access to that tool." };
+    }
     const decision = await decide(toolName, input, {
       workingDir: this.cfg.control.workingDir,
       emit: (e, p) => this.emitEvent(e as any, p),

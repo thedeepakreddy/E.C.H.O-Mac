@@ -30,7 +30,13 @@ console.log("  tokens");
 {
   const t = newToken();
   ok(tokenMatches(t, t), "the right token matches");
-  ok(!tokenMatches(t, t.slice(0, -1) + "0"), "one character wrong does not");
+  // The replacement character must actually DIFFER. Substituting a fixed "0"
+  // is a no-op one time in sixteen, when the random hex token already ends in
+  // "0" — the "wrong" token is then identical, the match rightly succeeds, and
+  // this line fails for a reason that has nothing to do with the code.
+  const wrong = t.slice(0, -1) + (t.endsWith("0") ? "1" : "0");
+  ok(wrong !== t, "the altered token really is different");
+  ok(!tokenMatches(t, wrong), "one character wrong does not");
   ok(!tokenMatches(t, ""), "an empty token does not");
   ok(!tokenMatches(t, undefined), "a missing token does not");
   ok(!tokenMatches(t, t + "a"), "a longer string does not");

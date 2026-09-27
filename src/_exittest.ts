@@ -21,15 +21,31 @@ process.env.ECHO_MAX_ITERATIONS = "2";
 process.env.ECHO_AUTO_CONTINUE_LIMIT = "1";
 // Keep episodic writes out of the real store while testing.
 process.env.JARVIS_EPISODIC_DIR = join(root, "episodic");
+// And the model-health notes. The "rate limited (429)" case below marks every
+// model in the ladder as exhausted; without a private data root that landed in
+// the real ~/.jarvis/model-health.json and benched this key's live Gemini
+// models for five minutes after every test run.
+process.env.ECHO_DATA_ROOT = join(root, "data");
 
 const { GeminiBrain } = await import("./brain/gemini.js");
 const { RecordingBrain } = await import("./agent-replay/runtime.js");
 const { LOOP_CAPS } = await import("./brain/types.js");
+const { DEFAULTS_FOR_TESTS } = await import("./config.js");
+const { modelHealth } = await import("./brain/model-health.js");
 
 let pass = 0;
 let fail = 0;
 
+// A hand-rolled config used to omit `agi` entirely, which every brain's
+// runLoop reads unconditionally (tool pruning et al.) — this crashed every
+// single Gemini-driven case here with the same unhandled rejection, which is
+// exactly the kind of "no loop.exit event was written at all" failure this
+// file exists to catch. Real config objects always carry the full DEFAULTS
+// shape (see config.ts's deepMerge), so mirror that here instead of a partial
+// stub that doesn't resemble what the app ever actually constructs a brain
+// with.
 const cfg: any = {
+  agi: DEFAULTS_FOR_TESTS.agi,
   brain: "gemini",
   gemini: { model: "test-model", apiKeyEnv: "GEMINI_API_KEY" },
   claude: { model: "test", systemPromptPreset: "none" },
@@ -51,11 +67,35 @@ async function runCase(
   opts: { interruptAfterMs?: number; maxIterations?: number } = {}
 ): Promise<any> {
   process.env.ECHO_MAX_ITERATIONS = String(opts.maxIterations ?? 2);
+  // Each case stubs one specific failure and must be the only thing the loop
+  // reacts to. Quota notes outlive a case, so the 429 case used to poison the
+  // ladder for every case after it: the stub was never reached and the run
+  // failed at model selection, reporting `provider_error` for a dropped
+  // connection and for a user interrupt alike. Two real exit paths went
+  // untested behind those false failures.
+  modelHealth.reset();
   const before = new Set(existsSync(root) ? readdirSync(root) : []);
   const inner = new GeminiBrain(cfg, "test-key");
   // Stub the transport, not the loop: everything under test still runs.
   let calls = 0;
-  (inner as any).ai = { models: { generateContent: async () => generate(calls++) } };
+  // GeminiBrain.runLoop calls generateContentStream, not generateContent
+  // (the loop moved to streaming in the voice rearchitecture) — stub the
+  // method it actually calls. A throw from `generate` still propagates the
+  // same way: it happens inside the awaited call, before any chunk exists,
+  // exactly like the old direct (non-streamed) mock. A successful reply is
+  // wrapped as a single-chunk async iterable, which generateStreaming's
+  // accumulation loop reduces back to the same shape a real multi-chunk
+  // stream would produce.
+  (inner as any).ai = {
+    models: {
+      generateContentStream: async () => {
+        const result = await generate(calls++);
+        return (async function* () {
+          yield result;
+        })();
+      },
+    },
+  };
   (inner as any).mcpInitialized = true;
 
   const brain = new RecordingBrain(
@@ -264,7 +304,14 @@ console.log("\nsecond turn in a long-lived session");
   };
 
   const recA = mkLog("turn-a");
-  const consumed = (brain as any).consume();
+  // consume() takes the generation it was started at and bails immediately if
+  // sessionGeneration has moved on since — a staleness guard added after this
+  // test was written. Calling it with no argument makes `generation` compare
+  // as `undefined !== 0` on the very first message and return before anything
+  // is recorded, which is indistinguishable from this test's own failure mode
+  // (nothing logged) until you look at why. Mirror what start() actually does.
+  const generation = ++(brain as any).sessionGeneration;
+  const consumed = (brain as any).consume(generation);
   await new Promise((r) => setTimeout(r, 50));
 
   // Turn one is over; a new turn means a new logger, as RecordingBrain does.

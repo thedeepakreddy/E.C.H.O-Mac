@@ -1,0 +1,41 @@
+/* SynapseField layers — drop-in wherever the neuron map is shown. */
+.sf-host {
+  position: relative;
+  display: block;
+  background: #000;
+  overflow: hidden;
+  isolation: isolate;
+  touch-action: none;
+}
+.sf-host.sf-interactive { cursor: grab; }
+.sf-host.sf-dragging { cursor: grabbing; }
+
+.sf-stage {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+.sf-stage > .sf-base,
+.sf-stage > .sf-glow,
+.sf-stage > .sf-fx {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+.sf-stage > .sf-base {
+  object-fit: cover;
+  transition: filter .25s linear;
+}
+.sf-stage > .sf-glow {
+  mix-blend-mode: screen;
+  filter: blur(5px) saturate(1.45);
+  opacity: .45;
+}
+.sf-stage > .sf-fx {
+  mix-blend-mode: screen;
+}

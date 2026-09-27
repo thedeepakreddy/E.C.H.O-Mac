@@ -502,6 +502,48 @@ export function consolidate(
   return { promoted, examined: episodes.length, groups: groups.size };
 }
 
+/**
+ * Add a fact directly, bypassing the lexical recurrence rule above — for the
+ * AGI-blueprint "self-compressing context" pass (frontier/dreamer.ts): once a
+ * day, while idle, a free local model is asked to generalise ACROSS the facts
+ * `consolidate()` already promoted (its own doc comment names the example:
+ * "prefers Brave" + "prefers Firefox" -> "avoids Chrome"), something the
+ * lexical rule above explicitly cannot do by itself. Writes through the exact
+ * same file the lexical path uses, so `factsForPrompt`/`allFacts` need no
+ * second read path — this is additive to consolidation, not a parallel store.
+ *
+ * Confidence is deliberately capped below what a directly-observed, lexically
+ * recurring fact can reach: this is an inference about inferences, one step
+ * further from what was actually seen.
+ */
+const LLM_INFERRED_CONFIDENCE_CAP = 0.6;
+
+export function promoteFact(
+  text: string,
+  kind: SemanticFact["kind"],
+  sourceFactIds: string[],
+  project?: string
+): SemanticFact {
+  const fact: SemanticFact = {
+    id: id(),
+    text: text.slice(0, 300),
+    kind,
+    support: sourceFactIds.length || 1,
+    confidence: Math.min(LLM_INFERRED_CONFIDENCE_CAP, 0.4 + 0.05 * sourceFactIds.length),
+    firstSeen: Date.now(),
+    lastSeen: Date.now(),
+    sourceEpisodeIds: sourceFactIds,
+    project,
+  };
+  try {
+    ensure();
+    appendFileSync(FACTS(), JSON.stringify(fact) + "\n", "utf8");
+  } catch (err) {
+    console.error("[episodic] could not save an inferred fact:", (err as any)?.message ?? err);
+  }
+  return fact;
+}
+
 export function allFacts(): SemanticFact[] {
   return parseJsonl<SemanticFact>(FACTS());
 }

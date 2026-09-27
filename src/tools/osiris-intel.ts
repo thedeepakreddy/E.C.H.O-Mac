@@ -464,6 +464,32 @@ export async function osirisFetch(
   throw new Error(directError || "no answer from the grid");
 }
 
+/**
+ * Turn a place name into coordinates via Osiris's own geocoder — the same
+ * route `osiris_focus` uses to fly the camera there, so "near Tokyo" resolves
+ * to the same point the globe actually moves to.
+ */
+export async function geocodePlace(
+  place: string,
+  opts: { base?: string; relay?: Relay } = {}
+): Promise<{ lat: number; lng: number } | null> {
+  const trimmed = place.trim();
+  if (!trimmed) return null;
+  try {
+    const base = normalizeBase(opts.base ?? (await activeBase()));
+    const found = await osirisFetch(`/api/geosearch?q=${encodeURIComponent(trimmed)}`, {
+      base,
+      timeoutMs: 12_000,
+      relay: opts.relay,
+    });
+    const hit = found?.results?.[0];
+    if (hit && Number.isFinite(hit.lat) && Number.isFinite(hit.lng)) return { lat: hit.lat, lng: hit.lng };
+  } catch {
+    /* the caller reports "couldn't place it" rather than throwing here */
+  }
+  return null;
+}
+
 // ── turning a feed into an answer ─────────────────────────────────────────
 
 function esc(s: unknown): string {
@@ -497,6 +523,49 @@ function arrayAt(data: any, key: string): any[] {
   return Array.isArray(value) ? value : [];
 }
 
+/**
+ * A place to filter a feed down to, resolved once (geocoded) by the caller.
+ *
+ * Every feed here reports individually-located items — an earthquake, a
+ * plane, a fire — but `summarize()` used to always report the global count,
+ * so "earthquakes near Tokyo" and "earthquakes" got the identical answer: the
+ * single biggest quake on Earth, wherever that happened to be. This narrows
+ * the underlying array to what actually happened near the place asked about,
+ * before any of the per-feed math (biggest, most intense, top three) runs.
+ */
+export interface LocationFilter {
+  lat: number;
+  lng: number;
+  /** How far from the point still counts as "near it". */
+  radiusKm: number;
+  /** For the spoken answer — the place as the user said it, not the geocoder's name. */
+  label: string;
+}
+
+/** Default catchment for a filtered report: enough to cover a metro area and
+ *  its immediate surroundings without quietly turning into "the whole region". */
+export const DEFAULT_RADIUS_KM = 350;
+
+/** Great-circle distance in km — accurate enough to decide "is this near the place", not for navigation. */
+function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371;
+  const dLat = ((bLat - aLat) * Math.PI) / 180;
+  const dLng = ((bLng - aLng) * Math.PI) / 180;
+  const s1 = Math.sin(dLat / 2) ** 2 +
+    Math.cos((aLat * Math.PI) / 180) * Math.cos((bLat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s1)));
+}
+
+/** Keep only the items with finite lat/lng inside the filter's radius. */
+function withinRadius<T extends { lat?: unknown; lng?: unknown }>(items: T[], filter: LocationFilter): T[] {
+  return items.filter((item) => {
+    const lat = Number(item?.lat);
+    const lng = Number(item?.lng);
+    return Number.isFinite(lat) && Number.isFinite(lng) &&
+      haversineKm(filter.lat, filter.lng, lat, lng) <= filter.radiusKm;
+  });
+}
+
 export interface FeedSummary {
   /** One or two sentences, written to be spoken. */
   speech: string;
@@ -512,8 +581,14 @@ export interface FeedSummary {
  * answers `{ earthquakes: [], error: ... }` with HTTP 200, and "nothing came
  * back" is a perfectly good answer to say out loud.
  */
-export function summarize(feedId: string, data: any): FeedSummary {
+export function summarize(feedId: string, data: any, filter?: LocationFilter): FeedSummary {
   const failed = typeof data?.error === "string" ? data.error : "";
+  // "Near X" reads naturally spliced into a sentence; the unlocatable feeds
+  // (status/satellites/space_weather/cyber) say so explicitly instead of
+  // quietly ignoring the place, so a location that did nothing is never
+  // mistaken for a location that found nothing.
+  const scope = filter ? ` near ${filter.label}` : "";
+  const globalNote = (allCount: number) => (filter ? ` (${allCount} elsewhere on the feed).` : "");
 
   switch (feedId) {
     case "status": {
@@ -526,24 +601,27 @@ export function summarize(feedId: string, data: any): FeedSummary {
         `${s.weather ?? 0} weather events`,
         `${s.nuclear ?? 0} nuclear sites`,
       ];
+      const prefix = filter ? "Grid status is a global summary, not broken down by place. " : "";
       return {
-        speech: `The grid is tracking ${parts[0]}, ${parts[1]} and ${parts[2]}, with ${s.incidents ?? 0} global incidents live.`,
+        speech: prefix + `The grid is tracking ${parts[0]}, ${parts[1]} and ${parts[2]}, with ${s.incidents ?? 0} global incidents live.`,
         html: `<ul>${list(parts.map(esc))}</ul>`,
       };
     }
 
     case "earthquakes": {
-      const quakes = arrayAt(data, "earthquakes")
-        .filter((q) => Number.isFinite(q?.magnitude))
-        .sort((a, b) => b.magnitude - a.magnitude);
-      if (!quakes.length) {
+      const all = arrayAt(data, "earthquakes").filter((q) => Number.isFinite(q?.magnitude));
+      const quakes = (filter ? withinRadius(all, filter) : all).sort((a, b) => b.magnitude - a.magnitude);
+      if (!all.length) {
         return { speech: failed ? `No seismic data — ${failed}.` : "No earthquakes on the feed right now.", html: "<p>No events.</p>" };
+      }
+      if (filter && !quakes.length) {
+        return { speech: `No earthquakes${scope} in the last day${globalNote(all.length)}`, html: "<p>No events near that place.</p>" };
       }
       const top = quakes[0];
       const strong = quakes.filter((q) => q.magnitude >= 4.5).length;
       return {
         speech:
-          `${quakes.length} earthquakes in the last day. The largest is magnitude ${Number(top.magnitude).toFixed(1)} ` +
+          `${quakes.length} earthquake${quakes.length === 1 ? "" : "s"}${scope} in the last day. The largest is magnitude ${Number(top.magnitude).toFixed(1)} ` +
           `${top.place ?? "location unknown"}, ${ago(Number(top.time))}` +
           (strong ? `, and ${strong} of them are magnitude four and a half or above.` : "."),
         html: `<ul>${list(
@@ -553,18 +631,28 @@ export function summarize(feedId: string, data: any): FeedSummary {
     }
 
     case "flights": {
-      const commercial = arrayAt(data, "commercial_flights").length;
-      const priv = arrayAt(data, "private_flights").length;
-      const jets = arrayAt(data, "private_jets").length;
-      const military = arrayAt(data, "military_flights").length;
-      const jamming = arrayAt(data, "gps_jamming").length;
-      const total = Number(data?.total ?? commercial + priv + jets + military);
-      if (!total) {
+      const commercialAll = arrayAt(data, "commercial_flights");
+      const privAll = arrayAt(data, "private_flights");
+      const jetsAll = arrayAt(data, "private_jets");
+      const militaryAll = arrayAt(data, "military_flights");
+      const jammingAll = arrayAt(data, "gps_jamming");
+      const near = <T extends { lat?: unknown; lng?: unknown }>(arr: T[]) => (filter ? withinRadius(arr, filter) : arr);
+      const commercial = near(commercialAll).length;
+      const priv = near(privAll).length;
+      const jets = near(jetsAll).length;
+      const military = near(militaryAll).length;
+      const jamming = near(jammingAll).length;
+      const globalTotal = commercialAll.length + privAll.length + jetsAll.length + militaryAll.length;
+      const total = filter ? commercial + priv + jets + military : Number(data?.total ?? globalTotal);
+      if (!globalTotal) {
         return { speech: failed ? `No flight data — ${failed}.` : "The flight feed came back empty.", html: "<p>No aircraft.</p>" };
+      }
+      if (filter && !total) {
+        return { speech: `No aircraft${scope} right now${globalNote(globalTotal)}`, html: "<p>No aircraft near that place.</p>" };
       }
       return {
         speech:
-          `${total} aircraft in the air: ${commercial} commercial, ${priv + jets} private, ${military} military` +
+          `${total} aircraft${scope}: ${commercial} commercial, ${priv + jets} private, ${military} military` +
           (jamming ? `, and ${jamming} zones reporting GPS jamming.` : "."),
         html: `<ul>${list([
           `${total} aircraft total`,
@@ -578,15 +666,19 @@ export function summarize(feedId: string, data: any): FeedSummary {
     }
 
     case "fires": {
-      const fires = arrayAt(data, "fires");
-      if (!fires.length) {
+      const all = arrayAt(data, "fires");
+      const fires = filter ? withinRadius(all, filter) : all;
+      if (!all.length) {
         return { speech: failed ? `No fire data — ${failed}.` : "No active fire hotspots on the feed.", html: "<p>No hotspots.</p>" };
+      }
+      if (filter && !fires.length) {
+        return { speech: `No active fire hotspots${scope}${globalNote(all.length)}`, html: "<p>No hotspots near that place.</p>" };
       }
       const volcanoes = fires.filter((f) => f?.type === "volcano").length;
       const hottest = [...fires].sort((a, b) => (b?.frp ?? 0) - (a?.frp ?? 0))[0];
       return {
         speech:
-          `${fires.length} active fire hotspots${volcanoes ? `, including ${volcanoes} volcanic events` : ""}. ` +
+          `${fires.length} active fire hotspot${fires.length === 1 ? "" : "s"}${scope}${volcanoes ? `, including ${volcanoes} volcanic events` : ""}. ` +
           `The most intense is at ${Number(hottest?.lat).toFixed(1)}, ${Number(hottest?.lng).toFixed(1)}.`,
         html: `<ul>${list([
           `${fires.length} hotspots`,
@@ -597,16 +689,30 @@ export function summarize(feedId: string, data: any): FeedSummary {
     }
 
     case "news": {
-      const news = arrayAt(data, "news");
-      if (!news.length) {
+      const all = arrayAt(data, "news");
+      // No per-item coordinates on this feed — the place is matched against
+      // the story's own text instead of geography, a weaker but still useful
+      // signal for "news about X" rather than "news physically near X".
+      const news = filter
+        ? all.filter((n) =>
+            `${n?.title ?? ""} ${n?.summary ?? ""} ${n?.description ?? ""} ${n?.source_name ?? ""}`
+              .toLowerCase()
+              .includes(filter.label.toLowerCase())
+          )
+        : all;
+      const mentionScope = filter ? ` mentioning ${filter.label}` : "";
+      if (!all.length) {
         return { speech: failed ? `No intel — ${failed}.` : "The intel feed is quiet.", html: "<p>No stories.</p>" };
+      }
+      if (filter && !news.length) {
+        return { speech: `No stories${mentionScope} on the intel feed right now${globalNote(all.length)}`, html: "<p>No matching stories.</p>" };
       }
       const ranked = [...news].sort((a, b) => (b?.risk_score ?? 0) - (a?.risk_score ?? 0));
       const hot = ranked.filter((n) => (n?.risk_score ?? 0) >= 8).length;
       const top = ranked.slice(0, 3);
       return {
         speech:
-          `${news.length} stories on the intel feed${hot ? `, ${hot} flagged high priority` : ""}. ` +
+          `${news.length} stor${news.length === 1 ? "y" : "ies"}${mentionScope}${hot ? `, ${hot} flagged high priority` : ""}. ` +
           `Top of the list: ${top.map((n) => n?.title).filter(Boolean).slice(0, 2).join("; ")}.`,
         html: `<ul>${list(
           ranked.slice(0, 6).map((n) => `[${n?.risk_score ?? 0}] ${esc(n?.title)} <em>${esc(n?.source)}</em>`)
@@ -621,8 +727,10 @@ export function summarize(feedId: string, data: any): FeedSummary {
         return { speech: failed ? `No satellite data — ${failed}.` : "No satellites on the feed.", html: "<p>No objects.</p>" };
       }
       const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      const prefix = filter ? "Satellites aren't tracked by ground location, so here's the global picture. " : "";
       return {
         speech:
+          prefix +
           `${sats.length} satellites are being tracked` +
           (top.length ? `, mostly ${top.map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ")}.` : "."),
         html: `<ul>${list([`${sats.length} tracked`, ...top.map(([k, v]) => `${esc(k)}: ${v}`)])}</ul>`,
@@ -630,16 +738,23 @@ export function summarize(feedId: string, data: any): FeedSummary {
     }
 
     case "conflicts": {
-      const zones = arrayAt(data, "zones");
-      const events = Number(data?.totalLiveEvents ?? arrayAt(data, "liveEvents").length);
-      const wars = Number(data?.activeWarzones ?? zones.filter((z) => z?.severity === "war").length);
-      if (!zones.length) {
+      const all = arrayAt(data, "zones");
+      const zones = filter ? withinRadius(all, filter) : all;
+      if (!all.length) {
         return { speech: failed ? `No conflict data — ${failed}.` : "No conflict zones on the feed.", html: "<p>No zones.</p>" };
       }
+      if (filter && !zones.length) {
+        return { speech: `No conflict zones${scope}${globalNote(all.length)}`, html: "<p>No zones near that place.</p>" };
+      }
+      // Recomputed from the (possibly filtered) zone list rather than the
+      // feed's own global `activeWarzones`/`totalLiveEvents`, which would
+      // otherwise silently disagree with what's actually being reported.
+      const wars = zones.filter((z) => z?.severity === "war").length;
+      const events = zones.reduce((sum, z) => sum + (Number(z?.eventCount) || arrayAt(z, "events").length), 0);
       const named = zones.filter((z) => z?.severity === "war").slice(0, 3).map((z) => z?.label).filter(Boolean);
       return {
         speech:
-          `${zones.length} conflict zones are being watched, ${wars} of them active wars` +
+          `${zones.length} conflict zone${zones.length === 1 ? "" : "s"}${scope} being watched, ${wars} of them active wars` +
           (named.length ? ` — ${speakList(named.map(String))}` : "") +
           `, with ${events} live events.`,
         html: `<ul>${list(
@@ -653,8 +768,10 @@ export function summarize(feedId: string, data: any): FeedSummary {
       const level = data?.storm_level ?? "unknown";
       const flares = arrayAt(data, "solar_flares");
       const alerts = arrayAt(data, "alerts");
+      const prefix = filter ? "Space weather is planet-wide, not broken down by place. " : "";
       return {
         speech:
+          prefix +
           `Space weather is ${String(level).toLowerCase()}, Kp index ${kp ?? "unknown"}` +
           (flares.length ? `, with ${flares.length} solar flares logged, the strongest ${flares[0]?.class}.` : ".") +
           (alerts.length ? ` ${alerts.length} alerts are active.` : ""),
@@ -667,12 +784,16 @@ export function summarize(feedId: string, data: any): FeedSummary {
     }
 
     case "weather": {
-      const events = arrayAt(data, "events");
-      if (!events.length) {
+      const all = arrayAt(data, "events");
+      const events = filter ? withinRadius(all, filter) : all;
+      if (!all.length) {
         return { speech: failed ? `No weather data — ${failed}.` : "No severe weather events on the feed.", html: "<p>No events.</p>" };
       }
+      if (filter && !events.length) {
+        return { speech: `No severe weather${scope} right now${globalNote(all.length)}`, html: "<p>No events near that place.</p>" };
+      }
       return {
-        speech: `${events.length} severe weather events are live on the grid.`,
+        speech: `${events.length} severe weather event${events.length === 1 ? "" : "s"}${scope} live on the grid.`,
         html: `<ul>${list(events.slice(0, 8).map((e) => esc(e?.title ?? e?.name ?? e?.type ?? "event")))}</ul>`,
       };
     }
@@ -683,8 +804,10 @@ export function summarize(feedId: string, data: any): FeedSummary {
       if (!threats.length) {
         return { speech: failed ? `No cyber data — ${failed}.` : "No active cyber threats on the feed.", html: "<p>No threats.</p>" };
       }
+      const prefix = filter ? "Cyber threats aren't tracked by physical location, so here's the global picture. " : "";
       return {
         speech:
+          prefix +
           `Threat level ${String(stats.threat_level ?? "unknown").toLowerCase()}, with ${threats.length} actively exploited ` +
           `vulnerabilities listed. The newest is ${threats[0]?.id ?? threats[0]?.cve ?? "unnamed"}.`,
         html: `<ul>${list(

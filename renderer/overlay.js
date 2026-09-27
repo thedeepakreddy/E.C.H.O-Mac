@@ -2,6 +2,13 @@
 // exposes a narrow bridge instead. Reading it off window threw immediately,
 // which is why none of the overlay effects below ever ran.
 const ipcRenderer = window.jarvisOverlay ?? { on: () => {} };
+document.body.dataset.renderMode = "idle";
+let scanlinePhase = 0;
+setInterval(() => {
+  if (document.body.dataset.renderMode !== "idle") return;
+  scanlinePhase = (scanlinePhase + 1) % 4;
+  document.documentElement.style.setProperty("--scanline-offset", `${scanlinePhase}px`);
+}, 6000);
 
 // Phone-remote link: a QR to scan, plus the URL as a fallback. Stays up long
 // enough to scan comfortably; re-triggered by asking for the link again.
@@ -313,6 +320,7 @@ if (window.jarvisOverlay?.on) {
 // ---- Matrix Rain Data Stream ----------------------------------------------
 const canvas = document.getElementById("matrix-rain");
 const ctx = canvas?.getContext("2d");
+let drawMatrix = () => {};
 
 if (canvas && ctx) {
   canvas.width = window.innerWidth;
@@ -323,7 +331,7 @@ if (canvas && ctx) {
   const columns = canvas.width / fontSize;
   const drops = Array.from({ length: columns }).fill(1);
 
-  function drawMatrix() {
+  drawMatrix = function drawMatrixFrame() {
     if (!isAway) return; // Completely stop drawing when not in away mode
     
     ctx.fillStyle = "rgba(0, 0, 0, 0.05)";
@@ -341,7 +349,7 @@ if (canvas && ctx) {
       }
       drops[i]++;
     }
-  }
+  };
 
   window.addEventListener("resize", () => {
     canvas.width = window.innerWidth;
@@ -350,24 +358,31 @@ if (canvas && ctx) {
     drops.fill(1);
   });
   
-  setInterval(drawMatrix, 50);
 }
 
 let isAway = false;
+let matrixTimer = null;
 
 function updateMatrixRainState() {
   if (!canvas || !ctx) return;
   if (isAway) {
     canvas.className = 'away';
     ctx.fillStyle = "#0F0"; // Classic green for away mode screensaver
+    if (!matrixTimer) matrixTimer = setInterval(drawMatrix, 50);
   } else {
     canvas.className = '';
+    if (matrixTimer) clearInterval(matrixTimer);
+    matrixTimer = null;
   }
 }
 
 // Hook into HUD away state
 if (window.jarvisOverlay?.on) {
   window.jarvisOverlay.on("state", (s) => {
+    if (s?.status) {
+      const active = !["idle", "asleep", "error"].includes(String(s.status));
+      document.body.dataset.renderMode = active ? "active" : "idle";
+    }
     if (s && s.away !== undefined) {
       isAway = s.away;
       updateMatrixRainState();

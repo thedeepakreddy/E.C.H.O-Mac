@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join, extname, basename, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Answering from your own files.
@@ -255,7 +256,7 @@ export function needsReindex(
 
 // ---- storage --------------------------------------------------------------
 
-export function indexDir(root: string = join(homedir(), ".jarvis")): string {
+export function indexDir(root: string = dataRoot()): string {
   return join(root, "diskindex");
 }
 

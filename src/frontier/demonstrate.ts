@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Learn a task by watching it done once, then repeat it.
@@ -32,7 +32,7 @@ export interface Workflow {
   repairs: number;
 }
 
-const DIR = join(homedir(), ".jarvis", "workflows");
+const DIR = join(dataRoot(), "workflows");
 const file = (name: string) => join(DIR, `${slug(name)}.json`);
 
 function slug(s: string): string {
@@ -53,6 +53,18 @@ export function startRecording(name: string) {
 
 export function isRecording(): boolean {
   return recording !== null;
+}
+
+/**
+ * Read the steps captured so far WITHOUT finishing the recording — no file is
+ * written, unlike `finishRecording`. For a caller that wants to look at what
+ * happened and decide for itself whether it is worth keeping (the automatic
+ * reflex proposal in frontier/autoreflex.ts, which saves to the reflex cache
+ * rather than the named-workflow library `finishRecording` writes to, and only
+ * once the user has approved it).
+ */
+export function peekRecording(): { name: string; steps: Step[] } | null {
+  return recording ? { name: recording.name, steps: [...recording.steps] } : null;
 }
 
 /** Called by the tool layer each time an action is performed while recording. */

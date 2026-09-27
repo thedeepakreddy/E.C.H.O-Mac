@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
+import { dataRoot } from "./memory/paths.js";
 
 export interface JarvisConfig {
   brain: "claude" | "gemini" | "ollama" | "openai";
@@ -37,6 +38,45 @@ export interface JarvisConfig {
      * detector misses. Default true.
      */
     wakeTranscriptFallback?: boolean;
+    /**
+     * Speech-to-speech voice: the turn runs on a model that takes audio in and
+     * gives audio out, instead of the STT -> brain -> TTS pipeline. Tools are
+     * still executed by Echo through the risk gate. Off by default — it is a
+     * different cost profile (billed per audio minute) and a preview model.
+     */
+    /**
+     * Which Gemini TTS model speaks when ttsEngine is "gemini". The voice comes
+     * from voice.realtime.voice, so both paths sound the same.
+     */
+    geminiTtsModel?: string;
+    realtime?: {
+      enabled: boolean;
+      model?: string;
+      /**
+       * Which spoken turns go to Gemini Live. "all" (the default) sends every
+       * one. "non-english" sends only turns whisper hears as another language;
+       * English turns take the ordinary pipeline and its voice (e.g. Piper).
+       */
+      languages?: "all" | "non-english";
+      /**
+       * Which of Gemini Live's prebuilt voices Echo speaks with.
+       *
+       * Speech-to-speech means the VOICE IS THE MODEL: it generates the audio
+       * itself, so a custom or cloned voice (a Sarvam speaker, an ElevenLabs
+       * clone) cannot be used here — you pick from Google's set. Verified
+       * working on this key: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus,
+       * Zephyr, Sulafat, Achernar. `npm run voicepreview` renders a sample of
+       * each so the choice can be made by ear.
+       */
+      voice?: string;
+      /**
+       * Pin the spoken language, e.g. "en-IN" or "te-IN". Unset lets the model
+       * decide per turn — which is what let it switch into Telugu unprompted.
+       * Pinning it stops that, at the cost of not following you into another
+       * language mid-conversation.
+       */
+      language?: string;
+    };
     /** Silero VAD model; empty disables the model and uses the RMS level. */
     vadModel?: string;
     /** Stream audio to the STT while the user speaks (Sarvam realtime), so the transcript is ready at end of speech. */
@@ -59,6 +99,21 @@ export interface JarvisConfig {
      */
     bargeIn: boolean;
     /**
+     * What talking over Echo does.
+     *
+     * `"finish"` (the default) hears you out without stopping: the reply runs
+     * to the end of its script, what you said is recorded alongside it, and
+     * Echo answers that next — so a door slamming or a laugh no longer throws
+     * away an answer you never got to hear, and a real interruption does not
+     * cost you the rest of the sentence either. Saying "stop" still stops it
+     * at once, as soon as the words come back.
+     *
+     * `"stop"` is the older behaviour: cut the voice off the instant anything
+     * clears the barge-in bar. Faster to go quiet, but it is the setting that
+     * produced half-finished replies whenever the room was noisy.
+     */
+    bargeInMode?: "finish" | "stop";
+    /**
      * Microphone to listen on. -1 uses the system default; a number picks that
      * index from `npm run miccheck`; a string matches a device by name, which
      * survives indices shifting as devices connect and disconnect.
@@ -80,8 +135,15 @@ export interface JarvisConfig {
      * - `elevenlabs`: High quality (requires ELEVENLABS_API_KEY)
      * - `local-clone`: Local python inference
      * - `sarvam`: Indian languages TTS (requires SARVAM_API_KEY)
+     * - `piper`: Piper neural voice, fully offline (npm run piper:setup)
      */
-    ttsEngine?: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam";
+    ttsEngine?: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" | "gemini" | "piper";
+    /**
+     * The Piper voice, e.g. "en_GB-alan-medium", looked up in vendor/piper/voices.
+     * Piper also stands in for any cloud voice that fails, so it is used even
+     * when ttsEngine is something else.
+     */
+    piperVoice?: string;
     elevenLabsVoiceId?: string;
     ttsVoice: string;
     ttsEnabled: boolean;
@@ -178,6 +240,29 @@ export interface JarvisConfig {
     autoDebug: boolean;
     /** Seconds between shadow's screen reads. Lower is far more expensive. */
     shadowIntervalSeconds: number;
+  };
+  /**
+   * The cost-effective AGI-blueprint features: a fast local critic before GUI
+   * actions, semantic (not just exact-string) reflex matching, an idle
+   * dream-compression pass, read-only app exploration while away, sandboxed
+   * command testing, per-turn tool pruning, zero-argument speculative
+   * pre-fetch, and a failure-triggered brain escalation. Every one degrades to
+   * its old behaviour when its model/dependency is unavailable — none of these
+   * may be why a turn fails. See cognition/embeddings.ts for the shared local
+   * embedder several of them use.
+   */
+  agi: {
+    critic: { enabled: boolean };
+    autoReflex: { enabled: boolean };
+    semanticReflex: { enabled: boolean };
+    confidenceToDemo: { enabled: boolean; failureThreshold: number };
+    dreamCompression: { enabled: boolean };
+    curiosity: { enabled: boolean };
+    sandbox: { enabled: boolean };
+    toolPruning: { enabled: boolean; topK: number };
+    speculative: { enabled: boolean };
+    escalation: { enabled: boolean; failureThreshold: number };
+    feedback: { enabled: boolean };
   };
   /**
    * Rehearse UI paths while you are away. Off by default: it spends tokens and
@@ -282,6 +367,7 @@ const DEFAULTS: JarvisConfig = {
     captureEngine: "auto",
     maxSpokenSentences: 6,
     bargeIn: true,
+    bargeInMode: "finish",
     inputDevice: -1,
     picovoiceAccessKeyEnv: "PICOVOICE_ACCESS_KEY",
     sensitivity: 0.6,
@@ -303,8 +389,25 @@ const DEFAULTS: JarvisConfig = {
     conversationWindowMs: 12000,
   },
   control: { cliclickBin: "/opt/homebrew/bin/cliclick", workingDir: "~" },
-  hud: { startListeningOnLaunch: true, skin: "classic" },
+  hud: { startListeningOnLaunch: true, skin: "jarvis" },
   helpers: { shadow: false, ghost: false, autoDebug: false, shadowIntervalSeconds: 60 },
+  agi: {
+    critic: { enabled: true },
+    autoReflex: { enabled: true },
+    semanticReflex: { enabled: true },
+    confidenceToDemo: { enabled: true, failureThreshold: 2 },
+    dreamCompression: { enabled: true },
+    // Off by default, matching every other background screen-watcher here:
+    // it costs a real accessibility scan per idle tick and moves nothing, but
+    // an autonomous feature touching apps it wasn't asked about is a choice,
+    // not a default.
+    curiosity: { enabled: false },
+    sandbox: { enabled: true },
+    toolPruning: { enabled: true, topK: 12 },
+    speculative: { enabled: true },
+    escalation: { enabled: true, failureThreshold: 2 },
+    feedback: { enabled: true },
+  },
   dreaming: { enabled: false },
   gestureRegion: { xMin: 0.2, xMax: 0.8, yMin: 0.35, yMax: 0.8 },
   learning: { enabled: false, captureScreens: true, maxStepsPerTurn: 0 },
@@ -337,7 +440,7 @@ export function expandHome(p: string): string {
 
 /** Load config.json (falling back to config.example.json, then built-in defaults). */
 export function loadConfig(appRoot: string): JarvisConfig {
-  const candidates = [join(appRoot, "config.json"), join(appRoot, "config.example.json")];
+  const candidates = [join(dataRoot(), "config.json"), join(appRoot, "config.json"), join(appRoot, "config.example.json")];
   let merged: JarvisConfig = DEFAULTS;
   for (const file of candidates) {
     if (existsSync(file)) {
@@ -358,4 +461,29 @@ export function loadConfig(appRoot: string): JarvisConfig {
     merged.voice.wakeSound = join(appRoot, merged.voice.wakeSound);
   }
   return merged;
+}
+
+/**
+ * The live config, for modules deep in the tool/safety layer that read it —
+ * the critic, tool pruning, speculative execution, escalation — but are not
+ * on the call path that already threads `cfg` through from main.ts (that path
+ * is 8 call sites across 4 brains and would need every one of them to
+ * remember to add it, exactly the failure mode gate.ts's own doc comment
+ * warns single choke points exist to prevent).
+ *
+ * Same pattern as voice/speaker.ts's `setActiveTts`/`speak()`: main.ts
+ * registers the one real config object it loaded at startup, and it stays
+ * live — `saveControlSettings` mutates that same object in place, so a
+ * caller here always sees the current settings without re-registering.
+ * Before registration (tests, standalone tool scripts), falls back to a
+ * freshly loaded config rather than throwing.
+ */
+let active: JarvisConfig | null = null;
+
+export function setActiveConfig(cfg: JarvisConfig): void {
+  active = cfg;
+}
+
+export function activeConfig(appRoot?: string): JarvisConfig {
+  return active ?? loadConfig(appRoot ?? process.cwd());
 }

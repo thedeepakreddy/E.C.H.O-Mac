@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { dataRoot } from "../memory/paths.js";
 
 /**
  * Anticipating the next command — safely.
@@ -80,7 +80,7 @@ export function predictNext(model: PrefetchModel, afterCmd: string, limit = 3): 
 // ---- persistence ----------------------------------------------------------
 
 function modelPath(base?: string): string {
-  return join(base ?? join(homedir(), ".jarvis"), "prefetch.json");
+  return join(base ?? dataRoot(), "prefetch.json");
 }
 
 export function loadModel(base?: string): PrefetchModel {

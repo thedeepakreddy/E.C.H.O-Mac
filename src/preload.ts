@@ -30,7 +30,11 @@ contextBridge.exposeInMainWorld("echoControl", {
   action: (action: unknown) => ipcRenderer.invoke("control:action", action),
   weather: (request?: { query?: string; latitude?: number; longitude?: number }) =>
     ipcRenderer.invoke("control:weather", request),
+  apiKeys: () => ipcRenderer.invoke("control:api-keys"),
+  fleet: () => ipcRenderer.invoke("control:fleet"),
+  openExternal: (url: string) => ipcRenderer.send("control:open-url", url),
   close: () => ipcRenderer.send("control:close"),
+  perf: (payload: { droppedMs: number }) => ipcRenderer.send("control:perf", payload),
   onUpdate: (cb: (snapshot: any) => void) => {
     const listener = (_event: unknown, snapshot: any) => cb(snapshot);
     ipcRenderer.on("control:update", listener);
@@ -111,9 +115,24 @@ contextBridge.exposeInMainWorld("echoOsiris", {
     ipcRenderer.on("osiris:trouble", (_e, t) => cb(t)),
 });
 
-/** Bridge for the Neural Core panel (the 3D galaxy schema). */
+/**
+ * Bridge for the Neural Core panel (the synaptic field over a real micrograph).
+ *
+ * It listens to the same `state`/`level` channels as the HUD so the firing rate
+ * follows Echo for real — idle barely ticks, acting is a storm.
+ */
 contextBridge.exposeInMainWorld("echoNeural", {
   close: () => ipcRenderer.send("neural:close"),
+  onState: (cb: (state: any) => void) => {
+    const listener = (_event: unknown, state: any) => cb(state);
+    ipcRenderer.on("state", listener);
+    return () => ipcRenderer.removeListener("state", listener);
+  },
+  onLevel: (cb: (level: number) => void) => {
+    const listener = (_event: unknown, level: number) => cb(level);
+    ipcRenderer.on("level", listener);
+    return () => ipcRenderer.removeListener("level", listener);
+  },
 });
 
 /** Bridge for the Setup window, where API keys are entered. */

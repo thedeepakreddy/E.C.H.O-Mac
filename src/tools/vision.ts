@@ -158,12 +158,56 @@ export function summarizeOcr(r: OcrResult, limit = 80): string {
   return `Screen text (${r.lines.length} runs, click coordinates given):\n${rows}${more}`;
 }
 
-/** Best clickable text match for a spoken target, for the Chromium fallback. */
+export interface RankedTextMatch {
+  line: OcrLine;
+  score: number;
+}
+
+const normalizeText = (value: string): string =>
+  value
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/**
+ * Rank clickable OCR text without turning a vague overlap into a click.
+ * Exact visible labels win decisively over paragraphs or longer labels that
+ * merely contain the same word. Keeping every equally good result lets the
+ * caller stop on repeated labels rather than guessing by scan order.
+ */
+export function rankText(r: OcrResult, query: string): RankedTextMatch[] {
+  const q = normalizeText(query);
+  if (!q) return [];
+  const qWords = q.split(" ");
+
+  return r.lines
+    .map((line): RankedTextMatch => {
+      const label = normalizeText(line.text);
+      if (!label) return { line, score: 0 };
+      if (label === q) return { line, score: 100 };
+      if (label.includes(q)) return { line, score: 50 };
+
+      const labelWords = new Set(label.split(" "));
+      const shared = qWords.filter((word) => labelWords.has(word)).length;
+      // Every requested word must be present. A partial phrase is not enough
+      // evidence to move the user's pointer or press a control.
+      return { line, score: shared === qWords.length ? 20 + shared : 0 };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) =>
+      b.score - a.score ||
+      b.line.confidence - a.line.confidence ||
+      a.line.text.length - b.line.text.length
+    );
+}
+
+/** Two near-equal OCR hits mean the words alone do not identify one control. */
+export function textMatchIsAmbiguous(matches: RankedTextMatch[]): boolean {
+  return matches.length > 1 && matches[1].score >= matches[0].score * 0.9;
+}
+
+/** Best clickable text match for workflow replay and other non-interactive callers. */
 export function findText(r: OcrResult, query: string): OcrLine | null {
-  const q = query.toLowerCase().trim();
-  const cands = r.lines.filter((l) => l.text.toLowerCase().includes(q));
-  if (!cands.length) return null;
-  // Shortest match containing the query is usually the actual label, not a
-  // paragraph that happens to mention it.
-  return cands.sort((a, b) => a.text.length - b.text.length)[0];
+  return rankText(r, query)[0]?.line ?? null;
 }
