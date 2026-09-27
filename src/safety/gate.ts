@@ -330,7 +330,11 @@ export async function runGated(
     const lease = taskCoordinator.acquireResources(invocation);
     let out: ToolOutput;
     if (!lease.ok) {
-      out = { text: `Resource ${lease.resource} is ${lease.quarantined ? "awaiting reconciliation after an uncertain action" : "being used by another task"}.`, status: "denied", error: { category: "resource_contention", message: "Resource is busy", retryable: !lease.quarantined } };
+      const holder = taskCoordinator.resourceState()[lease.resource!];
+      const detail = lease.quarantined
+        ? `An interrupted action holds an internal safety lock (task ${holder?.taskId}, call ${holder?.callId}). The action was not attempted. This is not a macOS permission error. Recovery requires checking the interrupted action and explicitly reconciling its resource; restarting alone will not clear it.`
+        : "Another task currently holds this resource. The action was not attempted.";
+      out = { text: `Resource ${lease.resource} is ${lease.quarantined ? "awaiting reconciliation after an uncertain action" : "being used by another task"}. ${detail}`, status: "denied", error: { category: "resource_contention", message: lease.quarantined ? "Interrupted action requires resource reconciliation" : "Resource is busy", retryable: !lease.quarantined } };
     } else {
       try { out = await executeGated(def, args, ctx); }
       catch (error: any) { out = { text: String(error.message ?? error), status: "failed", error: { category: "execution_error", message: String(error.message ?? error) } }; }

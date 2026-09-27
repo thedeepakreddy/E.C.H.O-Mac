@@ -77,8 +77,16 @@ export async function dismissPopups(rounds = 3): Promise<DismissResult> {
           }
           continue;
         }
-        const pressed = el.press ? await ax.press(dump.pid, el.path) : { ok: false };
-        if (pressed.ok) {
+        if (!el.enabled) {
+          skipped.push(`"${label}" — the control is disabled`);
+          continue;
+        }
+        if (el.press) {
+          const pressed = await ax.press(dump.pid, el.path);
+          if (!pressed.ok) {
+            skipped.push(`"${label}" — it moved before it could be pressed`);
+            continue;
+          }
           dismissed.push(label);
         } else {
           await act.click(el.x + Math.round(el.w / 2), el.y + Math.round(el.h / 2), "left");

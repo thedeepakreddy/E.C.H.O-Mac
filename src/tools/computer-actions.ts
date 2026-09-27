@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { run, osascript } from "./shell.js";
 
 let CLICLICK = "/opt/homebrew/bin/cliclick";
@@ -55,6 +56,9 @@ export interface Screenshot {
   mimeType: string;
   width: number;
   height: number;
+  /** Top-left of this image in the global desktop coordinate space. */
+  originX: number;
+  originY: number;
 }
 
 /**
@@ -64,18 +68,22 @@ export interface Screenshot {
  */
 export async function captureScreen(display?: {
   index: number;
+  x?: number;
+  y?: number;
   width: number;
   height: number;
 }): Promise<Screenshot> {
   const { width, height } = display ?? (await getScreenInfo());
-  const path = join(tmpdir(), `jarvis-shot-${Date.now()}.png`);
+  // Read-only screenshots may be batched in parallel. A timestamp alone can
+  // collide within the same millisecond and make two captures overwrite one
+  // another, so every capture owns a unique file.
+  const path = join(tmpdir(), `jarvis-shot-${randomUUID()}.png`);
   // -D names the display explicitly, 1-indexed. Without it, screencapture's
   // behaviour with more than one monitor attached is not defined by anything
   // Jarvis controls — it may capture a different screen than the one whose
   // dimensions are then used to resize the image, which silently corrupts the
   // pixel-to-coordinate mapping the model relies on.
-  const args = ["-x", "-t", "png"];
-  if (display) args.push("-D", String(display.index + 1));
+  const args = ["-x", "-t", "png", "-D", String((display?.index ?? 0) + 1)];
   args.push(path);
   const cap = await run("/usr/sbin/screencapture", args);
   if (cap.code !== 0) {
@@ -83,8 +91,18 @@ export async function captureScreen(display?: {
       `screencapture failed (${cap.code}). Grant Screen Recording permission in System Settings > Privacy & Security. ${cap.stderr}`
     );
   }
-  // Resize in place to logical width; sips preserves aspect ratio.
-  await run("/usr/bin/sips", ["--resampleWidth", String(width), path]);
+  // Force BOTH dimensions. Resizing only by width usually preserves the right
+  // height, but a one-pixel aspect/rounding difference is still enough to make
+  // the image metadata disagree with the mouse coordinate contract. More
+  // importantly, never continue with a native Retina image while claiming it
+  // is logical resolution if sips failed.
+  const resized = await run("/usr/bin/sips", [
+    "--resampleHeightWidth", String(height), String(width), path,
+  ]);
+  if (resized.code !== 0) {
+    unlink(path).catch(() => {});
+    throw new Error(`screenshot coordinate mapping failed: ${resized.stderr || resized.stdout}`);
+  }
 
   // Hand the model JPEG, not PNG. Every screenshot is carried in the
   // conversation and re-sent on each step of a long task, so the saving
@@ -107,10 +125,15 @@ export async function captureScreen(display?: {
     mimeType: usable === jpg ? "image/jpeg" : "image/png",
     width,
     height,
+    originX: display?.x ?? 0,
+    originY: display?.y ?? 0,
   };
 }
 
 function clampCoords(x: number, y: number): [string, string] {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error("mouse coordinates must be finite numbers");
+  }
   return [String(Math.round(x)), String(Math.round(y))];
 }
 
@@ -118,7 +141,26 @@ export async function moveMouse(x: number, y: number): Promise<string> {
   const [cx, cy] = clampCoords(x, y);
   const result = await run(CLICLICK, [`m:${cx},${cy}`]);
   if (result.code !== 0) throw new Error(`cliclick move failed: ${result.stderr || result.stdout}`);
-  return `moved cursor to ${cx},${cy}`;
+
+  // cliclick can exit successfully while macOS silently refuses input when
+  // Accessibility permission is missing. Read the cursor back so callers do
+  // not mistake "command accepted" for "pointer arrived".
+  const observed = await run(CLICLICK, ["p"]);
+  const [actualX, actualY] = observed.stdout.trim().split(",").map(Number);
+  if (
+    observed.code !== 0 ||
+    !Number.isFinite(actualX) ||
+    !Number.isFinite(actualY) ||
+    Math.abs(actualX - Number(cx)) > 1 ||
+    Math.abs(actualY - Number(cy)) > 1
+  ) {
+    throw new Error(
+      `cursor did not reach ${cx},${cy}` +
+      (Number.isFinite(actualX) && Number.isFinite(actualY) ? ` (it is at ${actualX},${actualY})` : "") +
+      ". Check Accessibility permission."
+    );
+  }
+  return `moved cursor to ${cx},${cy} (verified)`;
 }
 
 export async function click(

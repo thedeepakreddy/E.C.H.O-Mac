@@ -99,6 +99,21 @@ export interface JarvisConfig {
      */
     bargeIn: boolean;
     /**
+     * What talking over Echo does.
+     *
+     * `"finish"` (the default) hears you out without stopping: the reply runs
+     * to the end of its script, what you said is recorded alongside it, and
+     * Echo answers that next — so a door slamming or a laugh no longer throws
+     * away an answer you never got to hear, and a real interruption does not
+     * cost you the rest of the sentence either. Saying "stop" still stops it
+     * at once, as soon as the words come back.
+     *
+     * `"stop"` is the older behaviour: cut the voice off the instant anything
+     * clears the barge-in bar. Faster to go quiet, but it is the setting that
+     * produced half-finished replies whenever the room was noisy.
+     */
+    bargeInMode?: "finish" | "stop";
+    /**
      * Microphone to listen on. -1 uses the system default; a number picks that
      * index from `npm run miccheck`; a string matches a device by name, which
      * survives indices shifting as devices connect and disconnect.
@@ -352,6 +367,7 @@ const DEFAULTS: JarvisConfig = {
     captureEngine: "auto",
     maxSpokenSentences: 6,
     bargeIn: true,
+    bargeInMode: "finish",
     inputDevice: -1,
     picovoiceAccessKeyEnv: "PICOVOICE_ACCESS_KEY",
     sensitivity: 0.6,

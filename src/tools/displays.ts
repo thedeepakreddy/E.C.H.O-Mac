@@ -31,6 +31,46 @@ export interface Point {
   y: number;
 }
 
+export interface Size {
+  width: number;
+  height: number;
+}
+
+/**
+ * Convert a point measured in a single-display screenshot into the global
+ * desktop coordinate space used by cliclick and macOS Accessibility.
+ *
+ * `imageSize` makes the mapping survive a vision provider resizing an image
+ * before it reports a point. In the ordinary capture path the screenshot is
+ * already the display's logical size, so this reduces to adding the display's
+ * origin. Invalid/out-of-image points are rejected rather than clamped: a
+ * silent clamp can turn a bad prediction into a click on an unrelated control
+ * at the edge of the screen.
+ */
+export function screenshotToDesktop(
+  display: Display,
+  point: Point,
+  imageSize: Size = display
+): Point | null {
+  const { x, y } = point;
+  const { width, height } = imageSize;
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  if (x < 0 || y < 0 || x >= width || y >= height) return null;
+
+  // Keep the result inside the display even when floating-point rounding at
+  // the far edge would otherwise produce x + width or y + height.
+  return {
+    x: Math.min(display.x + display.width - 1, display.x + (x * display.width) / width),
+    y: Math.min(display.y + display.height - 1, display.y + (y * display.height) / height),
+  };
+}
+
+/** Convert a global mouse point back into this display's screenshot space. */
+export function desktopToScreenshot(display: Display, point: Point): Point | null {
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !contains(display, point)) return null;
+  return { x: point.x - display.x, y: point.y - display.y };
+}
+
 /** Does this display contain the point? */
 export function contains(d: Display, p: Point): boolean {
   return p.x >= d.x && p.x < d.x + d.width && p.y >= d.y && p.y < d.y + d.height;

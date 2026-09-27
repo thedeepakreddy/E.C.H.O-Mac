@@ -45,15 +45,19 @@ async function locate(
   // 1. accessibility tree — exact labels, works even when covered
   const dump = await ax.dump();
   if (dump.axAvailable && dump.elements.length) {
-    const ranked = ax.rank(dump.elements, target);
-    if (ranked.length) {
-      const el = ranked[0];
+    const ranked = ax.rankScored(dump.elements, target);
+    if (ranked.length && ax.criticVerdict(ranked).ok) {
+      const el = ranked[0].element;
+      if (!el.enabled) return null;
       // Activate through the API when possible; no mouse movement at all.
       if (el.press && activate) {
         const pressed = await ax.press(dump.pid, el.path);
         if (pressed.ok) {
           return { x: -1, y: -1, how: "accessibility", label: el.label || target };
         }
+        // The path was resolved from the just-read tree. If it already went
+        // stale, its old centre is no longer safe enough to click.
+        return null;
       }
       return {
         x: el.x + Math.round(el.w / 2),
@@ -65,9 +69,11 @@ async function locate(
   }
 
   // 2. on-screen text — the fallback for apps with no tree
-  const ocr = await vision.ocr("accurate");
+  const ocr = await vision.ocrAll("accurate");
   if (!ocr.error) {
-    const hit = vision.findText(ocr, target);
+    const matches = vision.rankText(ocr, target);
+    if (vision.textMatchIsAmbiguous(matches)) return null;
+    const hit = matches[0]?.line;
     if (hit) return { x: hit.cx, y: hit.cy, how: "screen-text", label: hit.text };
   }
 

@@ -38,6 +38,10 @@ export type VoiceEventType =
   | "audio.end"
   | "audio.stopped"
   | "barge_in"
+  /** Someone spoke over a reply and Echo chose to keep talking and record it. */
+  | "barge_in.deferred"
+  /** What that recording turned out to be: noise, a stop, or the next command. */
+  | "interjection"
   | "cancel"
   | "window.open"
   | "window.extend"

@@ -11,7 +11,9 @@
  */
 import {
   contains, centerOf, displayAt, primaryOf, resolveDisplay,
-  positionOf, describeDisplays, desktopBounds, type Display,
+  positionOf, describeDisplays, desktopBounds, screenshotToDesktop,
+  desktopToScreenshot,
+  type Display,
 } from "./tools/displays.js";
 
 let pass = 0, fail = 0;
@@ -59,6 +61,41 @@ console.log("  centres and bounds");
   const bl = desktopBounds(LEFT);
   ok(bl.x === -2560 && bl.width === 4000, `and starts negative when a screen is to the left (${bl.x})`);
   ok(desktopBounds([]).width === 0, "an empty desk has no bounds, and does not throw");
+}
+
+console.log("  screenshot coordinates map to the mouse desktop");
+{
+  const onRight = screenshotToDesktop(RIGHT[1], { x: 320, y: 240 });
+  ok(onRight?.x === 1760 && onRight?.y === 240,
+     `a point in the right-monitor image includes its desktop origin (${onRight?.x},${onRight?.y})`);
+
+  const onLeft = screenshotToDesktop(LEFT[1], { x: 1280, y: 720 });
+  ok(onLeft?.x === -1280 && onLeft?.y === 720,
+     `a point in a left-monitor image stays in negative desktop space (${onLeft?.x},${onLeft?.y})`);
+
+  const onAbove = screenshotToDesktop(ABOVE[1], { x: 700, y: 700 });
+  ok(onAbove?.x === 700 && onAbove?.y === -740,
+     `a point in an upper-monitor image includes the negative y origin (${onAbove?.x},${onAbove?.y})`);
+
+  const scaled = screenshotToDesktop(RIGHT[1], { x: 500, y: 250 }, { width: 1000, height: 500 });
+  ok(scaled?.x === 2720 && scaled?.y === 720,
+     `a resized image maps proportionally to the display centre (${scaled?.x},${scaled?.y})`);
+
+  ok(screenshotToDesktop(RIGHT[1], { x: -1, y: 20 }) === null,
+     "coordinates left of the captured image are rejected instead of mis-clicked");
+  ok(screenshotToDesktop(RIGHT[1], { x: 2560, y: 20 }) === null,
+     "the exclusive right edge is rejected instead of spilling onto another display");
+  ok(screenshotToDesktop(RIGHT[1], { x: Number.NaN, y: 20 }) === null,
+     "non-finite coordinates never reach mouse control");
+
+  const rightLocal = desktopToScreenshot(RIGHT[1], { x: 1760, y: 240 });
+  ok(rightLocal?.x === 320 && rightLocal?.y === 240,
+     `the cursor maps back into right-monitor image space (${rightLocal?.x},${rightLocal?.y})`);
+  const leftLocal = desktopToScreenshot(LEFT[1], { x: -1280, y: 720 });
+  ok(leftLocal?.x === 1280 && leftLocal?.y === 720,
+     `negative desktop coordinates map back into a positive image point (${leftLocal?.x},${leftLocal?.y})`);
+  ok(desktopToScreenshot(RIGHT[0], { x: 2000, y: 200 }) === null,
+     "a cursor on another display is not misreported as local to this one");
 }
 
 console.log("  saying which screen you mean");

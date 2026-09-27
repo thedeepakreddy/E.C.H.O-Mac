@@ -8,7 +8,10 @@ import * as vision from "../vision.js";
 import { activeConfig } from "../../config.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describeDisplays, resolveDisplay, type Display } from "../displays.js";
+import {
+  contains, desktopToScreenshot, describeDisplays, displayAt, resolveDisplay, screenshotToDesktop,
+  type Display, type Point,
+} from "../displays.js";
 import { moveFrontWindowTo } from "../windowmove.js";
 import { sendToOverlay } from "../../overlay.js";
 import { typeText } from "../computer-actions.js";
@@ -18,11 +21,47 @@ import * as extract from "../../frontier/extract.js";
 import { dismissPopups } from "../../frontier/popups.js";
 import { nodeRequire, appRoot, pointerAt, describeDisplayShort } from "./shared.js";
 
+/**
+ * Resolve coordinates supplied by a model into the desktop space macOS uses.
+ * With `display`, x/y are local to that display's screenshot. Without it they
+ * remain global for compatibility with Accessibility and OCR coordinates.
+ */
+async function desktopPoint(x: number, y: number, display?: string): Promise<Point> {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error("Coordinates must be finite numbers.");
+  }
+
+  const list = await vision.displays();
+  if (!list.length) return { x, y }; // helper unavailable: preserve the old path
+
+  if (display) {
+    const chosen = resolveDisplay(list, display, await pointerAt());
+    if (!chosen) throw new Error(`I couldn't resolve display "${display}".`);
+    const mapped = screenshotToDesktop(chosen, { x, y });
+    if (!mapped) {
+      throw new Error(
+        `Point ${x},${y} is outside display ${chosen.index + 1}'s ` +
+        `${chosen.width}x${chosen.height} screenshot. I did not move or click.`
+      );
+    }
+    return mapped;
+  }
+
+  const point = { x, y };
+  if (!list.some((candidate) => contains(candidate, point))) {
+    throw new Error(`Desktop point ${x},${y} is outside every attached display. I did not move or click.`);
+  }
+  return point;
+}
+
+const DISPLAY_COORDINATE_DESCRIPTION =
+  "Optional display name/number. When set, x/y are coordinates inside that display's screenshot and Echo translates them to desktop coordinates.";
+
 export const SCREEN_TOOLS: ToolDef[] = [
   {
     name: "screenshot",
     description:
-      "Capture the screen as an image. This is the LAST of the three ways to look, not the first: it puts a full image into the conversation and that image is re-sent on every step that follows, so use it only when you need layout, colour, an image, or a control that has no label and no text. To find something to click, use list_ui_elements. To read a value, a status or an error, use read_screen_text. Pixel coordinates in the image map 1:1 to the coordinates click and move_mouse take. Pass `display` to pick a screen when there is more than one.",
+      "Capture one display as an image. This is the LAST of the three ways to look: use list_ui_elements for controls and read_screen_text for words. The result gives the exact image size and desktop origin. When acting on image coordinates, pass the same `display` to click, move_mouse, drag, set_value, scroll, or background_click so Echo translates display-local pixels into global desktop coordinates. Never reuse coordinates after the screen layout changes.",
     schema: {
       display: z
         .string()
@@ -34,16 +73,22 @@ export const SCREEN_TOOLS: ToolDef[] = [
       const list = await vision.displays();
       // Default to the screen the user is actually working on rather than
       // always the primary — with two monitors those are often not the same.
-      const chosen =
-        list.length > 1 ? resolveDisplay(list, a.display ?? "this", await pointerAt()) : null;
+      const chosen = list.length
+        ? resolveDisplay(list, a.display ?? "this", await pointerAt())
+        : null;
 
       const shot = await act.captureScreen(chosen ?? undefined);
-      const which =
-        chosen && list.length > 1
-          ? ` This is display ${chosen.index + 1} of ${list.length} (${describeDisplayShort(chosen, list)}).`
-          : "";
+      const displayHint = chosen ? `"${chosen.index + 1}"` : undefined;
+      const which = chosen
+        ? ` This is display ${chosen.index + 1} of ${list.length} (${describeDisplayShort(chosen, list)}).`
+        : "";
       return {
-        text: `Screen captured at ${shot.width}x${shot.height} logical points. Coordinates you use for clicking are in this same space (origin top-left).${which}`,
+        text:
+          `Screen captured at exactly ${shot.width}x${shot.height} logical pixels.${which} ` +
+          `Image coordinate (0,0) maps to desktop (${shot.originX},${shot.originY}). ` +
+          (displayHint
+            ? `For a point read from this image, pass display: ${displayHint} to a mouse tool; use the image x/y unchanged.`
+            : "This is the main desktop origin, so image and desktop coordinates are identical."),
         image: shot,
       };
     },
@@ -116,6 +161,15 @@ export const SCREEN_TOOLS: ToolDef[] = [
       const el = scored[0].element;
       const where = `${el.role.replace(/^AX/, "")} "${el.label}"`;
 
+      if (!el.enabled) {
+        return {
+          text: `${where} in ${d.app} is disabled, so I did not click it.`,
+          status: "failed",
+          verification: "verified",
+          error: { category: "target_disabled", message: "the matched control is disabled", retryable: true },
+        };
+      }
+
       // Prefer AXPress — no mouse move, survives occlusion.
       if (el.press) {
         const r = await ax.press(d.pid, el.path);
@@ -123,6 +177,12 @@ export const SCREEN_TOOLS: ToolDef[] = [
           demo.noteStep({ kind: "click", target: a.description, role: el.role });
           return { text: `Activated ${where} in ${d.app}.` };
         }
+        return {
+          text: `${where} moved or stopped accepting Accessibility actions before it could be pressed, so I did not fall back to a possibly stale coordinate. Look again and retry.`,
+          status: "failed",
+          verification: "unverified",
+          error: { category: "stale_target", message: r.error ?? "AXPress failed", retryable: true },
+        };
       }
       // Fallback: click the element's centre.
       const cx = el.x + Math.round(el.w / 2);
@@ -144,25 +204,33 @@ export const SCREEN_TOOLS: ToolDef[] = [
   },
   {
     name: "move_mouse",
-    description: "Move the cursor without clicking. Needed on its own only to reveal something that appears on hover — a tooltip, a hidden toolbar, a menu that opens on hover — or to park the pointer over a control before calling scroll. Do NOT call this before clicking: click moves the pointer itself.",
+    description: "Move the cursor without clicking. Use for hover UI or to park the pointer before scrolling. Do NOT call this before click because click moves the pointer itself. Coordinates are global desktop points unless `display` is supplied; with `display`, they are local to that display's latest screenshot.",
     schema: {
       x: z.number().describe("X coordinate in logical points from the left edge"),
       y: z.number().describe("Y coordinate in logical points from the top edge"),
+      display: z.string().optional().describe(DISPLAY_COORDINATE_DESCRIPTION),
     },
     readOnly: false,
-    handler: async (a) => ({ text: await act.moveMouse(a.x, a.y) }),
+    handler: async (a) => {
+      const p = await desktopPoint(a.x, a.y, a.display);
+      return { text: await act.moveMouse(p.x, p.y) };
+    },
   },
   {
     name: "click",
     description:
-      "Click at exact pixel coordinates. LAST choice: prefer click_ui_element (by name) or click_text (by visible words), neither of which breaks when the window moves or the layout reflows. Use coordinates only for something with no label and no text — a canvas, an image region, a custom-drawn control — and take a screenshot first to know where it is. button is 'left' (default), 'right' for a context menu, or 'double' to open an item.",
+      "Click at exact logical coordinates. LAST choice: prefer click_ui_element or click_text. For a point taken from a screenshot, pass that screenshot's `display`; Echo then converts image-local x/y to the correct desktop point, including negative and secondary-monitor origins. Without `display`, x/y must already be global desktop coordinates. button is 'left' (default), 'right', or 'double'.",
     schema: {
       x: z.number().describe("X coordinate in logical points"),
       y: z.number().describe("Y coordinate in logical points"),
       button: z.enum(["left", "right", "double"]).default("left"),
+      display: z.string().optional().describe(DISPLAY_COORDINATE_DESCRIPTION),
     },
     readOnly: false,
-    handler: async (a) => ({ text: await act.click(a.x, a.y, a.button ?? "left") }),
+    handler: async (a) => {
+      const p = await desktopPoint(a.x, a.y, a.display);
+      return { text: await act.click(p.x, p.y, a.button ?? "left") };
+    },
   },
   {
     name: "drag",
@@ -172,9 +240,14 @@ export const SCREEN_TOOLS: ToolDef[] = [
       fromY: z.number(),
       toX: z.number(),
       toY: z.number(),
+      display: z.string().optional().describe(DISPLAY_COORDINATE_DESCRIPTION),
     },
     readOnly: false,
-    handler: async (a) => ({ text: await act.dragTo(a.fromX, a.fromY, a.toX, a.toY) }),
+    handler: async (a) => {
+      const from = await desktopPoint(a.fromX, a.fromY, a.display);
+      const to = await desktopPoint(a.toX, a.toY, a.display);
+      return { text: await act.dragTo(from.x, from.y, to.x, to.y) };
+    },
   },
   {
     name: "type_text",
@@ -224,9 +297,13 @@ export const SCREEN_TOOLS: ToolDef[] = [
       x: z.number().describe("X coordinate of the editable value field"),
       y: z.number().describe("Y coordinate of the editable value field"),
       value: z.string().describe("The exact value to set, e.g. '+20' or '1024'"),
+      display: z.string().optional().describe(DISPLAY_COORDINATE_DESCRIPTION),
     },
     readOnly: false,
-    handler: async (a) => ({ text: await act.setValueAt(a.x, a.y, a.value) }),
+    handler: async (a) => {
+      const p = await desktopPoint(a.x, a.y, a.display);
+      return { text: await act.setValueAt(p.x, p.y, a.value) };
+    },
   },
   {
     name: "scroll",
@@ -237,11 +314,16 @@ export const SCREEN_TOOLS: ToolDef[] = [
       amount: z.number().int().min(1).max(30).default(5).describe("Roughly how far to scroll"),
       x: z.number().optional().describe("Optional X to hover before scrolling"),
       y: z.number().optional().describe("Optional Y to hover before scrolling"),
+      display: z.string().optional().describe(DISPLAY_COORDINATE_DESCRIPTION),
     },
     readOnly: false,
-    handler: async (a) => ({
-      text: await act.scroll(a.direction, a.amount ?? 5, a.x, a.y),
-    }),
+    handler: async (a) => {
+      if ((a.x == null) !== (a.y == null)) {
+        throw new Error("scroll needs both x and y when a hover point is supplied");
+      }
+      const p = a.x == null ? undefined : await desktopPoint(a.x, a.y, a.display);
+      return { text: await act.scroll(a.direction, a.amount ?? 5, p?.x, p?.y) };
+    },
   },
   {
     name: "wait",
@@ -285,10 +367,24 @@ export const SCREEN_TOOLS: ToolDef[] = [
   },
   {
     name: "get_mouse_position",
-    description: "Get the current mouse cursor position.",
+    description: "Get the current cursor position as both a global desktop coordinate and a local coordinate inside the display screenshot under the pointer.",
     schema: {},
     readOnly: true,
-    handler: async () => ({ text: await act.getMousePosition() }),
+    handler: async () => {
+      const raw = await act.getMousePosition();
+      const [x, y] = raw.split(",").map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { text: raw };
+      const list = await vision.displays();
+      const display = displayAt(list, { x, y });
+      const local = display ? desktopToScreenshot(display, { x, y }) : null;
+      if (!display || !local) return { text: `Cursor desktop coordinate: ${x},${y}.` };
+      return {
+        text:
+          `Cursor desktop coordinate: ${x},${y}. ` +
+          `It is on display ${display.index + 1} (${describeDisplayShort(display, list)}) ` +
+          `at screenshot coordinate ${local.x},${local.y}.`,
+      };
+    },
   },
   {
     name: "background_click",
@@ -297,15 +393,17 @@ export const SCREEN_TOOLS: ToolDef[] = [
     schema: {
       x: z.number().describe("X coordinate in logical points"),
       y: z.number().describe("Y coordinate in logical points"),
+      display: z.string().optional().describe(DISPLAY_COORDINATE_DESCRIPTION),
     },
     readOnly: false,
     handler: async (a) => {
+      const p = await desktopPoint(a.x, a.y, a.display);
       const d = await ax.dump();
       if (!d.pid) return { text: "I couldn't find the frontmost app to click into." };
-      const r = await deepHookClick(d.pid, a.x, a.y);
+      const r = await deepHookClick(d.pid, p.x, p.y);
       return {
         text: r.ok
-          ? `Clicked at ${a.x},${a.y} in ${d.app} without moving the mouse.`
+          ? `Clicked at ${Math.round(p.x)},${Math.round(p.y)} in ${d.app} without moving the mouse.`
           : `Background click didn't land: ${r.message}`,
       };
     },
@@ -478,7 +576,7 @@ export const SCREEN_TOOLS: ToolDef[] = [
                   const data = readFileSync(tmpPath).toString("base64");
                   resolve({
                     text: "I am looking at the image now.",
-                    image: { mimeType: "image/jpeg", data, width: 0, height: 0 }
+                    image: { mimeType: "image/jpeg", data, width: 0, height: 0, originX: 0, originY: 0 }
                   });
                 } catch {
                   resolve({ text: "Failed to read screenshot." });
@@ -497,19 +595,42 @@ export const SCREEN_TOOLS: ToolDef[] = [
       fast: z.boolean().default(false).describe("Leave this false. Fast mode roughly halves accuracy (measured 0.51 vs 0.95 confidence, garbling words) and is only fit for detecting that the screen changed — never for reading or clicking."),
     },
     readOnly: true,
-    handler: async (a) => ({ text: vision.summarizeOcr(await vision.ocr(a.fast ? "fast" : "accurate")) }),
+    handler: async (a) => {
+      const list = await vision.displays();
+      const chosen = list.length ? resolveDisplay(list, "this", await pointerAt()) : null;
+      return { text: vision.summarizeOcr(await vision.ocr(a.fast ? "fast" : "accurate", chosen?.index ?? 0)) };
+    },
   },
   {
     name: "click_text",
     description:
-      "Click on-screen text by the words visible on it, located with OCR. SECOND choice for clicking, and the one that works inside Chrome, Brave, canvas apps and anything else the accessibility tree cannot see. Give the words exactly as they are displayed.",
-    schema: { text: z.string().describe("The visible text to click on") },
+      "Click on-screen text by the words visible on it, located with OCR. SECOND choice for clicking, and the one that works inside Chrome, Brave, canvas apps and anything else the accessibility tree cannot see. Give the complete visible label. Echo refuses to guess when the same label appears more than once; provide a longer unique phrase or use list_ui_elements. Defaults to the display containing the pointer.",
+    schema: {
+      text: z.string().describe("The complete visible text to click on"),
+      display: z.string().optional().describe("Display to search: 'this', 'other', 'left', 'right', 'main', 'external', or its number."),
+    },
     readOnly: false,
     handler: async (a) => {
-      const r = await vision.ocr("accurate");
+      const list = await vision.displays();
+      const chosen = list.length
+        ? resolveDisplay(list, a.display ?? "this", await pointerAt())
+        : null;
+      const r = await vision.ocr("accurate", chosen?.index ?? 0);
       if (r.error) return { text: `Could not read the screen (${r.error}).` };
-      const hit = vision.findText(r, a.text);
+      const matches = vision.rankText(r, a.text);
+      const hit = matches[0]?.line;
       if (!hit) return { text: `No on-screen text matches "${a.text}".` };
+      if (vision.textMatchIsAmbiguous(matches)) {
+        const candidates = matches.slice(0, 5)
+          .map((match) => `"${match.line.text}" at ${match.line.cx},${match.line.cy}`)
+          .join("; ");
+        return {
+          text: `"${a.text}" matches more than one place, so I did not guess. Matches: ${candidates}. Use a longer unique phrase or click_ui_element.`,
+          status: "failed",
+          verification: "unverified",
+          error: { category: "ambiguous_target", message: "multiple OCR targets matched equally well", retryable: true },
+        };
+      }
       await act.click(hit.cx, hit.cy, "left");
       return { text: `Clicked "${hit.text}" at ${hit.cx},${hit.cy}.` };
     },

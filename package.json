@@ -42,6 +42,7 @@
     "historytest": "esbuild src/_historytest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_historytest.js --log-level=error && node dist/_historytest.js",
     "changedtest": "esbuild src/_changedtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_changedtest.js --log-level=error && node dist/_changedtest.js",
     "displaytest": "esbuild src/_displaytest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_displaytest.js --log-level=error && node dist/_displaytest.js",
+    "screentargettest": "esbuild src/_screentargettest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_screentargettest.js --log-level=error && node dist/_screentargettest.js",
     "learntest": "esbuild src/_learntest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_learntest.js --log-level=error && JARVIS_TRAJECTORY_DIR=/tmp/jarvis-learntest node dist/_learntest.js",
     "dataset": "esbuild src/_dataset.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_dataset.js --log-level=error && node dist/_dataset.js",
     "toolspec": "esbuild src/_toolspec.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_toolspec.js --log-level=error && node dist/_toolspec.js",
@@ -93,6 +94,7 @@
     "playertest": "esbuild src/_playertest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_playertest.js --log-level=error && node dist/_playertest.js",
     "applestttest": "esbuild src/_applestttest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_applestttest.js --log-level=error && node dist/_applestttest.js",
     "memoryostest": "esbuild src/_memoryostest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_memoryostest.js --log-level=error && node dist/_memoryostest.js",
+    "resourcetest": "esbuild src/_resourcetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_resourcetest.js --log-level=error && node dist/_resourcetest.js",
     "livetest": "esbuild src/_livetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_livetest.js --log-level=error && node dist/_livetest.js",
     "embedtest": "esbuild src/_embedtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_embedtest.js --log-level=error && node dist/_embedtest.js",
     "critictest": "esbuild src/_critictest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_critictest.js --log-level=error && node dist/_critictest.js",
@@ -108,7 +110,8 @@
     "inteltest": "esbuild src/_inteltest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_inteltest.js --log-level=error && ECHO_MCP=0 node dist/_inteltest.js",
     "mcphttptest": "esbuild src/_mcphttptest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_mcphttptest.js --log-level=error && node dist/_mcphttptest.js",
     "fleettest": "esbuild src/_fleettest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_fleettest.js --log-level=error && node dist/_fleettest.js",
-    "composiolive": "esbuild src/_composiolive.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_composiolive.js --log-level=error && node dist/_composiolive.js"
+    "composiolive": "esbuild src/_composiolive.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_composiolive.js --log-level=error && node dist/_composiolive.js",
+    "interjectiontest": "esbuild src/_interjectiontest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_interjectiontest.js --log-level=error && node dist/_interjectiontest.js"
   },
   "author": "",
   "license": "MIT",

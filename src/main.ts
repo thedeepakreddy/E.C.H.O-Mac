@@ -15,6 +15,7 @@ import { audioTurnFor, describeTurn } from "./voice/audio-turn.js";
 import { listen, useHearingBridge, withTone } from "./voice/hearing.js";
 import { matchWakeWord, isNameOnly } from "./voice/wakeword.js";
 import { isHallucination } from "./voice/vocabulary.js";
+import { stripEchoWords, classifyInterjection, isStopIntent } from "./voice/interjection.js";
 import { currentContext } from "./memory/context.js";
 import { memoryService } from "./memory/service.js";
 import { record } from "./cognition/episodic.js";
@@ -269,6 +270,30 @@ let realtimeSaid = "";
  * the value being compared against actually came from.
  */
 let echoSpokeUntil = 0; // performance.now() units — see above
+
+/**
+ * What Echo has said aloud since this turn began.
+ *
+ * Hardware echo cancellation does not work on this machine, so a recording
+ * made while Echo is talking contains Echo as well as whoever interrupted it.
+ * This is the copy that gets subtracted back out — see `stripEchoWords`.
+ *
+ * Capped, and that cap is load-bearing rather than tidiness: the subtraction
+ * deletes any three words the user says that Echo also said, so an unbounded
+ * transcript of a long session would eventually start eating real commands.
+ */
+let spokenThisReply = "";
+const SPOKEN_MEMORY_CHARS = 2000;
+function noteSpoken(text: string): void {
+  spokenThisReply = `${spokenThisReply} ${text}`.slice(-SPOKEN_MEMORY_CHARS);
+}
+/** Everything Echo's voice could have leaked into the microphone, on either speech path. */
+function echoesOfMyself(): string {
+  return `${spokenThisReply} ${speech?.spokenSoFar() ?? ""} ${realtimeSaid}`;
+}
+
+/** Heard over a reply, held until that reply has finished saying its piece. */
+let pendingInterjection: { wavPath: string; meta: CaptureMeta; transcript: string } | null = null;
 
 const realtimeClock = new SpeechClock(
   { bytesPerSecond: REALTIME_OUTPUT_RATE * 2 }, // mono PCM16
@@ -560,12 +585,14 @@ interface UtteranceMeta {
   speechEndAt?: number;
   /** Streaming STT already produced the transcript while the user spoke. */
   transcript?: string;
+  /**
+   * Recorded over Echo's own reply and already vetted as a real interruption
+   * by the interjection path, so the self-audio guard must not drop it — that
+   * guard exists for captures nobody has looked at yet.
+   */
+  overlap?: boolean;
 }
 
-/** The whole utterance is an instruction to stop, not something for the brain. */
-function isStopIntent(command: string): boolean {
-  return /^(?:(?:hey|ok|okay)\s+)?(?:echo[,!.]?\s*)?(?:stop|cancel|never\s*mind|shut up|be quiet|quiet|enough|hold on|hang on|wait)(?:\s+(?:it|that|please|echo))?[.!]?$/i.test(command.trim());
-}
 
 /**
  * AGI blueprint #13 (implicit RLHF), the guardrailed version: the whole
@@ -641,6 +668,7 @@ function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = nu
   publishControlUpdate();
   voiceSession.noteBrainSend(turn, text, (brain as any).provider ?? cfg.brain);
   speech?.newTurn();
+  spokenThisReply = ""; // a new answer: the old one can no longer be in the room
   // Open the TTS socket while the model thinks, so the first sentence does not wait for it.
   if (cfg.voice.ttsEnabled) speech?.warm(text);
   // Speculative execution (AGI blueprint #10), scoped to the one read-only
@@ -670,7 +698,7 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
   // is transcribed or sent: on the realtime path this is the difference between
   // one reply and Echo holding a conversation with itself, in alternating
   // languages, at the cost of a paid audio round trip per turn.
-  if (realtimeAvailable(cfg) && isEchoTalkingToItself(meta)) {
+  if (realtimeAvailable(cfg) && !meta.overlap && isEchoTalkingToItself(meta)) {
     console.log("[realtime] ignoring a capture that began while Echo was speaking");
     voiceLog.event("capture.discarded", { turnId: meta.turnId, reason: "echo_self_audio" });
     return;
@@ -1213,6 +1241,9 @@ function endConversation(why = "stopped") {
  */
 function maybeAutoListen() {
   if (echoIsSpeaking()) return;
+  // Something was said over the reply and held until it had finished. That IS
+  // the next turn, so it runs before the mic is reopened for a different one.
+  if (drainPendingInterjection()) return;
   if (expectAnswer || awaitingCommand) {
     // Echo asked something, or heard only its name: open the mic explicitly
     // and give up quietly if nothing follows.
@@ -1228,6 +1259,12 @@ function maybeAutoListen() {
 
 /** Everything stops: speech, the brain, the conversation. The one path for every stop control. */
 function stopEverything(why: string) {
+  // Anything held back to be answered after the reply is part of what is being
+  // stopped. Draining it later would answer a question the user has abandoned.
+  if (pendingInterjection) {
+    scheduleCaptureCleanup(pendingInterjection.wavPath);
+    pendingInterjection = null;
+  }
   const heard = speech?.spokenSoFar() ?? "";
   voiceSession.cancel("stop", why);
   abortSttStreams(why);
@@ -1683,8 +1720,14 @@ async function wireVoice() {
         : "Push-to-talk ready. Click the reactor core or press ⌘⇧J to talk.",
     });
   });
-  listener.on("discarded", (reason: string, meta?: { turnId?: string; wake?: WakeKind; captureStartAt?: number }) => {
+  listener.on("discarded", (reason: string, meta?: { turnId?: string; wake?: WakeKind; captureStartAt?: number; overlap?: boolean }) => {
     console.log(`[echo] audio discarded: ${reason}`);
+    if (meta?.overlap) {
+      // A recording started over a reply that came to nothing. Saying "I
+      // couldn't hear you" here would be Echo interrupting ITSELF to complain
+      // about a noise the user never made.
+      return;
+    }
     if (meta?.captureStartAt !== undefined) {
       sttStreams.get(meta.captureStartAt)?.stream.abort();
       sttStreams.delete(meta.captureStartAt);
@@ -1734,6 +1777,7 @@ async function wireVoice() {
     }
   });
   listener.on("bargein", (level: number, bar: number) => onBargeIn(level, bar));
+  listener.on("interjection", (wav: string, meta: CaptureMeta) => void onInterjection(wav, meta));
   listener.on("wakeCandidate", () => send("state", { wakeCandidate: true }));
   listener.on("wake", (det: { engine: string; score: number; at: number }) => {
     resetIdleTimer();
@@ -1789,11 +1833,27 @@ async function wireVoice() {
 }
 
 /**
- * The user spoke over Echo. Stop the voice at once and listen — but leave the
- * brain working: talking over a reply is usually a new instruction ("no, the
- * other one"), and "stop" is recognised as such when the words come back.
+ * Someone is talking over Echo.
+ *
+ * The old answer was to cut the voice off the instant anything cleared the
+ * barge-in bar. That threw away the rest of an answer nobody had heard yet,
+ * and it fired on a door, a laugh, a chair — because "louder than Echo" is not
+ * the same as "addressed to Echo", and nothing had looked at the words yet.
+ *
+ * So by default Echo keeps talking and starts recording instead. The reply
+ * runs to the end of its script while what was said over it is transcribed in
+ * parallel, and that becomes the next turn — or, if it turns out to have been
+ * nothing, nobody ever knows it happened. Asking for silence still gets
+ * silence: `onInterjection` cuts the voice the moment the words come back and
+ * say so. See `voice/interjection.ts`.
  */
 function onBargeIn(level: number, bar: number) {
+  if ((cfg.voice.bargeInMode ?? "finish") === "finish" && listener) {
+    console.log(`[echo] someone spoke over the reply (level ${level} over ${bar}) — listening without stopping`);
+    voiceLog.event("barge_in.deferred", { turnId: voiceSession.current?.id, level, bar });
+    listener.captureInterjection(voiceSession.current?.id);
+    return;
+  }
   console.log(`[echo] barge-in (level ${level} over ${bar}) — stopping speech`);
   const heard = speech?.spokenSoFar() ?? "";
   voiceSession.cancel("bargein", `level ${level} over ${bar}`);
@@ -1804,6 +1864,83 @@ function onBargeIn(level: number, bar: number) {
   awaitingCommand = null;
   const turn = voiceSession.beginTurn("bargein");
   listener?.triggerListen({ turnId: turn.id, wake: "bargein", noSpeechMs: 2500 });
+}
+
+/**
+ * Work out what was said over the reply, while the reply keeps playing.
+ *
+ * The recording holds two voices and this is where they are separated: Echo
+ * knows its own script, so its words are subtracted and whatever is left is
+ * the person. Nothing left means nothing was said.
+ */
+async function onInterjection(wavPath: string, meta: CaptureMeta) {
+  let heard = "";
+  try {
+    // Always the local model, whatever the configured provider. Most of these
+    // turn out to be a chair scraping, and a recording of Echo's own voice
+    // should not be paid for or leave the machine to find that out.
+    heard = await transcribeLocal(wavPath, cfg);
+  } catch (err: any) {
+    console.error(`[echo] could not transcribe what I heard over the reply: ${err?.message ?? err}`);
+    scheduleCaptureCleanup(wavPath);
+    return;
+  }
+  const said = stripEchoWords(heard, echoesOfMyself()).trim();
+  const verdict = isHallucination(said) ? "noise" : classifyInterjection(said);
+  console.log(`[echo] over the reply: ${JSON.stringify(heard)} -> ${JSON.stringify(said)} (${verdict})`);
+  voiceLog.event("interjection", {
+    turnId: meta.turnId,
+    verdict,
+    heard: heard.slice(0, 60),
+    said: said.slice(0, 60),
+  });
+
+  if (verdict === "noise") {
+    // A door, a laugh, or Echo's own voice arriving back. The reply was never
+    // in danger — not cutting it here is the entire point of this path.
+    scheduleCaptureCleanup(wavPath);
+    return;
+  }
+  if (verdict === "stop") {
+    stopEverything(`asked to stop mid-reply: ${said.slice(0, 40)}`);
+    scheduleCaptureCleanup(wavPath);
+    return;
+  }
+  // A real instruction. Hold it until the reply has finished its script, then
+  // it goes through the ordinary command path like anything else.
+  if (pendingInterjection) scheduleCaptureCleanup(pendingInterjection.wavPath);
+  pendingInterjection = { wavPath, meta, transcript: said };
+  // The reply may have ended while this was being transcribed, in which case
+  // nothing is going to call maybeAutoListen() again on our behalf.
+  if (!echoIsSpeaking()) drainPendingInterjection();
+}
+
+/**
+ * The reply has finished. Answer what was said over it.
+ *
+ * Returns true when it has taken the turn, so the caller does not also open
+ * the microphone for a different one.
+ */
+function drainPendingInterjection(): boolean {
+  const held = pendingInterjection;
+  if (!held) return false;
+  pendingInterjection = null;
+  console.log(`[echo] finished speaking — now answering what I heard over it: ${JSON.stringify(held.transcript)}`);
+  const turn = voiceSession.beginTurn("bargein");
+  void voiceSession
+    .enqueue("interjection", () =>
+      handleUtterance(held.wavPath, false, {
+        turnId: turn.id,
+        wake: "bargein",
+        captureStartAt: held.meta.captureStartAt,
+        speechStartAt: held.meta.speechStartAt,
+        speechEndAt: held.meta.speechEndAt,
+        transcript: held.transcript,
+        overlap: true,
+      })
+    )
+    .finally(() => scheduleCaptureCleanup(held.wavPath));
+  return true;
 }
 
 /** Say anything that was held back, once the moment is right. */
@@ -1832,9 +1969,12 @@ async function wireTts() {
     // Echo just finished — open the mic for an answer, or the conversation window.
     if (!speaking) maybeAutoListen();
   }, { speaker: cfg.voice.sarvamSpeaker, pace: cfg.voice.sarvamPace }, cfg.voice.piperVoice);
-  tts.onAudioStart((text) =>
-    voiceLog.event("tts.first_audio", { turnId: voiceSession.brainTurnId ?? voiceSession.current?.id, sentence: text.slice(0, 40) })
-  );
+  tts.onAudioStart((text) => {
+    // Both speech paths reach here as each sentence starts playing, which is
+    // exactly the text that can leak into the microphone from now on.
+    noteSpoken(text);
+    voiceLog.event("tts.first_audio", { turnId: voiceSession.brainTurnId ?? voiceSession.current?.id, sentence: text.slice(0, 40) });
+  });
   if (player && cfg.voice.ttsStreaming !== false && ["sarvam", "elevenlabs", "mac"].includes(cfg.voice.ttsEngine ?? "mac")) {
     speech = new SpeechStream(cfg, player, { maxSentences: () => cfg.voice.maxSpokenSentences ?? 6 });
     speech.on("sentence", (text: string, i: number) => voiceLog.event("llm.text", { turnId: voiceSession.brainTurnId ?? undefined, sentence: text.slice(0, 50), chars: i }));

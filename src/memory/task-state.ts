@@ -17,6 +17,8 @@ export interface TaskCall {
   callId: string; tool: string; stepId: string; actorId: string; generation: number;
   status: "running" | ToolStatus; startedAt: string; endedAt?: string; resources: string[];
   result?: ToolResultMetadata & { text?: string }; late?: boolean;
+  /** Releasing a resource is not evidence that the interrupted action succeeded. */
+  resourceReconciliations?: Record<string, { reconciledAt: string; reason: string }>;
 }
 export type TaskResultStatus = "completed" | "partial" | "blocked" | "failed" | "cancelled";
 export interface TaskArtifact {
@@ -96,7 +98,9 @@ export class TaskCoordinator {
       if (!state || state.schemaVersion !== 1 || state.taskId !== taskId) continue;
       this.states.set(taskId, state);
       for (const call of Object.values(state.calls)) if (["running", "timeout", "uncertain"].includes(call.status)) {
-        for (const resource of call.resources) this.leases.set(resource, { taskId, callId: call.callId, generation: call.generation, quarantined: true });
+        for (const resource of call.resources) if (!call.resourceReconciliations?.[resource]) {
+          this.leases.set(resource, { taskId, callId: call.callId, generation: call.generation, quarantined: true });
+        }
       }
     }
   }
@@ -247,7 +251,31 @@ export class TaskCoordinator {
     for (const resource of invocation.resources) this.leases.set(resource, { taskId: invocation.taskId, callId: invocation.callId, generation: invocation.generation, quarantined: false }); return { ok: true };
   }
   releaseResources(invocation: TaskInvocation, uncertain = false): void { for (const resource of invocation.resources) { const held = this.leases.get(resource); if (held?.callId !== invocation.callId) continue; if (uncertain) held.quarantined = true; else this.leases.delete(resource); } }
-  reconcileResource(resource: string, expectedCallId: string): boolean { const held = this.leases.get(resource); if (!held || held.callId !== expectedCallId) return false; this.leases.delete(resource); return true; }
+  /**
+   * Explicit recovery after the owner has stopped and the resource was inspected.
+   * Never expire a lease by age, replay an uncertain action, or change its result.
+   * Persist before unlocking so a restart cannot undo a successful recovery.
+   */
+  reconcileResource(resource: string, expectedCallId: string, reason: string): boolean {
+    this.load();
+    const held = this.leases.get(resource);
+    if (!held || held.callId !== expectedCallId || !held.quarantined || !reason?.trim()) return false;
+    this.update(held.taskId, "resource.reconciled", state => {
+      const call = state.calls[expectedCallId];
+      if (!call || !call.resources.includes(resource)) throw new Error("Resource holder no longer exists");
+      call.resourceReconciliations ??= {};
+      call.resourceReconciliations[resource] = { reconciledAt: new Date().toISOString(), reason: reason.trim() };
+    });
+    this.leases.delete(resource);
+    // Legacy journals can contain multiple interrupted calls for one resource.
+    // Reconciling one must not silently discard the others hidden by the map.
+    for (const state of this.states.values()) for (const call of Object.values(state.calls)) {
+      if (["running", "timeout", "uncertain"].includes(call.status) && call.resources.includes(resource) && !call.resourceReconciliations?.[resource]) {
+        this.leases.set(resource, { taskId: state.taskId, callId: call.callId, generation: call.generation, quarantined: true });
+      }
+    }
+    return true;
+  }
   resourceState(): Record<string, Lease> { this.load(); return Object.fromEntries([...this.leases].map(([key,value]) => [key,copy(value)])); }
   contextPacket(taskId: string): string { const state = this.get(taskId); if (!state) return ""; return JSON.stringify({ taskId, revision: state.revision, goal: state.goal, scope: state.scope, status: state.status, steps: state.steps, bindings: state.bindings, calls: Object.values(state.calls).map(({callId, tool, status, result}) => ({callId,tool,status,result})), blockers: state.blockers, artifacts: state.artifacts }); }
   /** Remove local task references to deleted memory IDs so a stale binding cannot resurrect them. */

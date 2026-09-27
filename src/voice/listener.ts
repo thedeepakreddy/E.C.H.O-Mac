@@ -156,6 +156,8 @@ export interface CaptureMeta {
   durationMs: number;
   /** Which detector decided speech: the VAD model or the RMS fallback. */
   speechBy: "vad" | "rms";
+  /** Recorded over Echo's own voice, so the audio holds both speakers. */
+  overlap?: boolean;
 }
 
 export type EndpointHint = "punctuated" | "midclause" | null;
@@ -176,7 +178,9 @@ export type EndpointHint = "punctuated" | "midclause" | null;
  *   'speech'(meta) — ~300 ms of confirmed speech inside an always-on capture
  *   'level'(0..1) · 'utterance'(wavPath, needsWakeWord, meta) · 'discarded'(reason, meta)
  *   'deaf'(wasDevice, nowDevice | null) — the input went silent and was rebound
- *   'bargein'(level, bar)
+ *   'bargein'(level, bar) — someone is talking over the reply
+ *   'interjection'(wavPath, meta) — and here is what they said, recorded
+ *       over Echo's own voice, which is still in the audio
  */
 /** Captures are only needed while their turn is handled; the audio of a room must not pile up on disk. */
 export const CAPTURE_KEEP_MS = 5 * 60_000;
@@ -221,6 +225,14 @@ export class VoiceListener extends EventEmitter {
   private speechEndAt: number | undefined;
   private speechBy: "vad" | "rms" = "rms";
   private paused = false; // Echo is speaking: capture suspended, barge-in watched
+  /**
+   * An interjection is being recorded WHILE Echo speaks, instead of cutting it
+   * off. The frames hold both voices; separating them is the caller's problem
+   * (see `voice/interjection.ts`), and all this flag changes here is that a
+   * capture is allowed to run during playback and is announced as an
+   * `interjection` rather than an `utterance`.
+   */
+  private overlap = false;
   /** Capture every spoken utterance and let the transcript decide (keyless wake). */
   private alwaysOn = false;
   /** Conversation window open: speech alone starts a turn, no wake word owed. */
@@ -361,6 +373,31 @@ export class VoiceListener extends EventEmitter {
   }
 
   /**
+   * Record what is being said over Echo, without stopping the reply.
+   *
+   * Called synchronously from a `bargein` handler that has decided to hear the
+   * person out rather than cut the answer short. The pre-roll is what makes
+   * this work: barge-in only confirms after ~190ms of sustained speech, so the
+   * first syllable is already behind us, and the ring buffer kept during
+   * playback still holds it.
+   *
+   * Nothing else changes — the same VAD endpointing decides when the
+   * interjection is over — so a person who keeps talking past the end of the
+   * reply simply carries on into an ordinary capture.
+   */
+  captureInterjection(turnId?: string) {
+    if (!this.running || !this.paused || this.state === "capturing") return;
+    this.overlap = true;
+    this.beginCapture({ needsWakeWord: false, wake: "bargein", turnId, noSpeechMs: 0 });
+    this.state = "capturing";
+  }
+
+  /** Is an interjection being recorded over the top of Echo's reply right now? */
+  get capturingInterjection(): boolean {
+    return this.overlap && this.state === "capturing";
+  }
+
+  /**
    * Called when Echo starts and stops speaking. The mic keeps running and
    * listens for you cutting in; only capture is suspended, not hearing. A
    * capture that already holds speech is finished, not thrown away — the user
@@ -385,6 +422,13 @@ export class VoiceListener extends EventEmitter {
       this.lastResumedAt = Date.now();
     }
     this.paused = paused;
+    if (!paused) {
+      // Echo stopped talking while the person was still mid-sentence. From
+      // here on this is simply someone speaking to an idle Echo, so let the
+      // capture run to its normal end and arrive as an ordinary utterance
+      // rather than an interjection that no longer overlaps anything.
+      this.overlap = false;
+    }
     if (paused && this.state === "capturing") {
       if (this.sawSpeech) void this.finishCapture();
       else this.resetCapture();
@@ -489,7 +533,13 @@ export class VoiceListener extends EventEmitter {
     this.vadStartFrames = 0;
     // Only announce a capture the user asked for. In always-on mode every stray
     // noise would otherwise light the reactor up as though it were taking an order.
-    if (!opts.needsWakeWord) this.emit("listening", this.meta());
+    //
+    // An interjection is announced to nobody. Echo is SPEAKING, so saying
+    // "listening" would flip the HUD mid-reply — and the handler behind this
+    // event also opens a streaming-STT connection, which would spend a cloud
+    // transcription on a recording that is mostly Echo's own voice and that
+    // `onInterjection` transcribes locally anyway.
+    if (!opts.needsWakeWord && !this.overlap) this.emit("listening", this.meta());
   }
 
   private meta(): CaptureMeta {
@@ -502,6 +552,7 @@ export class VoiceListener extends EventEmitter {
       speechEndAt: this.speechEndAt,
       durationMs: this.captureMs,
       speechBy: this.speechBy,
+      overlap: this.overlap,
     };
   }
 
@@ -511,6 +562,7 @@ export class VoiceListener extends EventEmitter {
     this.sawSpeech = false;
     this.speechMs = 0;
     this.vadStartFrames = 0;
+    this.overlap = false;
   }
 
   /** The silence that ends an utterance, shaped by what the transcript so far sounds like. */
@@ -575,7 +627,18 @@ export class VoiceListener extends EventEmitter {
       // recorded, which reads as "Echo heard me" when it did not.
       this.emit("level", this.state === "capturing" ? Math.min(1, rms / (threshold * 3)) : 0);
 
-      if (this.paused) {
+      // While Echo speaks, capture is suspended and only barge-in is watched.
+      // The exception is an interjection deliberately started over the top of
+      // the reply: that runs straight through the playback and is endpointed
+      // by the capture branch below like any other utterance.
+      if (this.paused && !this.capturingInterjection) {
+        // Keep the ring buffer filled while Echo talks. Barge-in only confirms
+        // after ~190ms of sustained speech, so by the time anyone can ask for
+        // an interjection the first syllable is already in the past — this is
+        // the only copy of it.
+        this.preroll.push(frame);
+        if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift();
+
         this.watchForBargeIn(rms, threshold, prob);
         // On an echo-cancelled stream the name can be heard over Echo's own
         // voice; a wake while speaking is a barge-in that already says who it
@@ -828,7 +891,11 @@ export class VoiceListener extends EventEmitter {
     const path = join(tmpdir(), `echo-utter-${Date.now()}.wav`);
     try {
       await writeWav(frames, path, SAMPLE_RATE);
-      this.emit("utterance", path, meta.needsWakeWord, meta);
+      // An interjection is not a command yet: it was recorded over Echo's own
+      // voice and has to have that voice subtracted before anyone can tell
+      // whether a person said anything at all.
+      if (meta.overlap) this.emit("interjection", path, meta);
+      else this.emit("utterance", path, meta.needsWakeWord, meta);
     } catch (err: any) {
       this.emit("error", `failed to save audio: ${String(err?.message ?? err)}`);
     }
