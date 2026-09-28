@@ -79,6 +79,7 @@
     "voicepreview": "node scripts/voice_preview.mjs",
     "hudpreview": "node scripts/preview_hud.mjs",
     "panelpreview": "npm run build && electron scripts/preview_control_panel.mjs",
+    "media": "npm run build && electron scripts/capture_media.mjs",
     "mcptest": "esbuild src/_mcptest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_mcptest.js --log-level=error && node dist/_mcptest.js",
     "wiringtest": "esbuild src/_wiringtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_wiringtest.js --log-level=error && node dist/_wiringtest.js",
     "episodictest": "esbuild src/_episodictest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_episodictest.js --log-level=error && rm -rf /tmp/jarvis-episodictest && JARVIS_EPISODIC_DIR=/tmp/jarvis-episodictest node dist/_episodictest.js",
