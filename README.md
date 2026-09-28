@@ -18,90 +18,12 @@ the web, runs code and answers out loud, narrating each step so you can watch it
                                   every action passes one RISK GATE: risky ones need your spoken "yes"
 ```
 
----
+**Demo — the HUD state machine:** [`docs/echo-hud-states.mp4`](docs/echo-hud-states.mp4)
+(rendered from the shipping assets using the per-state values in `renderer/hud.css`).
 
-## See it run
+**Engineering deep dive:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the mechanisms,
+the invariants that hold them together, and the failures each one exists to prevent.
 
-Every clip below is Echo's own interface, recorded straight from the renderer the app
-ships — `renderer/index.html` and `hud.css`, `control-panel.html`, `humanoid-core.js`,
-`osiris.html` — by `npm run media` ([§13](#13-commands)). Nothing here is a mock-up or a
-reconstruction: if the UI changes, re-running that one command changes these clips.
-
-### Echo
-
-<a href="docs/media/echo.mp4"><img src="docs/media/echo.jpg" width="880" alt="Echo — the interface end to end"></a>
-
-The interface end to end — the core assembling, the reactor through its states, the
-control panel, and the live Osiris grid. *Picture only: a spoken demo is the one clip
-that has to be filmed live, so it is not in here yet.*
-
-### The HUD
-
-<a href="docs/media/hud.mp4"><img src="docs/media/hud.jpg" width="420" alt="The HUD — the reactor through every state"></a>
-
-The floating reactor that sits on top of everything, through every state it has —
-**idle**, **listening**, **thinking**, **acting**, **speaking**. There is no status
-text anywhere: the colour and the spin speed *are* the status. Skin: `jarvis`
-(the default; `classic` and `mark50` also ship). See [§10](#10-the-hud-and-control-panel).
-
-### The control panel
-
-<a href="docs/media/control-panel.mp4"><img src="docs/media/control-panel.jpg" width="880" alt="The control panel — activity, missions, routing, settings"></a>
-
-What a long-press on the core opens: live activity and the session's numbers, the
-mission board with its agents and their acceptance criteria, model routing and the
-MCP connections, then settings. Recorded against the same fixed mission data the
-preview harness uses, so no runtime, microphone or model is involved.
-
-### The humanoid, opening
-
-<a href="docs/media/humanoid-open.mp4"><img src="docs/media/humanoid-open.jpg" width="720" alt="The core assembling when the panel opens"></a>
-
-The panel's core, on its own. A field of particles finds the figure over about two
-seconds, then it holds your gaze and its mouth moves to the voice envelope —
-here **listening**, then **speaking**, then back to idle. All of it is drawn to one
-canvas from `renderer/humanoid-core.js`; there is no video or model file behind it.
-
-### Osiris
-
-<a href="docs/media/osiris.mp4"><img src="docs/media/osiris.jpg" width="880" alt="The Osiris grid inside Echo's chrome"></a>
-
-The global intelligence grid inside Echo's chrome: Echo's own loader holds the frame
-until the grid has really arrived, then gets out of the way. Ask for it by voice, or
-run your own copy locally with `npm run osiris:setup` ([§11](#optional-add-ons)).
-
-*Each still above is a frame from its clip — click one to play the video. GitHub strips
-`<video>` out of a README, so a repo-hosted clip cannot play in place here; the files
-themselves are in [`docs/media/`](docs/media).*
-
----
-
-**Contents**
-
-1. [Quick start](#1-quick-start)
-2. [What Echo can do](#2-what-echo-can-do)
-3. [Talking to Echo](#3-talking-to-echo)
-4. [Brains (the AI models)](#4-brains-the-ai-models)
-5. [Safety](#5-safety)
-6. [Memory and learning](#6-memory-and-learning)
-7. [Background agents](#7-background-agents)
-8. [Knowledge: web, intel and your Mac's health](#8-knowledge-web-intel-and-your-macs-health)
-9. [Phone remote and Telegram](#9-phone-remote-and-telegram)
-10. [The HUD and control panel](#10-the-hud-and-control-panel)
-11. [Full setup](#11-full-setup)
-12. [Configuration](#12-configuration)
-13. [Commands](#13-commands)
-14. [Testing](#14-testing)
-15. [How the code is organised](#15-how-the-code-is-organised)
-16. [Privacy: what stays on your Mac](#16-privacy-what-stays-on-your-mac)
-17. [Troubleshooting](#17-troubleshooting)
-18. [Debugging runs: journals and replay](#18-debugging-runs-journals-and-replay)
-
----
-
-## 1. Quick start
-
-**Needs:** a Mac with Apple Silicon, Node.js 20+, [Homebrew](https://brew.sh).
 
 ```bash
 brew install cliclick whisper-cpp        # mouse/keyboard control + local speech-to-text
@@ -179,10 +101,11 @@ Echo detects which language you spoke, on your Mac, and answers in the matching 
   mistaken for Urdu or Hindi. It adds about 0.45 s, and only to turns Echo is actually answering.
 - **Settings:** `voice.realtime` and `voice.ttsEngine` in the config ([§12](#12-configuration)).
 
-**Available voices:** Piper (offline, fast: about 70 ms to first sound), macOS voices
-(`say`), Gemini voices, ElevenLabs, Sarvam (Indian languages; currently switched off).
-If a cloud voice fails mid-reply (offline, quota, outage), Echo **switches to Piper
-automatically** instead of going silent, and tries the cloud voice again after 60 seconds.
+That table is the map. For how the pieces actually behave — the loop's exit contract, the
+single gated path to every tool, task leases and crash recovery, deterministic replay, and
+the wake-word logic — see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+## Setup
 
 ---
 
