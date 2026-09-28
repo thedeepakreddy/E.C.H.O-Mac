@@ -2,6 +2,9 @@
 
 *Created by Deepak (AskDeepakAI)*
 
+> **Not open source.** Echo is published here to be read, not taken. **Using it without
+> permission is strictly prohibited** — see [Permission and use](#permission-and-use).
+
 Echo is a voice assistant that lives on your Mac's screen and **does things for you**. Say
 "Echo", ask for something, and it looks at your screen, clicks, types, opens apps, searches
 the web, runs code and answers out loud, narrating each step so you can watch it work.
@@ -214,6 +217,8 @@ Echo can hand work to a **team of agents** running in the background while you k
 
 ## 10. The HUD and control panel
 
+Both are in [See it run](#see-it-run), recorded from the renderer itself.
+
 - **HUD:** a floating, always-on-top reactor that shows Echo's state (listening, thinking,
   speaking), a live transcript and the action log. Skins: `jarvis` (default), `classic`,
   `mark50` (*"change your skin to …"*).
@@ -222,7 +227,10 @@ Echo can hand work to a **team of agents** running in the background while you k
   - **API keys:** masked; stored in `~/.jarvis/keys.env`, readable only by you.
   - **Agents:** the agent board, your fleet, and a brain switcher.
 - **Panels on demand:** the neural-core view, memory carousel, data pane, orbital tracker
-  and the Osiris globe.
+  and the [Osiris globe](#osiris).
+- **The core:** the humanoid on the overview, drawn to a single canvas by
+  `renderer/humanoid-core.js`. It assembles when the panel opens, follows the pointer, and
+  its mouth moves while Echo speaks — [watch it open](#the-humanoid-opening).
 
 ---
 
@@ -361,6 +369,7 @@ OSIRIS_URL=http://localhost:3000
 | `npm run voicepreview` | Render samples of the Gemini voices |
 | `npm run voicelog` | Voice timing per turn (end of speech → first sound) |
 | `npm run hudpreview` / `panelpreview` | Render the HUD or control panel for checking layout |
+| `npm run media` | Re-record the README's demo clips into `docs/media/` (add a name for one: `-- hud`) |
 | `npm run dataset` | Export recorded runs as training data |
 
 ---
@@ -407,7 +416,9 @@ Echo Mac/
 │   └── learn/               training-data recorder for the local model
 ├── renderer/                HUD, control panel and panels (HTML/CSS/JS)
 ├── native/                  small compiled macOS helpers (audio, vision, speech)
-├── scripts/                 setup, doctor, test runner, Piper worker
+├── scripts/                 setup, doctor, test runner, Piper worker,
+│                         previews and the README's clip recorder (capture_media.mjs)
+├── docs/media/              the demo clips in this README (recorded, not hand-made)
 ├── models/                  speech and wake-word models (downloaded, not in git)
 └── vendor/                  Piper, SearXNG, Osiris installs (not in git)
 ```
@@ -466,6 +477,20 @@ tool calls and results, and why the run ended.
 - **Replay:** `ECHO_REPLAY_RUN=/path/to/run npm start` re-runs a recorded session using the
   recorded model responses and tool results. Nothing live is called. It stops at the first
   point the new run differs from the recording.
+
+---
+
+## Permission and use
+
+Echo is published here to be read and reviewed. It is **not** open source, and there is no
+licence granting you the right to use it.
+
+**Using it without permission is strictly prohibited.** That covers running it, copying it,
+building on it, publishing it, and reusing any part of it — the code, the renderer, the
+artwork in `assets/`, the recordings in `docs/media/`, or the design — for any purpose,
+personal, academic or commercial, unless the author has given you written permission.
+
+Ask first: **Deepak (AskDeepakAI)**, [@thedeepakreddy](https://github.com/thedeepakreddy).
 
 ---
 
