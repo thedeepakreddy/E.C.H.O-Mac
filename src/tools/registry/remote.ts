@@ -6,24 +6,46 @@ import { join } from "node:path";
 import * as scan from "../../frontier/scan.js";
 import * as remote from "../../frontier/remote.js";
 import { setPassword as setRemotePassword } from "../../frontier/remoteauth.js";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { showRemoteLink } from "./shared.js";
 
+/** Run an AppleScript with its inputs passed as `argv`, so no input is ever parsed as script. */
+function osascriptArgs(script: string, args: string[]): Promise<{ ok: boolean; stdout: string; error: string }> {
+  return new Promise((resolve) => {
+    execFile("/usr/bin/osascript", ["-e", script, ...args], { timeout: 20_000 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: String(stdout ?? "").trim(), error: err ? String(stderr || err.message).trim().slice(0, 200) : "" });
+    });
+  });
+}
+
+const CONTACT_LOOKUP = `on run argv
+  set wanted to item 1 of argv
+  tell application "Contacts"
+    set matched to every person whose name contains wanted
+    if (count of matched) is 0 then return "ERROR_NOT_FOUND"
+    if (count of matched) > 1 then return "ERROR_MULTIPLE"
+    set thePhones to value of phones of item 1 of matched
+    if (count of thePhones) is 0 then return "ERROR_NO_PHONE"
+    return item 1 of thePhones
+  end tell
+end run`;
+
+// `participant` is the handle form current Messages understands; `buddy` is
+// the older one, kept as the fallback for macOS versions that predate it.
+const SEND_MESSAGE = `on run argv
+  set targetHandle to item 1 of argv
+  set theMessage to item 2 of argv
+  tell application "Messages"
+    try
+      set targetService to 1st account whose service type = iMessage
+      send theMessage to participant targetHandle of targetService
+    on error
+      send theMessage to buddy targetHandle
+    end try
+  end tell
+end run`;
+
 export const REMOTE_TOOLS: ToolDef[] = [
-  {
-    name: "pull_from_phone",
-    description: "The Ambient Device Mesh. Use this tool when the user asks you to pull context, URLs, or clipboard data from their iOS device (iPhone or iPad).",
-    schema: {
-      deviceName: z.string().optional().describe("The specific device to pull from, e.g., 'iPhone' or 'iPad'. Leave blank to pull from any discovered device.")
-    },
-    readOnly: true,
-    handler: async (a: { deviceName?: string }) => {
-      // Lazy load ambient mesh
-      const { ambientMesh } = await import("../../frontier/ambient.js");
-      const res = await ambientMesh.pullFromPhone(a.deviceName);
-      return { text: res.message + (res.data ? `\nData: ${res.data}` : "") };
-    }
-  },
   {
     name: "set_remote_password",
     description:
@@ -112,47 +134,40 @@ export const REMOTE_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (a) => {
-      return new Promise((resolve) => {
-        const contactScript = `
-          tell application "Contacts"
-            set matched to every person whose name contains "${a.recipient}"
-            if (count of matched) is 0 then
-              return "ERROR_NOT_FOUND"
-            else if (count of matched) is 1 then
-              set thePhones to value of phones of item 1 of matched
-              if (count of thePhones) is 0 then
-                return "ERROR_NO_PHONE"
-              else
-                return item 1 of thePhones
-              end if
-            else
-              return "ERROR_MULTIPLE"
-            end if
-          end tell
-        `;
-        exec(`osascript -e '${contactScript.replace(/'/g, "'\\''")}'`, (err, stdout) => {
-          let target = a.recipient;
-          const result = stdout ? stdout.trim() : "";
-          
-          if (result === "ERROR_NOT_FOUND") {
-            return resolve({ text: `I couldn't find a contact matching "${a.recipient}". Please provide their exact name or phone number.` });
-          } else if (result === "ERROR_NO_PHONE") {
-            return resolve({ text: `I found ${a.recipient}, but they don't have a phone number saved in your contacts.` });
-          } else if (result === "ERROR_MULTIPLE") {
-            return resolve({ text: `There are multiple contacts matching "${a.recipient}". Could you be more specific? (e.g. provide their full last name)` });
-          } else if (result && !err) {
-            // Found a phone number!
-            target = result;
-          }
+      const recipient = String(a.recipient ?? "").trim();
+      const message = String(a.message ?? "");
+      if (!recipient || !message.trim()) return { text: "I need both a recipient and a message.", status: "failed" };
 
-          // Now send using the resolved target (phone number) or fallback to raw string
-          const script = `tell application "Messages" to send "${a.message}" to buddy "${target}"`;
-          exec(`osascript -e '${script.replace(/'/g, "'\\''")}'`, (sendErr) => {
-            if (sendErr) resolve({ text: `Failed to send SMS to ${target}: ${sendErr.message}` });
-            else resolve({ text: `Successfully sent message to ${a.recipient} (${target}).` });
-          });
-        });
-      });
+      // The recipient and the message reach AppleScript as ARGUMENTS, never
+      // spliced into the script's source. Spliced in, a quote in the message
+      // ended the string early and whatever followed ran as AppleScript — and
+      // the message is often text the model copied from somewhere else.
+      const lookup = await osascriptArgs(CONTACT_LOOKUP, [recipient]);
+      let target: string;
+      if (lookup.ok && !lookup.stdout.startsWith("ERROR_")) {
+        target = lookup.stdout;
+      } else if (lookup.stdout === "ERROR_NOT_FOUND" || !lookup.ok) {
+        // Only a literal number or address may go out without a contact match.
+        // Sending to a bare name used to happen whenever Contacts could not be
+        // read at all, which addressed the message to nobody in particular.
+        if (!/^[+\d][\d\s().-]{5,}$|^[^\s@]+@[^\s@]+$/.test(recipient)) {
+          return {
+            text: lookup.ok
+              ? `I couldn't find a contact matching "${recipient}". Please give their exact name or phone number.`
+              : `I couldn't read your contacts (${lookup.error}), so I need a phone number or email address rather than a name.`,
+            status: "failed",
+          };
+        }
+        target = recipient;
+      } else if (lookup.stdout === "ERROR_NO_PHONE") {
+        return { text: `I found ${recipient}, but they don't have a phone number saved in your contacts.`, status: "failed" };
+      } else {
+        return { text: `There are several contacts matching "${recipient}". Could you be more specific, for example their full name?`, status: "failed" };
+      }
+
+      const sent = await osascriptArgs(SEND_MESSAGE, [target, message]);
+      if (!sent.ok) return { text: `Failed to send the message to ${target}: ${sent.error}`, status: "failed" };
+      return { text: `Sent the message to ${recipient} (${target}).` };
     },
   },
 ];

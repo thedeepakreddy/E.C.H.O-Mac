@@ -8,10 +8,24 @@ Loads one voice once, then speaks sentences for as long as it runs:
           id 0xFFFFFFFF with length 0 is sent once, when the voice is loaded.
 """
 import json
+import os
 import struct
 import sys
 
+# onnxruntime (which Piper runs on) ships Microsoft's telemetry uploader, and
+# its background thread can abort() the whole process. It reads this switch
+# when the native library loads, so it must be set before piper is imported.
+# The parent sets it too; this covers running the worker by hand.
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
 from piper import PiperVoice, SynthesisConfig
+
+try:
+    import onnxruntime
+
+    onnxruntime.disable_telemetry_events()
+except Exception:  # an onnxruntime without the call is fine; the env var covers it
+    pass
 
 READY = 0xFFFFFFFF
 

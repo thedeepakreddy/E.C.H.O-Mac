@@ -20,6 +20,7 @@ export interface AgentIdentity {
 export interface AgentRunContext {
   identity: AgentIdentity;
   taskId: string;
+  conversationId?: string;
   recorder: Recorder;
   loop: LoopLog;
   payloadRecording: boolean;
@@ -27,12 +28,19 @@ export interface AgentRunContext {
   scope?: Record<string, any>;
   /** Provider identity is used to enforce memory model-access policy at tool boundaries. */
   provider?: string;
+  /** Execution authority, independent of which tools a model can see. */
+  allowedTools?: ReadonlySet<string>;
+  /** Cancels invocation-owned work when this brain is interrupted or stopped. */
+  toolSignal?: AbortSignal;
   deps?: unknown;
   /** New turn for the same long-lived provider session (not another clone). */
   successor?: AgentRunContext;
+  observationEpoch?: number;
+  onNoProgress?: () => void;
+  toolCatalog?: {discover(query: string): Promise<unknown>};
 }
 
-const storage = new AsyncLocalStorage<AgentRunContext>();
+const storage = new AsyncLocalStorage<AgentRunContext | null>();
 
 export function currentAgentRunContext(): AgentRunContext | null {
   let context = storage.getStore() ?? null;
@@ -46,3 +54,5 @@ export function currentAgentRunContext(): AgentRunContext | null {
 export function runInAgentContext<T>(context: AgentRunContext, action: () => T): T {
   return storage.run(context, action);
 }
+/** A background lifecycle must not inherit the launching turn's recorder or cancellation. */
+export function outsideAgentContext<T>(action: () => T): T {return storage.run(null,action);}

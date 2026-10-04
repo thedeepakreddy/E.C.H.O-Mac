@@ -48,6 +48,58 @@ var generation = 0           // bumped by every stop; late completions of old bu
 var playing = false
 var startedReported = false
 let playQueue = DispatchQueue(label: "voiceio.play")
+// A hardware format change clears AVAudioPlayerNode's scheduled buffers.
+// Keep only buffers whose dataPlayedBack callback has not completed, so a
+// restarted engine can continue them instead of remaining silently stopped.
+var pendingBuffers: [Int: AVAudioPCMBuffer] = [:]
+var nextBufferID = 0
+var playbackBase: AVAudioFramePosition = 0
+var playbackOffsetMs = 0
+var lastPlayedMs = 0
+
+func enqueueBuffer(_ buffer: AVAudioPCMBuffer, id: Int) {
+    let gen = generation
+    player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+        playQueue.async {
+            // CoreAudio also invokes completions when an engine reset drops
+            // buffers. Those callbacks are not evidence that sound played.
+            guard gen == generation, engine.isRunning else { return }
+            pendingBuffers.removeValue(forKey: id)
+            scheduled = pendingBuffers.count
+            if scheduled == 0 {
+                playing = false
+                startedReported = false
+                event(["ev": "drained"])
+            }
+        }
+    }
+}
+
+// Called only on playQueue. Notification callbacks must not restart the
+// engine directly from Apple's internal audio configuration thread.
+func resumeEngine() -> Bool {
+    guard !engine.isRunning else { return true }
+    generation += 1
+    player.stop()
+    playbackOffsetMs = lastPlayedMs
+    playbackBase = 0
+    engine.disconnectNodeOutput(player)
+    engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+    engine.prepare()
+    do {
+        try engine.start()
+        for id in pendingBuffers.keys.sorted() {
+            if let buffer = pendingBuffers[id] { enqueueBuffer(buffer, id: id) }
+        }
+        if !pendingBuffers.isEmpty { player.play() }
+        event(["ev": "engine_resumed", "pending": pendingBuffers.count])
+        return true
+    } catch {
+        event(["ev": "error", "message": "audio engine could not resume: \(error.localizedDescription)"])
+        // The owning app already recovers crashed helpers as playback-only.
+        exit(1)
+    }
+}
 
 func configurePlayer(rate: Double) {
     if rate == inRate { return }
@@ -60,28 +112,26 @@ func configurePlayer(rate: Double) {
 }
 
 func schedulePCM(_ data: Data) {
-    let n = data.count / 2
-    guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(n)) else { return }
-    buf.frameLength = AVAudioFrameCount(n)
-    let dst = buf.floatChannelData![0]
-    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-        let src = raw.bindMemory(to: Int16.self)
-        for i in 0..<n { dst[i] = Float(Int16(littleEndian: src[i])) / 32768.0 }
-    }
-    let gen = generation
     playQueue.sync {
-        scheduled += 1
-        player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { _ in
-            playQueue.async {
-                guard gen == generation else { return }
-                scheduled -= 1
-                if scheduled == 0 {
-                    playing = false
-                    startedReported = false
-                    event(["ev": "drained"])
-                }
-            }
+        guard resumeEngine() else { return }
+        let n = data.count / 2
+        guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(n)) else { return }
+        buf.frameLength = AVAudioFrameCount(n)
+        let dst = buf.floatChannelData![0]
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let src = raw.bindMemory(to: Int16.self)
+            for i in 0..<n { dst[i] = Float(Int16(littleEndian: src[i])) / 32768.0 }
         }
+        if !startedReported {
+            playbackBase = player.lastRenderTime.flatMap { player.playerTime(forNodeTime: $0) }?.sampleTime ?? 0
+            playbackOffsetMs = 0
+            lastPlayedMs = 0
+        }
+        let id = nextBufferID
+        nextBufferID += 1
+        pendingBuffers[id] = buf
+        scheduled = pendingBuffers.count
+        enqueueBuffer(buf, id: id)
         if !player.isPlaying { player.play() }
         playing = true
         if !startedReported {
@@ -95,9 +145,13 @@ func stopPlayback() {
     playQueue.sync {
         generation += 1
         player.stop()          // drops every scheduled buffer at once
+        pendingBuffers.removeAll()
         scheduled = 0
         playing = false
         startedReported = false
+        playbackBase = 0
+        playbackOffsetMs = 0
+        lastPlayedMs = 0
     }
     event(["ev": "stopped"])
 }
@@ -108,11 +162,13 @@ func startProgress() {
     let t = DispatchSource.makeTimerSource(queue: playQueue)
     t.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
     t.setEventHandler {
+        if playing && !engine.isRunning { _ = resumeEngine(); return }
         guard playing, let nt = player.lastRenderTime, nt.isSampleTimeValid,
               let pt = player.playerTime(forNodeTime: nt), pt.sampleRate > 0 else { return }
-        let seconds = Double(pt.sampleTime) / pt.sampleRate
+        let seconds = Double(max(0, pt.sampleTime - playbackBase)) / pt.sampleRate
         guard seconds.isFinite, seconds >= 0 else { return }   // Int(inf) traps the whole process
-        event(["ev": "progress", "played_ms": Int(seconds * 1000)])
+        lastPlayedMs = playbackOffsetMs + Int(seconds * 1000)
+        event(["ev": "progress", "played_ms": lastPlayedMs])
     }
     t.resume()
     progressTimer = t
@@ -191,6 +247,11 @@ do {
     exit(1)
 }
 startProgress()
+let configurationObserver = NotificationCenter.default.addObserver(
+    forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+) { _ in
+    playQueue.async { _ = resumeEngine() }
+}
 event(["ev": "ready", "capture": captureWanted, "aec": captureWanted, "outputRate": engine.mainMixerNode.outputFormat(forBus: 0).sampleRate])
 
 // stdin reader: framed messages.

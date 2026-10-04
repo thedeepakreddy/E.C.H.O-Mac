@@ -1,14 +1,56 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
-import { dataRoot } from "./memory/paths.js";
+import { dataRoot, atomicWrite } from "./memory/paths.js";
 
 export interface JarvisConfig {
-  brain: "claude" | "gemini" | "ollama" | "openai";
+  /** Shared working context across providers. All token sizes are estimates. */
+  context?: import("./memory/conversation.js").ContextSettings;
+  brain: "claude" | "gemini" | "ollama" | "openai" | "openrouter";
+  /**
+   * `systemPromptPreset`: "none" (the default) gives Claude Echo's own prompt
+   * alone. "claude_code" puts Claude Code's system prompt first — it tells
+   * the model it is Claude Code, a coding CLI, which contradicts Echo's
+   * identity and adds several thousand tokens to every turn. Only worth it for
+   * a mostly-coding setup.
+   */
   claude: { model: string; systemPromptPreset: "claude_code" | "none" };
   gemini: { model: string; apiKeyEnv: string };
   ollama: { model: string; host: string };
-  openai: { model: string; apiKeyEnv: string };
+  /**
+   * OpenRouter: one key in front of several hundred models.
+   *
+   * Not a separate brain. OpenRouter implements OpenAI's Responses API —
+   * verified, `/api/v1/responses` answers 401 while an invented route answers
+   * 404 — so it is the OpenAI brain pointed somewhere else. A second copy of
+   * that loop would be a second place for every future fix to be forgotten.
+   */
+  openrouter: {
+    model: string;
+    apiKeyEnv: string;
+    baseUrl: string;
+    maxOutputTokens: number;
+    /** Models offered in the panel and by voice. See OPENROUTER_MODELS. */
+    catalogue: Array<{ id: string; label: string; note: string }>;
+  };
+  /**
+   * The OpenAI brain. `auth` picks how it pays:
+   * - "auto" (default): your ChatGPT plan when you have signed in with
+   *   ChatGPT, otherwise the API key in `apiKeyEnv`.
+   * - "chatgpt": only your ChatGPT plan. "apiKey": only the API key.
+   * `model` is the API-key model; `chatgptModel` is the model to use on the
+   * ChatGPT plan (empty = the first one your plan offers).
+   */
+  openai: {
+    model: string;
+    apiKeyEnv: string;
+    auth?: "auto" | "chatgpt" | "apiKey";
+    chatgptModel?: string;
+    /** The 127.0.0.1 port ChatGPT redirects back to after sign-in. */
+    chatgptRedirectPort?: number;
+    /** Send this install's host id during sign-in (off, as in OpenAI's own reference app). */
+    chatgptSendHostId?: boolean;
+  };
   voice: {
     wakeWord: boolean;
     /**
@@ -35,7 +77,7 @@ export interface JarvisConfig {
     /**
      * Keep the always-on transcript check running alongside an acoustic
      * detector. Costs a local whisper pass per room noise; buys recall when the
-     * detector misses. Default true.
+     * detector misses. Default false to avoid transcribing unrelated room speech.
      */
     wakeTranscriptFallback?: boolean;
     /**
@@ -58,6 +100,24 @@ export interface JarvisConfig {
        * English turns take the ordinary pipeline and its voice (e.g. Piper).
        */
       languages?: "all" | "non-english";
+      /**
+       * Give the spoken session the outside tools (Composio and the like) too.
+       *
+       * On by default, because an assistant that can read your mail when asked
+       * in English and cannot when asked in Telugu is one bug, not one
+       * feature — and `languages: "non-english"` routes exactly those turns
+       * here.
+       *
+       * The cost is real and worth knowing before turning it off is needed.
+       * A Live session fixes its tool list in the setup message, so every
+       * tool is paid for at the start of every conversation whether or not it
+       * is used. Measured with six Composio toolkits connected: Echo's own 143
+       * tools are 68 KB, and 73 outside tools add **161 KB** — Composio's
+       * schemas are far larger per tool than Echo's own. Set this false if
+       * the voice turns sluggish to start, or to stop spending a metered
+       * Gemini quota on tool definitions the voice rarely reaches for.
+       */
+      outsideTools?: boolean;
       /**
        * Which of Gemini Live's prebuilt voices Echo speaks with.
        *
@@ -133,11 +193,13 @@ export interface JarvisConfig {
      * - `mac`: macOS built-in `say` command (fast, free, offline)
      * - `fakeyou`: FakeYou inference (slower, relies on community models)
      * - `elevenlabs`: High quality (requires ELEVENLABS_API_KEY)
-     * - `local-clone`: Local python inference
      * - `sarvam`: Indian languages TTS (requires SARVAM_API_KEY)
      * - `piper`: Piper neural voice, fully offline (npm run piper:setup)
      */
-    ttsEngine?: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" | "gemini" | "piper";
+    ttsEngine?: "mac" | "fakeyou" | "elevenlabs" | "sarvam" | "gemini" | "piper" | "vibevoice";
+    /** Official VibeVoice-Realtime server; Echo never launches a model implicitly. */
+    vibeVoiceUrl?: string;
+    vibeVoiceSpeaker?: string;
     /**
      * The Piper voice, e.g. "en_GB-alan-medium", looked up in vendor/piper/voices.
      * Piper also stands in for any cloud voice that fails, so it is used even
@@ -240,6 +302,18 @@ export interface JarvisConfig {
     autoDebug: boolean;
     /** Seconds between shadow's screen reads. Lower is far more expensive. */
     shadowIntervalSeconds: number;
+    /**
+     * Warn when many files in ~/Documents are deleted within seconds. Off by
+     * default: it needs access to Documents (a permission prompt at launch)
+     * and it can only warn — it cannot stop what is deleting them.
+     */
+    watchdog?: boolean;
+    /** Say so five minutes before a Calendar event — only while Calendar is open. */
+    meetingReminders?: boolean;
+    /** Background screen OCR and local vector indexing are opt-in on laptops. */
+    screenHistory?: boolean;
+    screenHistoryIntervalSeconds?: number;
+    memoryIndexing?: boolean;
   };
   /**
    * The cost-effective AGI-blueprint features: a fast local critic before GUI
@@ -348,18 +422,57 @@ export interface JarvisConfig {
   osiris: { baseUrl: string; preferLocal: boolean; defaultLayers: string[] };
 }
 
+/**
+ * OpenRouter models worth offering, in the order Echo should prefer them.
+ *
+ * Chosen by measurement, not by leaderboard. Every one was called through the
+ * same Responses endpoint Echo uses, with a real tool definition, and kept
+ * only if it came back with an actual `function_call` — Echo is agentic, and
+ * a model that will not call a tool is decoration here. Timings are that
+ * round trip, 2026-10-02.
+ *
+ * All are free tiers, which on OpenRouter means they work on an account with
+ * a zero balance. They also get retired without notice — `openroutertest`
+ * re-checks every entry, so the list failing is the signal to re-pick rather
+ * than a mystery at runtime.
+ *
+ * Two that did NOT make it, recorded so nobody re-adds them hopefully:
+ *   qwen/qwen3.8-27b:free            — "Provider returned error" on any
+ *                                      request carrying tools. Answers plain
+ *                                      chat fine; useless to Echo.
+ *   nvidia/nemotron-3.5-lightning    — 54.7 SECONDS for one tool call,
+ *                                      despite the name.
+ */
+export const OPENROUTER_MODELS = [
+  { id: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron Super 120B", note: "the default — 745ms, 262k context, 120B" },
+  { id: "cohere/north-mini-code:free",            label: "North Mini Code",     note: "fastest measured, 729ms, 256k — leans to code" },
+  { id: "openrouter/free",                        label: "OpenRouter Auto",     note: "1.1s — OpenRouter picks a free model for you" },
+  { id: "apodex/apodex-1.1-mini:free",            label: "Apodex Mini",         note: "1.1s, 262k — small and quick" },
+  { id: "inclusionai/ling-3.0-flash-sante:free",  label: "Ling 3.0 Flash",      note: "1.4s, 262k" },
+  { id: "dots-studio/dots-3-note-preview:free",   label: "Dots 3 Note",         note: "1.5s, 512k — the roomiest that is still quick" },
+  { id: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron Ultra 550B", note: "4.1s, 1M context — strongest, slowest" },
+];
+
 const DEFAULTS: JarvisConfig = {
+  context: { maxTokens: 128000, outputReserveTokens: 16000, compactAt: 0.75, providerLimits: {} },
   brain: "claude",
-  claude: { model: "claude-opus-4-8", systemPromptPreset: "claude_code" },
+  claude: { model: "claude-opus-4-8", systemPromptPreset: "none" },
   // gemini-2.5-flash is retired for new keys; 2.0-flash still resolves.
   gemini: { model: "gemini-2.0-flash", apiKeyEnv: "GEMINI_API_KEY" },
   ollama: { model: "llama3.2:3b", host: "http://localhost:11434" },
-  openai: { model: "gpt-4o", apiKeyEnv: "OPENAI_API_KEY" },
+  openai: { model: "gpt-4o", apiKeyEnv: "OPENAI_API_KEY", auth: "auto", chatgptModel: "", chatgptRedirectPort: 8797, chatgptSendHostId: false },
+  openrouter: {
+    model: OPENROUTER_MODELS[0].id,
+    apiKeyEnv: "OPENROUTER_API_KEY",
+    baseUrl: "https://openrouter.ai/api/v1",
+    maxOutputTokens: 4096,
+    catalogue: OPENROUTER_MODELS,
+  },
   voice: {
     wakeWord: true,
     wakeEngine: "auto",
     wakeKeywordPath: "",
-    wakeTranscriptFallback: true,
+    wakeTranscriptFallback: false,
     vadModel: "models/silero_vad.onnx",
     sttStreaming: true,
     sttStreamModel: "saaras:v4",
@@ -390,7 +503,7 @@ const DEFAULTS: JarvisConfig = {
   },
   control: { cliclickBin: "/opt/homebrew/bin/cliclick", workingDir: "~" },
   hud: { startListeningOnLaunch: true, skin: "jarvis" },
-  helpers: { shadow: false, ghost: false, autoDebug: false, shadowIntervalSeconds: 60 },
+  helpers: { shadow: false, ghost: false, autoDebug: false, shadowIntervalSeconds: 60, watchdog: false, meetingReminders: true, screenHistory: false, screenHistoryIntervalSeconds: 120, memoryIndexing: false },
   agi: {
     critic: { enabled: true },
     autoReflex: { enabled: true },
@@ -418,6 +531,7 @@ const DEFAULTS: JarvisConfig = {
 };
 
 /** The built-in defaults, for tests that need a config without a config.json. */
+
 export const DEFAULTS_FOR_TESTS: JarvisConfig = DEFAULTS;
 
 function deepMerge<T>(base: T, override: any): T {
@@ -486,4 +600,37 @@ export function setActiveConfig(cfg: JarvisConfig): void {
 
 export function activeConfig(appRoot?: string): JarvisConfig {
   return active ?? loadConfig(appRoot ?? process.cwd());
+}
+
+/**
+ * The config file Echo itself writes to: the user's own copy in the data root.
+ *
+ * `loadConfig` reads this one first and stops there, so once it exists a write
+ * to <app>/config.json changes nothing — which is exactly what several tools
+ * did: "voice changed", "skin saved", and both were gone on the next launch.
+ * In an installed app the app folder is not writable at all.
+ */
+export function userConfigPath(): string {
+  return join(dataRoot(), "config.json");
+}
+
+/**
+ * The config as it stands on disk, for a read-modify-write of one key.
+ *
+ * Falls back to the app's config.json so the first write carries the user's
+ * existing settings over rather than starting from nothing.
+ */
+export function readUserConfig(appRoot: string): Record<string, any> {
+  for (const file of [userConfigPath(), join(appRoot, "config.json")]) {
+    try {
+      if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8"));
+    } catch (err: any) {
+      console.error(`[config] could not read ${file}: ${err?.message ?? err}`);
+    }
+  }
+  return {};
+}
+
+export function writeUserConfig(data: Record<string, any>): void {
+  atomicWrite(userConfigPath(), `${JSON.stringify(data, null, 2)}\n`);
 }

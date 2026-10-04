@@ -157,6 +157,38 @@ console.log("  an incomplete loop continues automatically");
   ok(outerEnds === 1, "the app sees one final turn end, not a false end before recovery");
 }
 
+console.log("  exhausted account quota stops without replaying the task");
+{
+  const root = mkdtempSync(join(tmpdir(), "echo-recovery-quota-"));
+  process.env.ECHO_LOG_DIR = root;
+  class QuotaBrain extends Brain {
+    calls = 0;
+    send(): void {
+      this.calls++;
+      queueMicrotask(() => {
+        const error = new Error("The ChatGPT user has reached their Subscription Sharing usage limit.");
+        this.emitEvent("error", error.message);
+        currentLoop()?.exit("provider_error", {error});
+        this.emitEvent("turnEnd");
+      });
+    }
+    interrupt(): void {}
+    async stop(): Promise<void> {}
+  }
+  const inner = new QuotaBrain();
+  const brain = new RecordingBrain(inner, "test", {}, {maxRecoveryAttempts: 3, recoveryDelayMs: 0});
+  const text: string[] = [], errors: string[] = [];
+  brain.on("text", value => text.push(value));
+  brain.on("error", value => errors.push(value));
+  const done = new Promise<void>(resolve => brain.on("turnEnd", resolve));
+  brain.send("read the latest news");
+  await Promise.race([done, wait(3000).then(() => {throw new Error("quota stop timed out");})]);
+  ok(inner.calls === 1, "an exhausted quota makes only one provider attempt");
+  ok(text.length === 0, "no misleading recovery announcement accompanies quota exhaustion");
+  ok(errors.length === 1 && errors[0].includes("usage limit"), "the actual quota error reaches the user once");
+  ok(readRecoveryCheckpoint(runDirs(root)[0])?.status === "exhausted", "the preserved task cannot restart against the same exhausted quota");
+}
+
 console.log("  concurrent clones never cross-write their tapes");
 {
   const root = mkdtempSync(join(tmpdir(), "echo-recovery-isolation-"));

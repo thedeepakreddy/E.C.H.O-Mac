@@ -34,6 +34,7 @@ export interface KeyField {
 }
 
 export const KEY_FIELDS: KeyField[] = [
+  {env:'VERCEL_TOKEN',label:'Vercel',help:'Deploy project previews. Enter privately here; do not include this token in voice or coding prompts.',url:'https://vercel.com/account/settings/tokens',optional:true},
   {
     env: "ANTHROPIC_API_KEY",
     label: "Claude",
@@ -62,6 +63,14 @@ export const KEY_FIELDS: KeyField[] = [
     help: "A dedicated wake-word engine. Without it the name is detected from speech, which works fine.",
     url: "https://console.picovoice.ai",
     optional: true,
+  },
+  {
+    env: "OPENROUTER_API_KEY",
+    label: "OpenRouter",
+    help: "One key in front of several hundred models — Claude, GPT, Llama, DeepSeek and the rest. Pick which with openrouter.model.",
+    url: "https://openrouter.ai/keys",
+    optional: true,
+    looksValid: (v) => v.startsWith("sk-or-"),
   },
   {
     env: "OPENAI_API_KEY",

@@ -64,7 +64,7 @@ export function closeSetupWindow(): void {
 }
 
 /** Wire the window's requests. Called once at startup. */
-export function wireSetupIpc(onSaved?: () => void): void {
+export function wireSetupIpc(onSaved?: (changed: string[]) => void): void {
   const e = electron();
   if (!e?.ipcMain) return;
 
@@ -88,8 +88,8 @@ export function wireSetupIpc(onSaved?: () => void): void {
       // A blank field means "leave what is already saved", so reopening the
       // window and pressing save does not silently wipe every key. Shared with
       // the control panel's API-keys section — see keystore.ts's saveKeys.
-      const { count } = saveKeys(values ?? {});
-      onSaved?.();
+      const { count, changed } = saveKeys(values ?? {});
+      onSaved?.(changed);
       return { ok: true, count };
     } catch (err: any) {
       return { ok: false, error: String(err?.message ?? err) };

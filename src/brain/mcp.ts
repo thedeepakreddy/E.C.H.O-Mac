@@ -1,11 +1,18 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync , statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import Ajv from 'ajv';
+import Ajv2019 from 'ajv/dist/2019.js';
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
 import { getAppPath } from "../utils/appPath.js";
-import type { ToolOutput } from "../tools/registry.js";
+import type { ToolDef, ToolOutput } from "../tools/registry.js";
+import { classify } from "../safety/risk.js";
+import { hasExternalToolGrants } from '../safety/tool-permissions.js';
+import { currentAgentRunContext } from '../agent-replay/context.js';
 
 /**
  * One place that knows how to reach an MCP server.
@@ -86,7 +93,7 @@ export interface McpToolHandle {
   originalName: string;
   description: string;
   inputSchema: any;
-  call(args: Record<string, unknown>): Promise<ToolOutput>;
+  call(args: Record<string, unknown>, options?: {signal?: AbortSignal}): Promise<ToolOutput>;
 }
 
 /** What happened to each server, so a failure is reportable rather than lost. */
@@ -102,6 +109,97 @@ export interface McpConnection {
   servers: McpServerStatus[];
   /** Close only this brain's clients. Idempotent. */
   close(): Promise<void>;
+}
+
+/**
+ * An MCP tool dressed as one of Echo's own, so it goes through the safety gate.
+ *
+ * `runGated` takes a `ToolDef`; an `McpToolHandle` is not one. Every brain that
+ * can call an outside server needs this same adapter, and for a while each one
+ * carried its own copy — which had already drifted (one logged a failed
+ * playback, the other swallowed it). A tool that arrives from outside Echo is
+ * exactly the kind that must not be gated differently depending on which brain
+ * happened to answer, so there is one adapter now and every caller uses it.
+ *
+ * Only tools already classified as low-risk observations are reusable reads.
+ * Unknown capabilities remain actions and still pass the argument-aware gate.
+ */
+/**
+ * An MCP input schema as Google's function-declaration dialect wants it.
+ *
+ * Re-exported from here rather than imported from gemini.ts by the realtime
+ * voice session: that would pull a whole brain — its SDK client, its memory
+ * context, its loop logging — into the voice path just for a schema walk.
+ */
+export function jsonSchemaToGoogleForRealtime(node: any): any {
+  return toGoogle(node);
+}
+
+function toGoogle(node: any): any {
+  if (!node || typeof node !== "object") return { type: "STRING" };
+  if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) {
+    const pick = (node.anyOf ?? node.oneOf).find((x: any) => x?.type !== "null") ?? {};
+    return toGoogle(pick);
+  }
+  const t = Array.isArray(node.type) ? node.type.find((x: string) => x !== "null") : node.type;
+  const out: any = { type: String(t ?? "string").toUpperCase() };
+  if (node.description) out.description = String(node.description);
+  if (node.enum) out.enum = node.enum.map(String);
+  if (out.type === "ARRAY") out.items = toGoogle(node.items ?? {});
+  if (out.type === "OBJECT") {
+    out.properties = Object.fromEntries(Object.entries(node.properties ?? {}).map(([k, v]) => [k, toGoogle(v)]));
+    if (Array.isArray(node.required)) out.required = node.required.map(String);
+  }
+  return out;
+}
+
+const definitions = new WeakMap<McpToolHandle, ToolDef>();
+
+export function mcpToolDef(handle: McpToolHandle): ToolDef {
+  const cached = definitions.get(handle);
+  if (cached) return cached;
+  // Compile once per discovered handle, not on every model iteration. A broken
+  // server schema denies execution rather than silently disabling validation.
+  let validate: (args: unknown) => string | null;
+  try {
+    const schema = handle.inputSchema ?? {type: 'object'};
+    const dialect = String(schema.$schema ?? '');
+    // Modern keywords such as prefixItems must be enforced, not ignored by a
+    // draft-7 validator. Respect explicitly declared legacy server dialects.
+    const options = {strict: false, allErrors: true, validateFormats: true};
+    const ajv = dialect.includes('draft-07') ? new Ajv(options)
+      : dialect.includes('2019-09') ? new Ajv2019(options) : new Ajv2020(options);
+    addFormats(ajv);
+    const validator = ajv.compile(schema);
+    validate = args => validator(args) ? null : ajv.errorsText(validator.errors);
+  } catch (error) {
+    validate = () => `Server input schema could not be compiled: ${String(error)}`;
+  }
+  const definition: ToolDef = {
+    name: handle.name,
+    description: handle.description || "MCP tool",
+    schema: {},
+    validateInput: validate,
+    readOnly: classify(handle.name, {}, {workingDir: process.cwd()}).tier === 'low',
+    handler: async (args: any): Promise<ToolOutput> => {
+      const result = await handle.call(args ?? {}, {signal: currentAgentRunContext()?.toolSignal});
+      const text = result.text ?? "";
+      // Sarvam and friends answer with a path to synthesised audio rather than
+      // with sound. Playing it is the difference between Echo speaking the
+      // translation and Echo reciting a filename.
+      const wav = text.match(/(\/[^\s"']+\.wav)/i);
+      if (wav && existsSync(wav[1])) {
+        try {
+          spawn("/usr/bin/afplay", [wav[1]]);
+        } catch (err) {
+          console.error("[mcp] could not play generated audio:", (err as any)?.message ?? err);
+        }
+      }
+      return { ...result, text: text || "done" };
+    },
+  };
+  definitions.set(handle, definition);
+  return definition;
 }
 
 /** Gemini caps a function name at 64 characters and rejects anything longer. */
@@ -239,12 +337,11 @@ export function toolNameFor(serverName: string, toolName: string, taken: Set<str
       : prefix + clean(toolName).slice(0, MAX_TOOL_NAME - prefix.length);
   }
   if (!taken.has(name)) return name;
-  for (let i = 2; i < 100; i++) {
+  for (let i = 2; ; i++) {
     const suffix = `_${i}`;
     const candidate = name.slice(0, MAX_TOOL_NAME - suffix.length) + suffix;
     if (!taken.has(candidate)) return candidate;
   }
-  return name; // 98 identical names is not a situation worth more code
 }
 
 /** Reject a promise if it has not settled in time, without leaving it dangling. */
@@ -374,13 +471,13 @@ let reapedThisProcess = false;
 
 /** Live clients, so they can be shut down when a brain is replaced. */
 type LiveClient = { name: string; client: Client; transport: McpTransport };
-const connections = new Set<Set<LiveClient>>();
+const connections = new Map<Set<LiveClient>, () => Promise<void>>();
 async function closeClient(item: LiveClient): Promise<void> {
   // Only a stdio transport owns a child process; an HTTP one has nothing to
   // reap, and reading `.pid` off it would be undefined rather than an error.
   const pid = (item.transport as StdioClientTransport).pid ?? null;
-  try { await item.client.close(); } catch { /* transport owns process */ }
-  try { await item.transport.close(); } catch { /* already closed */ }
+  try { await withDeadline(item.client.close(), 5000, `${item.name} client close`); } catch { /* transport owns process */ }
+  try { await withDeadline(item.transport.close(), 1000, `${item.name} transport close`); } catch { /* already closed */ }
   // The graceful close is a request. A wedged server ignores it, and the
   // forked worker never saw it at all, so verify and finish the job.
   if (pid !== null) await killTree(pid);
@@ -389,11 +486,13 @@ async function closeClient(item: LiveClient): Promise<void> {
 export function mcpToolOutput(result: any): ToolOutput {
   const content = Array.isArray(result?.content) ? result.content : [];
   const picture = content.find((b: any) => b?.type === "image" && typeof b.data === "string");
+  const payloads = [result?.structuredContent, ...content.filter((b: any) => b?.type === 'text').map((b: any) => {try {return JSON.parse(b.text);} catch {return null;}})];
+  const failed = !!result?.isError || payloads.some(payload => payload && (payload.successfull === false || payload.successful === false || payload.success === false));
   return {
     text: textOf(result),
-    status: result?.isError ? "failed" : "success",
+    status: failed ? "failed" : "success",
     verification: "unverified",
-    ...(result?.isError ? { error: { category: "tool_error", message: textOf(result) } } : {}),
+    ...(failed ? { error: { category: "tool_error", message: textOf(result) } } : {}),
     data: { content, structuredContent: result?.structuredContent ?? null, isError: !!result?.isError },
     ...(picture ? { image: { data: picture.data, mimeType: picture.mimeType ?? "image/png" } as any } : {}),
   };
@@ -406,7 +505,7 @@ export type ClientFactory = (
   spec: McpServerSpec
 ) => Promise<{ client: Client; transport: McpTransport }>;
 
-const defaultFactory: ClientFactory = async (serverName, spec) => {
+function configuredClient(serverName: string, spec: McpServerSpec): {client: Client; transport: McpTransport} {
   const client = new Client({ name: `echo-${serverName}`, version: "1.0.0" }, { capabilities: {} });
   if (isHttpSpec(spec)) {
     // Headers ride on every request, which is how a hosted server authenticates
@@ -414,7 +513,6 @@ const defaultFactory: ClientFactory = async (serverName, spec) => {
     const transport = new StreamableHTTPClientTransport(new URL(spec.url), {
       requestInit: { headers: spec.headers ?? {} },
     });
-    await client.connect(transport);
     return { client, transport };
   }
   const transport = new StdioClientTransport({
@@ -422,9 +520,8 @@ const defaultFactory: ClientFactory = async (serverName, spec) => {
     args: spec.args ?? [],
     env: { ...(process.env as Record<string, string>), ...(spec.env ?? {}) },
   });
-  await client.connect(transport);
   return { client, transport };
-};
+}
 
 /**
  * Connect every configured server and collect their tools.
@@ -437,9 +534,10 @@ export async function connectMcpServers(options: {
   config?: Record<string, McpServerSpec>;
   factory?: ClientFactory;
   timeout?: number;
+  allowedTools?: ReadonlySet<string>;
 } = {}): Promise<McpConnection> {
+  if (!hasExternalToolGrants(options.allowedTools)) return {tools: [], servers: [], close: async () => {}};
   const owned = new Set<LiveClient>();
-  connections.add(owned);
   let closed = false;
   const close = async () => {
     if (closed) return;
@@ -449,9 +547,17 @@ export async function connectMcpServers(options: {
     owned.clear();
     await Promise.all(closing.map(closeClient));
   };
+  connections.set(owned, close);
 
   const config = options.config ?? loadMcpConfig();
-  const factory = options.factory ?? defaultFactory;
+  const factory: ClientFactory = options.factory ?? (async (name, spec) => {
+    const item = configuredClient(name, spec);
+    // Own the transport before connect can spawn or wait. Global shutdown and
+    // startup deadlines must also see half-initialized server processes.
+    owned.add({name, ...item});
+    await item.client.connect(item.transport);
+    return item;
+  });
   const deadline = options.timeout ?? timeoutMs();
 
   // Once per process, and only when we are really spawning: a test with its
@@ -466,6 +572,7 @@ export async function connectMcpServers(options: {
   const taken = new Set<string>();
 
   for (const [serverName, spec] of Object.entries(config)) {
+    if (closed) break;
     let connected: { client: Client; transport: McpTransport } | null = null;
     try {
       let accepted = true;
@@ -475,12 +582,14 @@ export async function connectMcpServers(options: {
       });
       try { connected = await withDeadline(pending, deadline, `MCP server "${serverName}"`); }
       finally { accepted = false; }
+      if (closed) throw new Error('MCP connection closed during startup');
+      if (![...owned].some(item => item.client === connected!.client)) owned.add({name: serverName, ...connected});
       const listed = await withDeadline(
         connected.client.listTools(),
         deadline,
         `listing tools for "${serverName}"`
       );
-      owned.add({ name: serverName, ...connected });
+      if (closed) throw new Error('MCP connection closed during tool discovery');
 
       for (const tool of listed?.tools ?? []) {
         const name = toolNameFor(serverName, tool.name, taken);
@@ -492,16 +601,28 @@ export async function connectMcpServers(options: {
           originalName: tool.name,
           description: tool.description || `MCP tool ${tool.name} from ${serverName}`,
           inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-          call: async (args) => {
+          call: async (args, options) => {
             if (closed) return { status: "failed", text: "This MCP connection is closed.", error: { category: "unavailable", message: "MCP connection closed" }, verification: "unverified" };
+            if (options?.signal?.aborted) return {status: 'cancelled', text: 'The task was cancelled before the MCP call started.', verification: 'unverified'};
             // A hung tool call stalls the agent loop exactly like a hung
             // connect does, so it gets the same deadline.
-            const result = await withDeadline(
-              client.callTool({ name: tool.name, arguments: args ?? {} }),
-              deadline,
-              `${name}`
-            );
-            return mcpToolOutput(result);
+            const controller = new AbortController();
+            const requestSignal = options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+            const timer = setTimeout(() => controller.abort(), deadline);
+            try {
+              const result = await withDeadline(
+                client.callTool({ name: tool.name, arguments: args ?? {} }, undefined, {signal: requestSignal, timeout: deadline}),
+                deadline, name
+              );
+              return mcpToolOutput(result);
+            } catch (error: any) {
+              if (options?.signal?.aborted) return {status: 'uncertain', text: `${name} was interrupted. Remote side effects are unverified.`, verification: 'unverified', error: {category: 'cancelled', message: 'MCP call interrupted; verify remote state before retrying', retryable: false}};
+              if (controller.signal.aborted || error?.code === -32001 || /timed out|timeout/i.test(String(error?.message))) {
+                controller.abort();
+                return {status: 'timeout', text: `${name} exceeded its deadline. Cancellation was requested; remote side effects are unverified.`, verification: 'unverified', error: {category: 'timeout', message: 'MCP call timed out; verify remote state before retrying', retryable: false}};
+              }
+              throw error;
+            } finally { clearTimeout(timer); }
           },
         });
       }
@@ -513,11 +634,10 @@ export async function connectMcpServers(options: {
       console.error(`[mcp] ${serverName} unavailable: ${message}`);
       // A server that timed out has a child process sitting there; the transport
       // owns it, so closing the transport is what actually kills it.
-      try {
-        await connected?.transport.close();
-      } catch {
-        /* it may already be gone */
-      }
+      const failed = [...owned].filter(item => item.name === serverName);
+      for (const item of failed) owned.delete(item);
+      if (connected && !failed.some(item => item.client === connected!.client)) failed.push({name: serverName, ...connected});
+      await Promise.all(failed.map(closeClient));
     }
   }
 
@@ -526,14 +646,9 @@ export async function connectMcpServers(options: {
 
 /** Explicit process shutdown only. A brain must call its own connection.close(). */
 export async function closeMcpServers(): Promise<void> {
-  const all = [...connections];
-  connections.clear();
-  await Promise.all(all.flatMap(owned => {
-    const items = [...owned]; owned.clear();
-    return items.map(closeClient);
-  }));
+  await Promise.all([...connections.values()].map(close => close()));
 }
 
 export function openMcpServerCount(): number {
-  return [...connections].reduce((sum, owned) => sum + owned.size, 0);
+  return [...connections.keys()].reduce((sum, owned) => sum + owned.size, 0);
 }

@@ -1,3 +1,6 @@
+import { codingToolNames } from '../coding/tool-selection.js';
+import { intelligenceToolNames } from './intelligence-routing.js';
+import { creatorProjectToolNames } from '../creator-projects.js';
 import { TOOLS } from "../tools/registry.js";
 import { embedder } from "../cognition/embeddings.js";
 import { cosine } from "../cognition/episodic.js";
@@ -25,9 +28,26 @@ import { getAppPath } from "../utils/appPath.js";
 /** Never pruned: safety, memory and control-flow tools the model must always be able to reach. */
 /** Shared with the Claude brain, which keeps these loaded rather than deferred. */
 export const ROUTER_ALWAYS_INCLUDE = new Set([
+  // Keep creator follow-ups reachable even when they only say "tell me about it".
+  "read_creator_project", "show_creator_project",
   "confirm_action", "undo_last", "list_undo", "remember", "recall", "forget",
-  "stop_learning_here", "memory_status", "inspect_memory", "inspect_task",
+  "stop_learning_here", "memory_status", "inspect_memory", "inspect_task", "conversation_history",
   "verify_task", "tool_memory", "run_skill", "list_skills", "learn_workflow",
+  "discover_tools", "read_tool_result", "refresh_observations", "update_task_plan",
+  'run_supervised_task','inspect_supervised_task','read_supervised_evidence','submit_task_review','cancel_supervised_task','show_task_report','read_browser_page',
+  // The free way to look something up, and the fallback for every paid one.
+  //
+  // Measured on four plainly research-shaped asks, `web_search` survived
+  // top-K on ONE of them — "look up the best way to do echo cancellation on
+  // macOS" offered no web tool at all. That was survivable while nothing else
+  // searched the web. It stopped being survivable once Perplexity arrived:
+  // MCP tools are never pruned, so PERPLEXITYAI_SEARCH is offered every turn
+  // and spends real credit, and on the turn it finally answers "out of
+  // credit" there was nothing left in the tool set to fall back to. This runs
+  // against the user's own SearXNG, so it costs nothing and cannot run out.
+  "web_search",
+  // Read-only intelligence stays available for indirect and multilingual asks.
+  "open_intel", "osiris_intel", "open_project", "inspect_project", "inspect_coding_tools", "invoke_coding_tool",
 ]);
 
 /** The text of a tool worth matching against — name and description carry the intent, arguments do not. */
@@ -81,7 +101,10 @@ export async function selectToolNames(
     scored.sort((a, b) => b.score - a.score);
     const picked = scored.slice(0, topK).map((s) => s.name);
 
-    const keep = new Set([...always.map((t) => t.name), ...picked]);
+    const relevant = new Set([...intelligenceToolNames(userText), ...codingToolNames(userText), ...creatorProjectToolNames(userText)]);
+    const forced = pool.filter(t => relevant.has(t.name)).map(t => t.name);
+    if (/\b(?:save|export|training)\b.*\b(?:dataset|data)\b|\bdataset\b.*\b(?:save|export)\b/i.test(userText) && pool.some(t => t.name === 'export_training_data')) forced.push('export_training_data');
+    const keep = new Set([...always.map((t) => t.name), ...forced, ...picked]);
     // A sanity floor: if pruning somehow produced far fewer usable tools than
     // asked for (every embedding failed midway, say), it is not to be trusted.
     if (picked.length < Math.min(topK, rest.length) * 0.5) return null;

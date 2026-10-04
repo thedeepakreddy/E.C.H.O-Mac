@@ -12,8 +12,10 @@ import { AGENT_TOOLS } from "./registry/agents.js";
 import { SKILL_TOOLS } from "./registry/skills.js";
 import { REMOTE_TOOLS } from "./registry/remote.js";
 import { KNOWLEDGE_TOOLS } from "./registry/knowledge.js";
+import { CODING_TOOLS } from "./registry/coding.js";
 import { SYSTEM_TOOLS } from "./registry/system.js";
 import { AMBIENT_TOOLS } from "./registry/ambient.js";
+import { SUPERVISED_TOOLS } from './registry/supervised.js';
 
 /** Neutral result a tool handler returns; each brain adapts it to its own wire shape. */
 export interface ToolOutput extends ToolResultMetadata {
@@ -26,6 +28,8 @@ export interface ToolDef {
   description: string;
   /** Zod raw shape (map of field -> validator). Empty object for no-arg tools. */
   schema: Record<string, ZodTypeAny>;
+  /** External tools retain their authoritative JSON Schema validator. */
+  validateInput?: (args: unknown) => string | null;
   readOnly: boolean;
   handler: (args: any) => Promise<ToolOutput>;
 }
@@ -39,7 +43,9 @@ export const TOOLS: ToolDef[] = [
   ...REMOTE_TOOLS,
   ...KNOWLEDGE_TOOLS,
   ...SYSTEM_TOOLS,
+  ...CODING_TOOLS,
   ...AMBIENT_TOOLS,
+  ...SUPERVISED_TOOLS,
 ];
 
 /**
@@ -56,3 +62,4 @@ export const TOOLS: ToolDef[] = [
  * this line fails a test instead of going quiet.
  */
 export const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
+if (TOOL_MAP.size !== TOOLS.length) throw new Error('Duplicate tool names in the Echo registry');

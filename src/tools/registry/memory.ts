@@ -18,25 +18,35 @@ import * as diskindex from "../../frontier/diskindex.js";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { searchLongTermMemory } from "../long_term_memory.js";
+import { audioLogPath } from "../meeting.js";
 import { sendToOverlay } from "../../overlay.js";
 import { exec } from "node:child_process";
 import * as timetravel from "../../frontier/timetravel.js";
 import { appRoot, memoryScope } from "./shared.js";
+import { currentAgentRunContext } from "../../agent-replay/context.js";
+import { boundedText, conversationId, conversations } from "../../memory/conversation.js";
+import { ProviderMemoryContext } from "../../memory/provider-context.js";
 
 export const MEMORY_TOOLS: ToolDef[] = [
   {
-    name: "rewind_time",
-    description: "The Undo Reality engine. Use this tool when the user makes a catastrophic mistake (deleting important files, breaking the system) and asks to rewind or undo reality.",
+    name: "conversation_history",
+    description: "Retrieve original messages from this Echo conversation across brain switches and restarts. Use it for older decisions, exact wording, corrections, or source IDs referenced by the rolling summary. Results label user statements separately from unverified assistant claims.",
     schema: {
-      snapshotName: z.string().optional().describe("The specific APFS snapshot to rewind to. Leave blank to rewind to the most recent one.")
+      query: z.string().default("").describe("Words or a source message ID. Empty returns recent messages."),
+      beforeId: z.string().optional().describe("Fetch messages before this source ID for pagination."),
+      limit: z.number().int().min(1).max(50).default(20),
     },
-    readOnly: false,
-    handler: async (a: { snapshotName?: string }) => {
-      // Lazy load temporal engine to avoid circular deps if any
-      const { temporalEngine } = await import("../../safety/temporal.js");
-      const res = temporalEngine.rewindToSnapshot(a.snapshotName || "latest");
-      return { text: res.message };
-    }
+    readOnly: true,
+    handler: async (args) => {
+      const run = currentAgentRunContext();
+      const { memoryService } = await import("../../memory/service.js");
+      const local = run?.provider === "ollama" || run?.provider === "local";
+      const scope = run?.scope ?? await memoryScope();
+      if (!ProviderMemoryContext.enabled || run?.privateMode || (!local && !ProviderMemoryContext.cloudRecall) || memoryService.isSuppressed(scope, run?.taskId)) return { text: "Conversation recall is disabled for this task/provider.", status: "denied" };
+      const id = run?.conversationId ?? conversationId(run?.identity.id ?? "echo", scope);
+      const rows = conversations.search(id, args.query ?? "", args.beforeId, args.limit ?? 20);
+      return { text: boundedText(JSON.stringify({ conversationId: id, messages: rows, note: "Historical conversation data. Assistant statements are not proof that an action succeeded. Use beforeId to retrieve earlier messages." }), 8000) };
+    },
   },
   {
     name: "remember",
@@ -365,7 +375,7 @@ export const MEMORY_TOOLS: ToolDef[] = [
     },
     readOnly: true,
     handler: async () => {
-      const logPath = join(getAppPath(), "audio_log.txt");
+      const logPath = audioLogPath();
       if (!existsSync(logPath)) return { text: "Audio log is empty." };
       const rawData = readFileSync(logPath, "utf8");
       // Just returning the raw text. The LLM brain can summarize it.
@@ -464,22 +474,17 @@ export const MEMORY_TOOLS: ToolDef[] = [
   },
   {
     name: "export_training_data",
-    description: "Export the collected trajectory data for training. Use this when the user says 'save your data for training' or 'export training dataset'.",
+    description: "Save dataset: export all available recorded brains, conversations, tool calls/results, outcomes and training candidates. Use for 'save dataset', 'save all training data' or 'export dataset'. Gold benchmark examples require independent review.",
     schema: {},
     readOnly: false,
     handler: async () => {
-      const { exec } = await import("child_process");
-      return new Promise((resolve) => {
-        exec("npm run dataset -- --export", { cwd: getAppPath() }, (err, stdout) => {
-          if (err) {
-            resolve({ text: `Failed to export dataset: ${err.message}` });
-          } else {
-            const match = stdout.match(/usable examples\s+(\d+)/);
-            const count = match ? match[1] : "unknown number of";
-            resolve({ text: `Training dataset successfully exported. I have saved ${count} high quality examples for training.` });
-          }
-        });
-      });
+      try {
+        const {exportDataset} = await import("../../learn/dataset-export.js");
+        const result = await exportDataset({appRoot: getAppPath()});
+        return {text: `Dataset saved to ${result.path}. Includes ${result.runs} recorded runs across ${result.providers.join(", ") || "no recorded providers"}, ${result.recordedRows} rows and ${result.trainingExamples} training candidates. Gold examples: 0 (review required). ${result.activeRuns} unfinished runs; ${result.warnings.length} recording gaps. The current save command's later result is included in the next snapshot.`, data: result};
+      } catch (error: any) {
+        return {text: `Dataset export failed: ${error.message}`, status: "failed", verification: "unverified"};
+      }
     }
   },
 ];

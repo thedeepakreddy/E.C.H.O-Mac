@@ -24,6 +24,11 @@ export function speak(text: string): void {
   if (active && text) active.say(text);
 }
 
+/** The app's voice, for a background feature that takes a Tts; null before startup. */
+export function activeTts(): Tts | null {
+  return active;
+}
+
 /** For tests: whether a voice is wired up. */
 export function hasActiveTts(): boolean {
   return active !== null;

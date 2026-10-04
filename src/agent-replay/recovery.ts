@@ -7,6 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { ReplayEvent } from "./recorder.js";
@@ -133,8 +134,17 @@ export function pendingRecoveryCheckpoints(root: string): RecoveryCheckpoint[] {
       newest.set(checkpoint.taskId, checkpoint);
     }
   }
+  // A newer main command supersedes an older one even when the old journal
+  // still contains a pending retry. Keep it for inspection, never wake it.
+  const latestMain = new Map<string, RecoveryCheckpoint>();
+  for (const item of newest.values()) if (item.actor.kind === 'main') {
+    const previous = latestMain.get(item.actor.id);
+    if (!previous || item.createdAt > previous.createdAt || (item.createdAt === previous.createdAt && item.updatedAt > previous.updatedAt)) latestMain.set(item.actor.id, item);
+  }
   return [...newest.values()]
-    .filter((item) => item.restartable !== false && Boolean(item.originalPrompt) &&
+    .filter((item) => !item.privateMode && item.recoveryAttempts < item.maxRecoveryAttempts &&
+      (item.actor.kind !== 'main' || latestMain.get(item.actor.id)?.taskId === item.taskId) &&
+      item.restartable !== false && Boolean(item.originalPrompt) &&
       (item.status === "running" || item.status === "pending"))
     .sort((a, b) => a.updatedAt - b.updatedAt);
 }
@@ -229,4 +239,61 @@ export function nextCloneNumber(root: string): number {
     if (match) highest = Math.max(highest, Number(match[1]));
   }
   return highest + 1;
+}
+
+/**
+ * Delete old run logs.
+ *
+ * Every run keeps its full prompt, tool arguments and results — useful for a
+ * week, and nothing Echo ever cleaned up: one machine had 466 runs and 447 MB.
+ * A run is removed once it is older than `keepDays` OR beyond the newest
+ * `keepRuns`, unless its checkpoint says it may still be resumed, or it was
+ * touched in the last hour (it may be the run in progress).
+ *
+ * `ECHO_LOG_KEEP_DAYS` / `ECHO_LOG_KEEP_RUNS` override the limits; 0 keeps all.
+ */
+export async function pruneRunLogs(
+  root: string,
+  opts: { keepDays?: number; keepRuns?: number; now?: number; beforeRemove?: (runDir: string) => Promise<void> } = {}
+): Promise<number> {
+  const envNum = (name: string) => {
+    const raw = process.env[name]?.trim();
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+  };
+  const keepDays = opts.keepDays ?? envNum("ECHO_LOG_KEEP_DAYS") ?? 14;
+  const keepRuns = opts.keepRuns ?? envNum("ECHO_LOG_KEEP_RUNS") ?? 200;
+  const now = opts.now ?? Date.now();
+  if (!existsSync(root) || (keepDays === 0 && keepRuns === 0)) return 0;
+
+  const runs: Array<{ dir: string; mtime: number }> = [];
+  for (const entry of readdirSync(root)) {
+    const dir = join(root, entry);
+    try {
+      const info = statSync(dir);
+      if (info.isDirectory()) runs.push({ dir, mtime: info.mtimeMs });
+    } catch {
+      /* vanished while listing */
+    }
+  }
+  runs.sort((a, b) => b.mtime - a.mtime);
+
+  let removed = 0;
+  for (const [index, run] of runs.entries()) {
+    const age = now - run.mtime;
+    if (age < 3_600_000) continue;
+    const tooOld = keepDays > 0 && age > keepDays * 86_400_000;
+    const tooMany = keepRuns > 0 && index >= keepRuns;
+    if (!tooOld && !tooMany) continue;
+    const status = readRecoveryCheckpoint(run.dir)?.status;
+    if (status === "running" || status === "pending") continue;
+    try {
+      await opts.beforeRemove?.(run.dir);
+      await rm(run.dir, { recursive: true, force: true });
+      removed++;
+    } catch (err) {
+      console.error(`[echo:log] could not remove ${run.dir}:`, (err as any)?.message ?? err);
+    }
+  }
+  return removed;
 }

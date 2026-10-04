@@ -15,6 +15,7 @@ import { join } from "node:path";
  */
 export type ExitReason =
   | "completed"
+  | "no_progress"
   | "max_iterations"
   | "model_stop_no_tool_call"
   | "abort_signal"
@@ -31,6 +32,7 @@ export type ExitReason =
 
 /** Exit reasons that mean the task did NOT finish, whatever the model said. */
 export const INCOMPLETE_EXITS: ReadonlySet<string> = new Set([
+  "no_progress",
   "max_iterations",
   "model_stop_no_tool_call",
   "abort_signal",

@@ -24,7 +24,7 @@
 import { statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { VoiceListener, SAMPLE_RATE, FRAME_LENGTH, type FrameSource, type CaptureMeta } from "./voice/listener.js";
-import { stripEchoWords, classifyInterjection, isStopIntent } from "./voice/interjection.js";
+import { stripEchoWords, classifyInterjection, isEchoItself, isStopIntent } from "./voice/interjection.js";
 import { DEFAULTS_FOR_TESTS } from "./config.js";
 
 let pass = 0, fail = 0;
@@ -308,6 +308,65 @@ console.log("\n  nothing is captured while Echo speaks unless it was asked for")
   await t.listener.stop();
 }
 
+// ── the self-conversation, from a real recorded session ──────────────────
+//
+// 2026-09-30, runs/voice/2026-09-30T20-04-10. Eight turns; SIX of them were
+// Echo answering its own voice. What it said, then what it dispatched as a
+// command a few seconds later:
+//
+//   said  "Found over 23,000 US cameras — first one"
+//   acted "Found over 23,000 US cameras. First one's a traffic cam on I-69…"
+//
+// Two separate faults, both mine:
+//
+//  1. `spokenThisReply` was cleared at the start of every turn, on the belief
+//     that "a new answer means the old one can no longer be in the room".
+//     The SOUND outlives the turn. By the time the microphone's copy of reply
+//     A was transcribed, the record of A had been wiped — so there was
+//     nothing to subtract, and answering it started another turn, which wiped
+//     it again. Self-reinforcing.
+//  2. Whisper does not transcribe Echo verbatim ("First one's" for "first one
+//     is"), so the exact three-word runs `stripEchoWords` needs keep breaking
+//     and fragments survive.
+console.log("\n  Echo's own voice, from the session where it answered itself");
+{
+  // Verbatim from the log: what Echo spoke, and what the mic then heard.
+  const pairs: Array<[string, string]> = [
+    ["Found over 23,000 US cameras — first one is a traffic cam on I-69 in Indiana. Want me to open it?",
+     "Found over 23,000 US cameras. First one's a traffic cam on I-69 in Indiana. Want me to o"],
+    ["The grid's up but centered on Hungary, not the US.",
+     "The grid's up, but centered on Hungary, not the US."],
+    ["The map's stuck on Hungary and won't navigate to the US, no matter what I click.",
+     "The map's stuck on Hungary and won't navigate to the US, no matter what I click."],
+    ["Let me point it at the US and pull up that Indiana camera marker.",
+     "Let me point it at the US and pull up that Indiana camera marker."],
+  ];
+  for (const [spoke, heardBack] of pairs) {
+    ok(isEchoItself(heardBack, spoke),
+      `recognised as its own voice: "${heardBack.slice(0, 44)}…"`,
+      "this exact line was dispatched to the brain as a user command");
+  }
+
+  // The reply is still recognisable AFTER the next turn has begun — which is
+  // the whole point, and exactly what clearing the window destroyed.
+  const twoRepliesAgo = "Opening the Osiris grid with camera markers. " + pairs[1][0];
+  ok(isEchoItself(pairs[1][1], twoRepliesAgo),
+    "and still recognised once a later reply has been spoken over it");
+}
+
+console.log("\n  but a real interruption is still heard");
+{
+  // The cost of getting this wrong in the other direction is Echo ignoring
+  // the user mid-reply, which is the bug this whole path exists to fix.
+  const reply = "Found over 23,000 US cameras — first one is a traffic cam on I-69 in Indiana. Want me to open it?";
+  for (const real of ["no the other one", "stop", "open the second one instead",
+                      "actually show me Tokyo", "what about Japan"]) {
+    ok(!isEchoItself(real, reply), `"${real}" is the user`, "a real interruption must not be swallowed");
+  }
+  // A short echo of one word is left to the strip rule rather than guessed at.
+  ok(!isEchoItself("yes", reply), "and a one-word answer is not judged by overlap");
+}
+
 // ── the wiring in main.ts ─────────────────────────────────────────────────
 
 console.log("\n  and main.ts actually does this with it");
@@ -334,6 +393,15 @@ console.log("\n  and main.ts actually does this with it");
   // One stop vocabulary, not two.
   ok(!/function isStopIntent/.test(main) && /isStopIntent/.test(main),
      "main.ts uses the shared stop rule rather than keeping its own copy");
+
+  // The reset that caused the self-conversation. The window has to outlive
+  // the turn, because the SOUND does.
+  // The declaration `let spokenThisReply = ""` is fine; a RE-assignment is the
+  // bug. Anchored so the two are not confused, which they were on first write.
+  ok(!/^\s+spokenThisReply = "";/m.test(main),
+     "the record of what Echo just said is not wiped when a new turn starts",
+     "clearing it mid-session is what let Echo answer its own previous reply");
+  ok(/isEchoItself\(/.test(main), "and the whole-capture self-audio check is actually consulted");
 }
 
 console.log(`\n${pass}/${pass + fail} interjection cases passed`);

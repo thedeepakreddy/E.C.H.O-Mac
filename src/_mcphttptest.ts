@@ -20,6 +20,18 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { loadMcpConfig, isHttpSpec, connectMcpServers, type McpServerSpec } from "./brain/mcp.js";
+
+/** Enable only the explicitly generated fixture config, never the user's MCP. */
+function readFixtureConfig(path: string) {
+  const previous = process.env.ECHO_MCP;
+  delete process.env.ECHO_MCP;
+  try {return loadMcpConfig(path);}
+  finally {
+    if (previous === undefined) delete process.env.ECHO_MCP;
+    else process.env.ECHO_MCP = previous;
+  }
+}
+
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,7 +97,7 @@ const writeConfig = (servers: Record<string, unknown>): string => {
 console.log("  mcp.json can describe a hosted server");
 {
   process.env.ECHO_TEST_MCP_KEY = "secret-value";
-  const cfg = loadMcpConfig(
+  const cfg = readFixtureConfig(
     writeConfig({
       hosted: { type: "http", url: "https://example.com/mcp", headers: { "x-api-key": "${ECHO_TEST_MCP_KEY}" } },
       local: { command: "/bin/echo", args: ["hi"], env: { K: "v" } },
@@ -108,7 +120,7 @@ console.log("  mcp.json can describe a hosted server");
 
 console.log("\n  a malformed hosted entry is dropped, not fatal");
 {
-  const cfg = loadMcpConfig(
+  const cfg = readFixtureConfig(
     writeConfig({
       nourl: { type: "http" },
       notaurl: { type: "http", url: "not-a-url" },
@@ -123,7 +135,7 @@ console.log("\n  a malformed hosted entry is dropped, not fatal");
 console.log("\n  an unset variable expands to empty, not to the placeholder");
 {
   delete process.env.ECHO_TEST_MISSING_KEY;
-  const cfg = loadMcpConfig(
+  const cfg = readFixtureConfig(
     writeConfig({ h: { type: "http", url: "https://example.com/mcp", headers: { auth: "${ECHO_TEST_MISSING_KEY}" } } })
   );
   const h = cfg.h;

@@ -1,0 +1,2 @@
+import {detectRecipe} from './recipes.js';import {startProcess} from './processes.js';
+export async function startProjectApplication(id:string,revision:number){const recipe=await detectRecipe(id);if(recipe.missing.length)throw new Error(`Missing tools: ${recipe.missing.join(', ')}`);const command=recipe.commands.start;if(!command)throw new Error('No desktop/application start command is configured. Inspect the recipe and choose a supported entrypoint.');return startProcess(id,revision,{...command,timeoutMs:0});}

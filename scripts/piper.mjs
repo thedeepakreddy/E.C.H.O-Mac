@@ -23,7 +23,8 @@ const VOICES = join(DIR, "voices");
 const PY = join(DIR, ".venv", "bin", "python");
 const UV = existsSync(join(homedir(), ".local", "bin", "uv")) ? join(homedir(), ".local", "bin", "uv") : "uv";
 
-function run(cmd, args, env = process.env) {
+// Piper's Python runs on onnxruntime, whose telemetry thread can abort() it.
+function run(cmd, args, env = { ...process.env, ORT_DISABLE_TELEMETRY: process.env.ORT_DISABLE_TELEMETRY ?? "1" }) {
   console.log(`\n$ ${cmd} ${args.join(" ")}`);
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: DIR, env, stdio: "inherit" });

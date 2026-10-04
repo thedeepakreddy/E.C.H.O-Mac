@@ -15,13 +15,16 @@ export const brainProjectHint: { value?: string } = {};
 export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDeps["makeBrain"] {
   return (identity, task) => {
     const member = task?.profile ? getFleetMember(task.profile) : null;
+    if (task?.profile && !member) throw new Error(`Unknown agent profile "${task.profile}". Select an existing fleet member.`);
     const provider = member ? TIER_PROVIDER[member.tier] : null;
     const allowed = member ? allowedToolsFor(member) : null;
     const clone = create(provider ? { ...cfg, brain: provider } : cfg, {
       identity,
       maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
-      limits: { maxIterations: task?.budget.maxIterations, allowedTools: allowed ?? undefined },
-    }).brain as any;
+      // Result submission is an actor-owned lifecycle operation, not a user
+      // resource grant. Without it a read-only agent can never finish a mission.
+      limits: { maxIterations: task?.budget.maxIterations, allowedTools: allowed === null ? undefined : new Set([...allowed, 'submit_agent_result']) },
+    }).brain;
     clone.projectHint = brainProjectHint.value;
     return clone;
   };

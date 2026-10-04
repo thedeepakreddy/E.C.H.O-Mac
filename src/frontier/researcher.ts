@@ -1,4 +1,5 @@
-import { loadConfig } from "../config.js";
+import { activeConfig } from "../config.js";
+import { getAppPath } from "../utils/appPath.js";
 import { createBrain, Brain } from "../brain/index.js";
 import { presenceMonitor } from "./presence.js";
 import {
@@ -104,7 +105,10 @@ async function startOne() {
   }, MAX_QUESTION_MS);
 
   try {
-    const cfg = loadConfig(process.cwd());
+    // The live config. Re-reading it from the working directory loaded the
+    // defaults in an installed app (whose working directory is "/"), so this
+    // ran on a brain and model the user had not chosen.
+    const cfg = activeConfig(getAppPath());
     activeBrain = createBrain(cfg, {
       identity: { id: "echo-research", name: "Echo Research", kind: "research" },
       autoResume: false,

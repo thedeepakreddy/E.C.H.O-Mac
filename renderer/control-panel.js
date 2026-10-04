@@ -5,6 +5,7 @@ let feedbackTimer = null;
 let activeView = "overview";
 let selectedMissionId = "";
 let settingsDirty = false;
+let modelSwitchPending = false;
 let lastLevelPaintAt = 0;
 const renderKeys = Object.create(null);
 const expandedMissionTasks = new Set();
@@ -94,6 +95,9 @@ function setView(name) {
   });
   document.querySelectorAll(".section-nav [data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
   syncNeuralCard();
+  // Apply the newest snapshot when a page becomes visible. Hidden pages do
+  // not rebuild controls or lists on every background runtime update.
+  if (snapshot) render(snapshot);
 }
 
 function stableKey(value) {
@@ -131,7 +135,7 @@ function renderChanged(name, value, callback) {
  * Live synaptic field card (under Live Activity)
  *
  * The same engine the Neural Map window uses, built from a 0.6-scale copy of
- * the micrograph and capped at 30fps: ~0.4ms of work per frame, ~2MB resident.
+ * the micrograph and capped at 20fps. Painting yields room to controls.
  * It is built during idle time so opening the panel never waits on it, and it
  * is stopped whenever it cannot be seen — another view, a hidden window — so a
  * panel left open in the background costs nothing.
@@ -140,7 +144,7 @@ let neuralCard = null;
 let neuralCardStatus = "idle";
 
 function neuralCardVisible() {
-  return activeView === "overview" && !document.hidden;
+  return activeView === "overview" && !document.hidden && document.hasFocus();
 }
 
 function syncNeuralCard() {
@@ -160,7 +164,7 @@ function buildNeuralCard() {
       buildScale: 0.6,      // quality holds: same fibre lengths, a third of the cost
       fxScale: 0.6,
       impulseCap: 120,
-      fps: 30,
+      fps: 20,
       interactive: false,
       zoom: 1.4,            // crop into the tissue so detail still reads at card size
       chunked: true,        // build in slices — never block a panel frame
@@ -184,21 +188,19 @@ function setNeuralCardState(status) {
 }
 
 document.addEventListener("visibilitychange", syncNeuralCard);
+window.addEventListener("focus", syncNeuralCard);
+window.addEventListener("blur", syncNeuralCard);
 
 function setRenderMode(status) {
   const active = !["idle", "asleep", "error"].includes(String(status || "idle"));
-  document.body.dataset.renderMode = active ? "active" : "idle";
+  const mode = active ? "active" : "idle";
+  if (document.body.dataset.renderMode !== mode) document.body.dataset.renderMode = mode;
 }
 
 function render(next) {
   if (!next || typeof next !== "object") return;
   snapshot = next;
-  const status = String(next.state?.status || "idle").toLowerCase();
-  document.body.dataset.status = status;
-  setRenderMode(status);
-  setNeuralCardState(status);
-  byId("system-state").textContent = status.toUpperCase();
-  byId("core-status").textContent = status.toUpperCase();
+  renderState(next.state);
 
   const analytics = next.analytics || {};
   byId("metric-commands").textContent = valueText(analytics.commands, "0");
@@ -209,7 +211,7 @@ function render(next) {
   byId("voice-state").textContent = `VOICE ${next.voiceEnabled ? "ON" : "MUTED"}`;
   byId("voice-toggle").classList.toggle("enabled", Boolean(next.voiceEnabled));
 
-  renderIntel(next.intel);
+  if (activeView === "overview") renderIntel(next.intel);
   const logs = Array.isArray(next.logs) ? next.logs : [];
   const agents = Array.isArray(next.agents) ? next.agents : [];
   const missions = Array.isArray(next.missions) ? next.missions : [];
@@ -229,22 +231,39 @@ function render(next) {
   // JSON.stringify-ing the whole array on every tick. That used to run at up
   // to ~16/sec while Echo was active and re-hash up to 240 log entries every
   // single time, whether or not anything had actually changed.
-  renderChanged("logs", next.logRevision ?? 0, () => renderLogs(logs));
+  if (activeView === "overview" || activeView === "models") {
+    renderChanged(`logs:${activeView}`, next.logRevision ?? 0, () => renderLogs(logs));
+  }
   // missions/agents don't carry a revision counter (they're owned by the swarm
   // module, not this telemetry object), and their objects can be large —
   // nested tasks with full Results, artifacts, etc. A fingerprint of just the
   // fields that actually change is enough to detect an update without hashing
   // all of that.
-  const agentsKey = agentsFingerprint(agents);
-  renderChanged("missions", `${missionsFingerprint(missions)}|${agentsKey}`, () => renderMissions(missions, agents));
-  renderChanged("agents", agentsKey, () => renderAgents(agents));
-  renderChanged("board", `${missionsFingerprint(missions)}|${fleetRevision}`, () => renderBoard(missions));
-  renderChanged("models", models, () => renderModels(models));
-  renderChanged("connections", connections, () => renderConnections(connections));
+  if (activeView === "overview" || activeView === "tasks") {
+    const agentsKey = agentsFingerprint(agents);
+    renderChanged("missions", `${missionsFingerprint(missions)}|${agentsKey}`, () => renderMissions(missions, agents));
+    renderChanged("agents", agentsKey, () => renderAgents(agents));
+  }
+  if (activeView === "tasks") renderChanged("board", `${missionsFingerprint(missions)}|${fleetRevision}`, () => renderBoard(missions));
+  if (activeView === "models") {
+    renderChanged("models", models, () => renderModels(models));
+    renderChanged("connections", connections, () => renderConnections(connections));
+  }
+  renderChanged("connection-summary", connections.map(c => [c.name, c.status]), () => renderConnectionSummary(connections));
   // Do not consume the new key while the user is editing. Otherwise a runtime
   // update can cache the saved value without applying it, and the explicit
   // post-save render then appears unchanged.
-  if (!settingsDirty) renderChanged("settings", next.settings || null, () => renderSettings(next.settings || null));
+  if (activeView === "settings" && !settingsDirty) renderChanged("settings", next.settings || null, () => renderSettings(next.settings || null));
+}
+
+function renderState(state) {
+  const status = String(state?.status || "idle").toLowerCase();
+  setRenderMode(status);
+  if (document.body.dataset.status === status) return;
+  document.body.dataset.status = status;
+  setNeuralCardState(status);
+  byId("system-state").textContent = status.toUpperCase();
+  byId("core-status").textContent = status.toUpperCase();
 }
 
 function setControlValue(id, value) {
@@ -268,6 +287,8 @@ function renderSettings(settings, force = false) {
   setControlValue("settings-stt-provider", settings.voice?.sttProvider);
   setControlValue("settings-stt-language", settings.voice?.sttLanguage);
   setControlValue("settings-tts-engine", settings.voice?.ttsEngine);
+  setControlValue("settings-vibevoice-url", settings.voice?.vibeVoiceUrl || "");
+  setControlValue("settings-vibevoice-speaker", settings.voice?.vibeVoiceSpeaker || "Carter");
   setControlValue("settings-max-spoken", settings.voice?.maxSpokenSentences);
   setControlValue("settings-conversation-window", Math.round(Number(settings.voice?.conversationWindowMs || 12000) / 1000));
   setControlValue("settings-memory-enabled", settings.memory?.enabled);
@@ -308,6 +329,8 @@ function settingsPayload() {
       sttProvider: byId("settings-stt-provider").value,
       sttLanguage: byId("settings-stt-language").value.trim(),
       ttsEngine: byId("settings-tts-engine").value,
+      vibeVoiceUrl: byId("settings-vibevoice-url").value.trim(),
+      vibeVoiceSpeaker: byId("settings-vibevoice-speaker").value.trim(),
       maxSpokenSentences: numericValue("settings-max-spoken"),
       conversationWindowMs: numericValue("settings-conversation-window") * 1000,
     },
@@ -348,8 +371,7 @@ function activityMarkup(logs) {
 
 function renderLogs(logs) {
   const markup = activityMarkup(logs);
-  byId("live-log").innerHTML = markup;
-  byId("routing-log").innerHTML = markup;
+  byId(activeView === "models" ? "routing-log" : "live-log").innerHTML = markup;
 }
 
 function resultItems(items, emptyText, className = "") {
@@ -530,12 +552,87 @@ function renderAgents(agents) {
   byId("agent-summary").innerHTML = agents.length ? agents.slice(0, 2).map((agent) => `<span class="summary-row"><i class="active"></i><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.status)}</small></span>`).join("") : '<span class="summary-empty">No background agents</span>';
 }
 
+/**
+ * The ChatGPT card's account row: sign in to run the OpenAI brain on the
+ * user's own ChatGPT plan instead of an API key, or sign out of it.
+ */
+function chatgptAccountMarkup(account) {
+  if (!account) return "";
+  const session = account.chatgpt || {};
+  let status;
+  let button;
+  if (session.status === "connecting") {
+    status = "Finish signing in in your browser…";
+    button = '<button type="button" class="account-button" data-chatgpt="cancel">Cancel</button>';
+  } else if (session.status === "connected" && session.planUsage) {
+    status = `Using your ChatGPT plan${session.email ? ` · ${escapeHtml(session.email)}` : ""}`;
+    button = '<button type="button" class="account-button" data-chatgpt="sign-out">Sign out</button>';
+  } else {
+    status = session.error
+      ? escapeHtml(session.error)
+      : account.billing === "apiKey" ? "Using your API key · or use your ChatGPT plan instead" : "Use your ChatGPT plan — no API key needed";
+    button = '<button type="button" class="account-button primary" data-chatgpt="sign-in">Sign in with ChatGPT</button>';
+  }
+  return `<div class="model-account"><span>${status}</span>${button}</div>`;
+}
+
+/**
+ * The OpenRouter card: sign in with the browser, and pick a model.
+ *
+ * The list is whatever the main process last read from OpenRouter — free and
+ * able to call tools, which is the only kind worth offering a brain that has
+ * to press buttons. It is fetched rather than hardcoded because these tiers
+ * are retired without notice.
+ */
+function openRouterMarkup(catalogue, activeModel) {
+  if (!catalogue) return "";
+  const rows = [];
+  rows.push(catalogue.signedIn
+    ? '<div class="model-account"><span>Signed in</span><button type="button" class="account-button" data-openrouter="sign-out">Forget key</button></div>'
+    : '<div class="model-account"><span>Free models, no API key needed</span><button type="button" class="account-button primary" data-openrouter="sign-in">Sign in with OpenRouter</button></div>');
+
+  if (catalogue.note) {
+    rows.push(`<p class="model-note">${escapeHtml(catalogue.note)}</p>`);
+  } else if (catalogue.models && catalogue.models.length) {
+    const options = catalogue.models.map((m) => {
+      const ctx = m.contextLength ? `${Math.round(m.contextLength / 1000)}k` : "";
+      const label = `${m.label}${ctx ? ` · ${ctx}` : ""}`;
+      return `<option value="${escapeHtml(m.id)}"${m.id === activeModel ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    }).join("");
+    rows.push(`<label class="model-picker"><span>${catalogue.models.length} free models that can call tools</span>` +
+      `<select data-openrouter-model>${options}</select></label>`);
+  }
+  return rows.join("");
+}
+
 function renderModels(models) {
-  byId("model-list").innerHTML = models.length ? models.map((model) => `<article class="model-card${model.active ? " active" : ""}">
+  const list = byId("model-list");
+  if (!models.length) { list.innerHTML = '<div class="empty-state large">No configured models reported.</div>'; return; }
+  list.querySelectorAll('.empty-state').forEach(el => el.remove());
+  const existing = new Map([...list.children].map(el => [el.dataset.modelId, el]));
+  models.forEach((model, index) => {
+    const key = stableKey(model);
+    let card = existing.get(model.id);
+    existing.delete(model.id);
+    if (!card || card.modelRenderKey !== key) {
+      const template = document.createElement("template");
+      template.innerHTML = `<article class="model-card${model.active ? " active" : ""}${model.account ? " has-account" : ""}">
     <span class="model-mark"><svg><use href="#icon-brain"></use></svg></span>
     <div class="model-copy"><header><strong>${escapeHtml(model.label)}</strong><span class="availability${model.available ? "" : " unavailable"}">${model.available ? "Available" : "Unavailable"}</span></header><p>${escapeHtml(model.model)}${model.reason ? ` · ${escapeHtml(model.reason)}` : ""}</p></div>
     <button type="button" data-provider="${escapeHtml(model.id)}" ${model.active || !model.available ? "disabled" : ""}>${model.active ? "In use" : "Use model"}</button>
-  </article>`).join("") : '<div class="empty-state large">No configured models reported.</div>';
+    ${chatgptAccountMarkup(model.account)}
+    ${openRouterMarkup(model.catalogue, model.model)}
+  </article>`;
+      const replacement = template.content.firstElementChild;
+      replacement.dataset.modelId = model.id;
+      replacement.modelRenderKey = key;
+      if (card) card.replaceWith(replacement);
+      card = replacement;
+    }
+    if (list.children[index] !== card) list.insertBefore(card, list.children[index] || null);
+  });
+  existing.forEach(card => card.remove());
+  if (modelSwitchPending) list.querySelectorAll('[data-provider]').forEach(button => { button.disabled = true; });
 }
 
 function connectionDescription(connection) {
@@ -546,11 +643,14 @@ function connectionDescription(connection) {
   return details.join(" · ");
 }
 
-function renderConnections(connections) {
+function renderConnectionSummary(connections) {
   const activeCount = connections.filter((connection) => connection.status === "active").length;
   byId("connection-summary-count").textContent = `${connections.length} configured`;
   byId("connection-health").textContent = activeCount ? `${activeCount} recently active` : `${connections.length} configured`;
   byId("connection-summary").innerHTML = connections.length ? connections.slice(0, 4).map((connection) => `<span class="connection-chip ${escapeHtml(connection.status)}"><i></i><span>${escapeHtml(connection.name)}</span></span>`).join("") : '<span class="summary-empty">No external connections</span>';
+}
+
+function renderConnections(connections) {
   byId("connection-list").innerHTML = connections.length ? connections.map((connection) => `<article class="connection-card"><header><strong>${escapeHtml(connection.name)}</strong><span class="connection-status ${escapeHtml(connection.status)}">${escapeHtml(connection.status)}</span></header><p>${escapeHtml(connectionDescription(connection))}</p></article>`).join("") : '<div class="empty-state">No external MCP servers configured.</div>';
   byId("route-connection-list").innerHTML = connections.length ? connections.map((connection) => `<div class="route-connection-row"><strong>${escapeHtml(connection.name)}</strong><span class="connection-status ${escapeHtml(connection.status)}">${escapeHtml(connection.status)}</span></div>`).join("") : '<div class="empty-state">No connections reported</div>';
 }
@@ -619,10 +719,51 @@ byId("refresh-connections").addEventListener("click", async () => {
   if (result.ok) bridge?.snapshot?.().then(render).catch(() => {});
 });
 byId("model-list").addEventListener("click", async (event) => {
+  const account = event.target.closest("[data-chatgpt]");
+  if (account) {
+    const which = account.dataset.chatgpt;
+    if (which === "sign-in") notify("Opening ChatGPT in your browser — sign in there and allow Echo to use your plan.");
+    account.disabled = which !== "cancel";
+    const type = which === "sign-in" ? "chatgpt-sign-in" : which === "sign-out" ? "chatgpt-sign-out" : "chatgpt-cancel-sign-in";
+    await act({ type });
+    bridge?.snapshot?.().then(render).catch(() => {});
+    return;
+  }
+  const openrouter = event.target.closest("[data-openrouter]");
+  if (openrouter) {
+    const which = openrouter.dataset.openrouter;
+    if (which === "sign-in") notify("Opening OpenRouter in your browser — sign in and approve to create a key.");
+    openrouter.disabled = true;
+    const result = await act({ type: which === "sign-in" ? "openrouter-sign-in" : "openrouter-sign-out" });
+    if (result && result.message) notify(result.message);
+    bridge?.snapshot?.().then(render).catch(() => {});
+    return;
+  }
   const button = event.target.closest("[data-provider]");
-  if (!button) return;
-  const result = await act({ type: "switch-model", provider: button.dataset.provider });
-  if (result.ok) bridge?.snapshot?.().then(render).catch(() => {});
+  if (!button || button.disabled || modelSwitchPending) return;
+  modelSwitchPending = true;
+  byId("model-list").querySelectorAll('[data-provider]').forEach(el => { el.disabled = true; });
+  button.textContent = "Switching…";
+  try {
+    await act({ type: "switch-model", provider: button.dataset.provider });
+    if (bridge?.snapshot) render(await bridge.snapshot());
+  } catch (error) {
+    notify(error?.message || String(error), true);
+  } finally {
+    modelSwitchPending = false;
+    delete renderKeys.models;
+    // A failed switch must restore the same card's controls too.
+    byId("model-list").querySelectorAll('.model-card').forEach(el => { el.modelRenderKey = null; });
+    if (snapshot) render(snapshot);
+  }
+});
+
+byId("model-list").addEventListener("change", async (event) => {
+  const picker = event.target.closest("[data-openrouter-model]");
+  if (!picker) return;
+  const result = await act({ type: "openrouter-set-model", name: picker.value });
+  if (result && result.message) notify(result.message);
+  bridge?.snapshot?.().then(render).catch(() => {});
 });
 
 byId("command-form").addEventListener("submit", async (event) => {
@@ -1164,7 +1305,10 @@ if (bridge) {
   bridge.snapshot().then(render).catch((error) => notify(error?.message || String(error), true));
   void loadFleet();
   bridge.onUpdate?.(render);
-  bridge.onState?.((state) => render({ ...(snapshot || {}), state: { ...(snapshot?.state || {}), ...state } }));
+  bridge.onState?.((state) => {
+    snapshot = { ...(snapshot || {}), state: { ...(snapshot?.state || {}), ...state } };
+    renderState(snapshot.state);
+  });
   bridge.onLevel?.((level) => {
     const now = performance.now();
     const wait = document.body.dataset.renderMode === "idle" ? 5000 : 80;

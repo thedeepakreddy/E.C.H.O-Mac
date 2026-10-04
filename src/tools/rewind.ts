@@ -4,9 +4,11 @@ import { ocr } from "./vision.js";
 import { append, prune, usage, migrateLegacy, loadRange, RETENTION_DAYS } from "../frontier/history.js";
 import { observeText } from "../frontier/struggle.js";
 import { scrubSecrets } from "../safety/redact.js";
+import { captureAllowed, deletionEpoch } from "../memory/capture-policy.js";
 
 let rewindInterval: NodeJS.Timeout | null = null;
 let pruneInterval: NodeJS.Timeout | null = null;
+let rewindGeneration = 0;
 
 /**
  * Discard text the recogniser was not sure about.
@@ -42,8 +44,15 @@ export function pruneHistory(now = Date.now()) {
   }
 }
 
-export function startRewind() {
+export function startRewind(options: {
+  intervalSeconds?: number;
+  canCapture?: () => boolean;
+  readScreen?: typeof ocr;
+} = {}) {
   if (rewindInterval) return;
+  const generation = ++rewindGeneration;
+  const seconds = options.intervalSeconds ?? 120;
+  const delay = Number.isFinite(seconds) ? Math.max(30, seconds) * 1000 : 120000;
 
   // Fold any pre-existing single-file history into per-day files before the
   // first capture, so nothing is appending to a file that is being split.
@@ -59,13 +68,13 @@ export function startRewind() {
   pruneHistory();
   pruneInterval = setInterval(() => pruneHistory(), PRUNE_EVERY_MS);
 
-  // Every 30s. Was 10s with fast OCR, which measured 0.51 confidence and stored
-  // mangled text ("Rewewing JafYiS Cctyae Updates") — the log filled with words
-  // that could never be searched. Accurate OCR costs ~1-3s, so the interval is
-  // longer to keep the duty cycle low.
-  rewindInterval = setInterval(async () => {
+  // Schedule after completion so slow OCR cannot spawn overlapping helpers.
+  const capture = async () => {
     try {
-      const result = await ocr("accurate");
+      if (generation !== rewindGeneration || !captureAllowed() || options.canCapture?.() === false) return;
+      const epoch = deletionEpoch();
+      const result = await (options.readScreen ?? ocr)("accurate");
+      if (generation !== rewindGeneration || !captureAllowed() || deletionEpoch() !== epoch || options.canCapture?.() === false) return;
       if (!result?.lines?.length) return;
 
       const raw = result.lines
@@ -93,12 +102,16 @@ export function startRewind() {
       }
     } catch (e) {
       console.error("[jarvis] Rewind capture failed:", e);
+    } finally {
+      if (generation === rewindGeneration) rewindInterval = setTimeout(capture, delay);
     }
-  }, 30000);
+  };
+  rewindInterval = setTimeout(capture, delay);
 }
 
 export function stopRewind() {
-  if (rewindInterval) clearInterval(rewindInterval);
+  rewindGeneration++;
+  if (rewindInterval) clearTimeout(rewindInterval);
   if (pruneInterval) clearInterval(pruneInterval);
   rewindInterval = null;
   pruneInterval = null;

@@ -7,11 +7,38 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { sendToOverlay } from "../../overlay.js";
 import { currentLoop } from "../../agent-replay/loop-log.js";
+import { currentAgentRunContext } from '../../agent-replay/context.js';
 import { runShutdown } from "../../lifecycle.js";
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { pauseAllMedia, lockScreen } from "../../frontier/presence.js";
 import { check_health } from "../health.js";
 import { electronApp, appRoot } from "./shared.js";
+import { runCommand } from '../../system/terminal.js';
+import { activeConfig, readUserConfig, writeUserConfig } from "../../config.js";
+
+/** Run a program with an argument list (no shell), without blocking the main process. */
+function runFile(bin: string, args: string[], timeoutMs = 15_000): Promise<{ ok: boolean; stdout: string; error: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      resolve({
+        ok: !err,
+        stdout: String(stdout ?? ""),
+        error: err ? String(stderr || err.message).trim().slice(0, 300) : "",
+      });
+    });
+  });
+}
+
+/**
+ * The Wi-Fi interface. It is not always en0: on a Mac with built-in Ethernet
+ * en0 is the Ethernet port, and switching "Wi-Fi" off there did nothing.
+ */
+async function wifiDevice(): Promise<string | null> {
+  const r = await runFile("/usr/sbin/networksetup", ["-listallhardwareports"]);
+  if (!r.ok) return null;
+  const m = /Hardware Port:\s*(?:Wi-Fi|AirPort)\s*\nDevice:\s*(\S+)/i.exec(r.stdout);
+  return m?.[1] ?? null;
+}
 
 export const SYSTEM_TOOLS: ToolDef[] = [
   {
@@ -47,40 +74,42 @@ export const SYSTEM_TOOLS: ToolDef[] = [
   {
     name: "run_terminal_command",
     description:
-      "Run an arbitrary bash command in the background. Use this for 'Agentic' coding, building projects, testing code, creating folders, or executing scripts. " +
+      "Run a bounded bash command and return its output. Use start_process for persistent servers. Use this for 'Agentic' coding, building projects, testing code, creating folders, or executing scripts. " +
       "For a git repository, prefer create_worktree to try something before touching the real checkout. " +
-      "For a non-git directory, pass sandbox:true to run the SAME way — against an isolated copy — for a command you are not sure about (an installer, a generator, an untested script).",
+      "For a non-git directory, pass sandbox:true to run the SAME way — against a working copy — for a command you are not sure about (an installer, a generator, an untested script).",
     schema: {
-      command: z.string().describe("The bash command to run."),
-      cwd: z.string().optional().describe("The working directory. Defaults to the Jarvis app path."),
+      command: z.string().min(1).max(64000).describe("The bash command to run."),
+      timeoutMs: z.number().int().min(1).max(600000).optional().describe("Wall time limit, default 120,000 ms; use start_process for longer jobs."),
+      cwd: z.string().optional().describe("The working directory. Defaults to the user's configured working folder (their home folder unless they changed it)."),
       sandbox: z
         .boolean()
         .optional()
         .describe(
-          "Run against an ISOLATED COPY of cwd instead of the real directory — nothing here can touch the user's actual files. " +
+          "Run in a working COPY of cwd. This is not an OS sandbox: absolute paths, symlinks and network access remain available. " +
             "For a git repo, use create_worktree instead, which does the same thing properly (a real branch, mergeable). " +
             "Reports where the copy lives, so you can inspect it or copy changes back yourself once you're confident."
         ),
     },
     readOnly: false,
     handler: async (a) => {
-      const realCwd = a.cwd || getAppPath();
+      // The user's working folder, not Echo's own install. Defaulting to the
+      // app path ran every cwd-less command inside Echo's source tree, while
+      // the risk gate judged it against the working folder instead.
+      const realCwd = a.cwd || activeConfig(getAppPath()).control.workingDir;
       let runCwd = realCwd;
       let sandboxPath: string | null = null;
 
       if (a.sandbox) {
         const { tmpdir } = await import("node:os");
         const { randomUUID } = await import("node:crypto");
-        const { execFile } = await import("node:child_process");
         sandboxPath = join(tmpdir(), `echo-sandbox-${randomUUID()}`);
         try {
           mkdirSync(sandboxPath, { recursive: true });
           // execFile with an argument array, not a shell string: realCwd is
           // arbitrary model-supplied text, and cp's own "/." suffix (copy this
           // directory's CONTENTS) needs no shell globbing to work.
-          await new Promise<void>((resolve, reject) => {
-            execFile("/bin/cp", ["-R", `${realCwd}/.`, `${sandboxPath}/`], (err) => (err ? reject(err) : resolve()));
-          });
+          const copied = await runCommand("/bin/cp", ["-R", `${realCwd}/.`, `${sandboxPath}/`], realCwd, 30_000, currentAgentRunContext()?.toolSignal);
+          if (copied.status !== "success") throw new Error(copied.error || copied.stderr || `Copy ${copied.status}`);
           runCwd = sandboxPath;
         } catch (err: any) {
           return {
@@ -91,20 +120,17 @@ export const SYSTEM_TOOLS: ToolDef[] = [
         }
       }
 
-      return new Promise((resolve) => {
-        exec(a.command, { cwd: runCwd }, (error, stdout, stderr) => {
-          let output = "";
-          if (sandboxPath) output += `[ran in an isolated copy — the real directory (${realCwd}) was not touched: ${sandboxPath}]\n`;
-          if (stdout) output += `STDOUT:\n${stdout}\n`;
-          if (stderr) output += `STDERR:\n${stderr}\n`;
-          if (error) output += `ERROR:\n${error.message}\n`;
-          if (sandboxPath) output += `\nReview the sandbox at ${sandboxPath}, or copy specific files back once you trust the result — nothing is applied automatically.`;
-          resolve({ text: output.trim() || "Command executed successfully with no output.",
-            status: error ? "failed" : "success", verification: "unverified",
-            data: { exitCode: error?.code ?? 0, stdout, stderr, sandboxPath },
-            ...(error ? { error: { category: "process_exit", message: error.message, retryable: false } } : {}) });
-        });
-      });
+      const result = await runCommand('/bin/bash', ['-c', a.command], runCwd, a.timeoutMs, currentAgentRunContext()?.toolSignal);
+      const sections = [
+        sandboxPath ? `Working copy: ${sandboxPath}. Absolute paths and symlinks can still reach files outside it.` : '',
+        result.stdout ? `STDOUT:\n${result.stdout}` : '',
+        result.stderr ? `STDERR:\n${result.stderr}` : '',
+        result.truncated ? '[output truncated at 64,000 characters]' : '',
+        result.status !== 'success' ? `Command ${result.status}; exit code ${result.exitCode ?? 'none'}${result.signal ? `, signal ${result.signal}` : ''}. ${result.error ?? ''}` : '',
+      ].filter(Boolean);
+      return {text: sections.join('\n') || 'Command completed with no output.', status: result.status, verification: 'unverified',
+        data: {...result, sandboxPath},
+        ...(result.status !== 'success' ? {error: {category: result.status === 'failed' ? 'process_exit' : result.status, message: result.error || `Command ${result.status}`, retryable: false}} : {})};
     },
   },
   {
@@ -148,21 +174,25 @@ export const SYSTEM_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (a) => {
-      const configPath = join(getAppPath(), "config.json");
-      if (existsSync(configPath)) {
-        const config = JSON.parse(readFileSync(configPath, "utf8"));
-        config.voice = config.voice || {};
-        config.voice.ttsVoice = a.voiceName;
-        writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+      // Saved to the user's own config, the one Echo actually loads. It used
+      // to go to <app>/config.json, which that one overrides — so the change
+      // was announced and then lost on the next launch.
+      try {
+        const config = readUserConfig(appRoot());
+        config.voice = { ...(config.voice ?? {}), ttsVoice: a.voiceName };
+        writeUserConfig(config);
+      } catch (err: any) {
+        return { text: `Could not save the voice: ${err?.message ?? err}`, status: "failed" };
       }
-      return { text: `My voice is now set to ${a.voiceName} in config.json. This will apply fully on the next restart.` };
+      activeConfig(appRoot()).voice.ttsVoice = a.voiceName;
+      return { text: `Saved ${a.voiceName} as my voice. It takes effect the next time I start.` };
     },
   },
   {
     name: "switch_brain",
-    description: "Switch Echo's brain between Claude, Gemini, and Ollama (the local model). The swap happens live — no restart — though it does start a fresh conversation on the new brain. Use this when the user asks you to switch models or brains.",
+    description: "Switch Echo's brain between Claude, Gemini, OpenAI, and Ollama (the local model). The swap happens live — no restart — though it does start a fresh conversation on the new brain. Use this when the user asks you to switch models or brains.",
     schema: {
-      brain: z.enum(["claude", "gemini", "ollama"]).describe("Which brain to use"),
+      brain: z.enum(["claude", "gemini", "ollama", "openai"]).describe("Which brain to use"),
     },
     readOnly: false,
     handler: async (a) => {
@@ -179,15 +209,10 @@ export const SYSTEM_TOOLS: ToolDef[] = [
 
       // Fallback for a build where the main process never registered the swap
       // (tests, tooling): the original config-rewrite-and-relaunch.
-      const configPath = join(appRoot(), "config.json");
-      if (!existsSync(configPath)) {
-        return { text: "config.json not found." };
-      }
       try {
-        const raw = readFileSync(configPath, "utf8");
-        const config = JSON.parse(raw);
+        const config = readUserConfig(appRoot());
         config.brain = a.brain;
-        writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+        writeUserConfig(config);
         
         // A tool that kills the process looks identical to the silent-stop bug
         // from the outside: the log just ends. Say on the way out that this was
@@ -273,136 +298,148 @@ export const SYSTEM_TOOLS: ToolDef[] = [
     schema: {},
     readOnly: false,
     handler: async () => {
-      const { exec } = await import("child_process");
-      exec("npm run build", { cwd: getAppPath() }, async (err) => {
-        if (err) {
-          console.error("Build failed during restart:", err);
-          return;
+      const el = electronApp();
+      if (!el) return { text: "I can only restart myself when running as the app.", status: "failed" };
+      // Rebuilding first only makes sense when running from source. An
+      // installed app has no npm and no source to build — this used to try
+      // anyway, fail, and never restart while having already said it would.
+      if (!el.isPackaged) {
+        const built = await new Promise<{ ok: boolean; error: string }>((resolve) =>
+          exec("npm run build", { cwd: getAppPath(), timeout: 180_000 }, (err, _out, stderr) =>
+            resolve({ ok: !err, error: String(stderr || err?.message || "").trim().slice(-400) })
+          )
+        );
+        if (!built.ok) {
+          return { text: `The rebuild failed, so I haven't restarted: ${built.error}`, status: "failed" };
         }
+      }
+      currentLoop()?.exit("abort_signal", { detail: "restart_system — restarting the app on purpose" });
+      setTimeout(async () => {
         await runShutdown();
-        const el = electronApp();
-        el?.relaunch();
-        el?.exit(0);
-      });
-      return { text: "Rebooting system now." };
+        el.relaunch();
+        el.exit(0);
+      }, 1000);
+      return { text: "Restarting now." };
     }
   },
   {
-    name: 'adjust_brightness',
-    description: 'Adjusts the Mac screen brightness by simulating the physical brightness keys. You cannot set an absolute percentage.',
+    name: "adjust_brightness",
+    description: "Adjusts the Mac screen brightness by simulating the physical brightness keys. You cannot set an absolute percentage.",
     schema: {
-      action: z.enum(['up', 'down']).describe('Whether to turn the brightness up or down.'),
-      steps: z.number().optional().describe('How many times to press the key (default 1, max 16).')
+      action: z.enum(["up", "down"]).describe("Whether to turn the brightness up or down."),
+      steps: z.number().optional().describe("How many times to press the key (default 1, max 16)."),
     },
     readOnly: false,
-    handler: async (a: { action: 'up' | 'down', steps?: number }) => {
-      const steps = Math.min(Math.max(a.steps || 1, 1), 16);
-      const keyCode = a.action === 'up' ? 144 : 145;
-      
-      // Build a script that presses the key multiple times
-      const scriptLines = Array.from({ length: steps }, () => `key code ${keyCode}`).join("\\n");
-      const script = `tell application "System Events"\n${scriptLines}\nend tell`;
-      
-      const { execSync } = await import("node:child_process");
-      execSync(`osascript -e '${script}'`);
-      return `Pressed brightness ${a.action} ${steps} time(s).`;
-    }
-  } as any,
+    handler: async (a: { action: "up" | "down"; steps?: number }) => {
+      const steps = Math.min(Math.max(Math.round(a.steps || 1), 1), 16);
+      const keyCode = a.action === "up" ? 144 : 145;
+      const lines = Array.from({ length: steps }, () => `key code ${keyCode}`).join("\n");
+      const r = await runFile("/usr/bin/osascript", ["-e", `tell application "System Events"\n${lines}\nend tell`]);
+      if (!r.ok) return { text: `Could not change the brightness: ${r.error}`, status: "failed" };
+      return { text: `Pressed brightness ${a.action} ${steps} time(s).` };
+    },
+  },
   {
-    name: 'control_mac_setting',
-    description: 'Controls Mac system settings like WiFi, Bluetooth, Volume, Dark Mode, Sleep, and Screen Saver.',
+    name: "control_mac_setting",
+    description: "Controls Mac system settings like WiFi, Bluetooth, Volume, Dark Mode, Sleep, and Screen Saver.",
     schema: {
-      setting: z.enum(['wifi', 'bluetooth', 'volume', 'mute', 'dark_mode', 'sleep', 'screen_saver', 'do_not_disturb']),
-      action: z.enum(['on', 'off', 'toggle', 'set']).optional().describe('Action to perform (default toggle)'),
-      value: z.number().optional().describe('Used for setting volume level (0-100).')
+      setting: z.enum(["wifi", "bluetooth", "volume", "mute", "dark_mode", "sleep", "screen_saver", "do_not_disturb"]),
+      action: z.enum(["on", "off", "toggle", "set"]).optional().describe("Action to perform (default toggle)"),
+      value: z.number().optional().describe("Used for setting volume level (0-100)."),
     },
     readOnly: false,
-    handler: async (a: { setting: string, action?: string, value?: number }) => {
-      const { execSync } = await import('node:child_process');
-      const { existsSync } = await import('node:fs');
-      
+    // Every command here runs as a child process, never execSync: this handler
+    // runs in Electron's main process, and a blocking call froze the HUD, the
+    // microphone and the speech player for as long as it took.
+    handler: async (a: { setting: string; action?: string; value?: number }) => {
+      const osa = (script: string) => runFile("/usr/bin/osascript", ["-e", script]);
+      const failed = (what: string, error: string) => ({ text: `Could not ${what}: ${error}`, status: "failed" as const });
+
       switch (a.setting) {
-        case 'wifi': {
-          const wifiState = a.action === 'on' ? 'on' : a.action === 'off' ? 'off' : 'toggle';
-          if (wifiState === 'toggle') {
-            const out = execSync('networksetup -getairportpower en0').toString();
-            const turnTo = out.includes('On') ? 'off' : 'on';
-            execSync(`networksetup -setairportpower en0 ${turnTo}`);
-            return `Wi-Fi turned ${turnTo}.`;
-          } else {
-            execSync(`networksetup -setairportpower en0 ${wifiState}`);
-            return `Wi-Fi turned ${wifiState}.`;
+        case "wifi": {
+          const device = await wifiDevice();
+          if (!device) return failed("change Wi-Fi", "this Mac has no Wi-Fi interface");
+          let turnTo = a.action === "on" ? "on" : a.action === "off" ? "off" : "";
+          if (!turnTo) {
+            const now = await runFile("/usr/sbin/networksetup", ["-getairportpower", device]);
+            if (!now.ok) return failed("read the Wi-Fi state", now.error);
+            turnTo = /\bOn\b/.test(now.stdout) ? "off" : "on";
           }
+          const r = await runFile("/usr/sbin/networksetup", ["-setairportpower", device, turnTo]);
+          return r.ok ? { text: `Wi-Fi turned ${turnTo}.` } : failed(`turn Wi-Fi ${turnTo}`, r.error);
         }
-          
-        case 'bluetooth': {
-          if (!existsSync('/opt/homebrew/bin/blueutil')) {
-            execSync('brew install blueutil', { stdio: 'ignore' });
+
+        case "bluetooth": {
+          // Never installed on the user's behalf: installing software is a
+          // decision for them, and `brew install` could hold the turn for minutes.
+          const blueutil = ["/opt/homebrew/bin/blueutil", "/usr/local/bin/blueutil"].find((b) => existsSync(b));
+          if (!blueutil) {
+            return {
+              text: "Bluetooth control needs the free `blueutil` tool, which isn't installed. Tell the user they can install it with `brew install blueutil`, then ask again.",
+              status: "failed",
+            };
           }
-          const btState = a.action === 'on' ? '1' : a.action === 'off' ? '0' : 'toggle';
-          if (btState === 'toggle') {
-            execSync('/opt/homebrew/bin/blueutil -p toggle');
-            return 'Bluetooth toggled.';
-          } else {
-            execSync(`/opt/homebrew/bin/blueutil -p ${btState}`);
-            return `Bluetooth turned ${btState === '1' ? 'on' : 'off'}.`;
+          const state = a.action === "on" ? "1" : a.action === "off" ? "0" : "toggle";
+          const r = await runFile(blueutil, ["-p", state]);
+          if (!r.ok) return failed("change Bluetooth", r.error);
+          return { text: state === "toggle" ? "Bluetooth toggled." : `Bluetooth turned ${state === "1" ? "on" : "off"}.` };
+        }
+
+        case "volume": {
+          if (a.value === undefined) {
+            return { text: "Volume needs a value from 0 to 100. Use the mute setting to mute or unmute.", status: "failed" };
           }
+          const level = Math.min(100, Math.max(0, Math.round(a.value)));
+          const r = await osa(`set volume output volume ${level}`);
+          return r.ok ? { text: `Volume set to ${level}%.` } : failed("set the volume", r.error);
         }
-          
-        case 'volume': {
-          if (a.value !== undefined) {
-            execSync(`osascript -e 'set volume output volume ${a.value}'`);
-            return `Volume set to ${a.value}%.`;
-          } else {
-            return 'Volume setting requires a value (0-100). Use the mute setting to mute/unmute.';
+
+        case "mute": {
+          let muted = a.action === "on" ? "true" : a.action === "off" ? "false" : "";
+          if (!muted) {
+            const now = await osa("output muted of (get volume settings)");
+            if (!now.ok) return failed("read the mute state", now.error);
+            muted = now.stdout.trim() === "true" ? "false" : "true";
           }
+          const r = await osa(`set volume output muted ${muted}`);
+          return r.ok ? { text: muted === "true" ? "Muted." : "Unmuted." } : failed("change mute", r.error);
         }
-          
-        case 'mute': {
-          const muteState = a.action === 'on' ? 'true' : a.action === 'off' ? 'false' : 'toggle';
-          if (muteState === 'toggle') {
-            const out = execSync(`osascript -e 'output muted of (get volume settings)'`).toString().trim();
-            const turnTo = out === 'true' ? 'false' : 'true';
-            execSync(`osascript -e 'set volume output muted ${turnTo}'`);
-            return turnTo === 'true' ? 'Muted.' : 'Unmuted.';
-          } else {
-            execSync(`osascript -e 'set volume output muted ${muteState}'`);
-            return muteState === 'true' ? 'Muted.' : 'Unmuted.';
+
+        case "dark_mode": {
+          const state = a.action === "on" ? "true" : a.action === "off" ? "false" : "not dark mode";
+          const r = await osa(`tell application "System Events" to tell appearance preferences to set dark mode to ${state}`);
+          return r.ok ? { text: "Dark mode adjusted." } : failed("change dark mode", r.error);
+        }
+
+        case "sleep": {
+          const r = await runFile("/usr/bin/pmset", ["sleepnow"]);
+          return r.ok ? { text: "Putting the Mac to sleep." } : failed("put the Mac to sleep", r.error);
+        }
+
+        case "screen_saver": {
+          const r = await runFile("/usr/bin/open", ["-a", "ScreenSaverEngine"]);
+          return r.ok ? { text: "Screen saver started." } : failed("start the screen saver", r.error);
+        }
+
+        case "do_not_disturb": {
+          const list = await runFile("/usr/bin/shortcuts", ["list"]);
+          const names = list.ok ? list.stdout.split("\n").map((l) => l.trim()) : [];
+          const shortcutName = ["Toggle Do Not Disturb", "Do Not Disturb", "Toggle Focus", "Focus"].find((n) => names.includes(n));
+          if (!shortcutName) {
+            return {
+              text: 'macOS does not let apps switch Focus modes directly. Tell the user: "If you create a shortcut named \"Toggle Do Not Disturb\" in the Shortcuts app that turns Focus on and off, I can run it for you."',
+              status: "failed",
+            };
           }
+          const r = await runFile("/usr/bin/shortcuts", ["run", shortcutName]);
+          return r.ok ? { text: `Toggled Do Not Disturb with your "${shortcutName}" shortcut.` } : failed("toggle Do Not Disturb", r.error);
         }
-          
-        case 'dark_mode': {
-          const dmState = a.action === 'on' ? 'true' : a.action === 'off' ? 'false' : 'not dark mode';
-          execSync(`osascript -e 'tell application "System Events" to tell appearance preferences to set dark mode to ${dmState}'`);
-          return 'Dark mode adjusted.';
-        }
-          
-        case 'sleep': {
-          execSync('pmset sleepnow');
-          return 'System put to sleep.';
-        }
-          
-        case 'screen_saver': {
-          execSync('open -a ScreenSaverEngine');
-          return 'Screen saver started.';
-        }
-          
-        case 'do_not_disturb': {
-          const out = execSync('shortcuts list').toString();
-          const shortcutName = ['Toggle Do Not Disturb', 'Do Not Disturb', 'Toggle Focus', 'Focus'].find(name => out.includes(name));
-          if (shortcutName) {
-            execSync(`shortcuts run "${shortcutName}"`);
-            return `Toggled Do Not Disturb via Apple Shortcut: ${shortcutName}`;
-          } else {
-            return 'Failed: On modern macOS, Apple blocks CLI access to Do Not Disturb/Focus modes. Please tell the user exactly this: "Apple has locked down Focus modes, but if you open the Apple Shortcuts app and create a simple shortcut named \\"Toggle Do Not Disturb\\" that turns Focus on and off, I will be able to trigger it for you next time!"';
-          }
-        }
-          
+
         default:
-          return 'Unknown setting.';
+          return { text: `Unknown setting "${a.setting}".`, status: "failed" };
       }
-    }
-  } as any,
+    },
+  },
   {
     name: "set_hud_skin",
     description:
@@ -416,17 +453,11 @@ export const SYSTEM_TOOLS: ToolDef[] = [
     readOnly: false,
     handler: async (a) => {
       const { sendHudState } = await import("../../frontier/hudstate.js");
-      const configPath = join(appRoot(), "config.json");
-
-      let config: any = {};
-      if (existsSync(configPath)) {
-        try {
-          config = JSON.parse(readFileSync(configPath, "utf8"));
-        } catch {
-          /* a broken config should not stop the HUD from changing */
-        }
-      }
-      const current = config?.hud?.skin ?? "classic";
+      // The live config says what is showing; the user's config file is where
+      // the choice is kept. Both used to be <app>/config.json, which Echo does
+      // not load once the user's own config exists — so "saved" reverted.
+      const live = activeConfig(appRoot());
+      const current = live.hud?.skin ?? "classic";
       const SKIN_NAMES: Record<string, string> = { classic: "classic", mark50: "Mark 50", jarvis: "J.A.R.V.I.S" };
       const nameOf = (skin: string) => SKIN_NAMES[skin] ?? skin;
 
@@ -440,13 +471,13 @@ export const SYSTEM_TOOLS: ToolDef[] = [
       // Change what is on screen first — the HUD should respond immediately,
       // whether or not the config can be written.
       sendHudState({ skin: a.skin });
+      live.hud = { ...(live.hud ?? {}), skin: a.skin } as typeof live.hud;
 
-      // Then remember it, so it survives a restart. No relaunch needed: the
-      // renderer swaps skins live.
       let saved = true;
       try {
+        const config = readUserConfig(appRoot());
         config.hud = { ...(config.hud ?? {}), skin: a.skin };
-        writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+        writeUserConfig(config);
       } catch {
         saved = false;
       }

@@ -2,8 +2,9 @@ import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
 import type { JarvisConfig } from "../config.js";
 import { SentenceChunker, splitSentences } from "./chunker.js";
-import { createTtsStream, isLatinText, languageOf, offlineTtsStream, OFFLINE_STREAMS, type TtsStream, type TtsAudio } from "./tts-stream.js";
+import { createTtsStream, isLatinText, languageOf, offlineTtsStream, GeminiTtsStream, OFFLINE_STREAMS, type TtsStream, type TtsAudio } from "./tts-stream.js";
 import type { AudioPlayer } from "./player.js";
+import { vibeVoiceSupportsText } from "./vibevoice.js";
 
 /**
  * Speaks a reply while it is still being written.
@@ -43,6 +44,15 @@ export class SpeechStream extends EventEmitter {
   private abandoned = new WeakSet<TtsStream>();
   /** When the configured cloud voice last failed; skip it for a while after. */
   private cloudFailedAt = -Infinity;
+  /**
+   * WHICH cloud voice failed, not just that one did.
+   *
+   * The script fallback needs the distinction: Sarvam falling over is no
+   * reason to stop reaching for Gemini's voice to read a Telugu line, but
+   * Gemini falling over is every reason — it is the same voice, and handing
+   * it back to itself is the loop `fallbackFor` documents.
+   */
+  private lastFailedStream = "";
   /** The open stream is the offline stand-in, not the configured voice. */
   private onFallback = false;
 
@@ -96,11 +106,24 @@ export class SpeechStream extends EventEmitter {
   private async ensureTts(text: string, rechecks = 0): Promise<TtsStream | null> {
     const lang = languageOf(text);
     const sarvamSwitch = this.tts?.name === "sarvam-ws" && !!this.ttsLang && this.ttsLang !== lang;
+    const vibeSwitch = this.cfg.voice.ttsEngine === "vibevoice" && !!this.tts && !this.onFallback
+      && (this.tts.name === "vibevoice") !== vibeVoiceSupportsText(text);
     // Piper cannot read other scripts: a sentence in Telugu or Hindi switches
-    // to the Gemini voice and back. Not while standing in for a failed voice.
-    const scriptSwitch = this.cfg.voice.ttsEngine === "piper" && !!this.tts && !this.onFallback
+    // to the Gemini voice and back.
+    const piperSwitch = this.cfg.voice.ttsEngine === "piper" && !!this.tts && !this.onFallback
       && OFFLINE_STREAMS.has(this.tts.name) !== isLatinText(text);
-    if (sarvamSwitch || scriptSwitch) {
+    // And the rule that has nothing to do with which engine was configured:
+    // an English-only local voice cannot speak another script, however it
+    // came to be the current one.
+    //
+    // This used to carry `&& !this.onFallback` — "not while standing in for a
+    // failed voice" — which is exactly backwards. Standing in is the common
+    // way to end up on Piper: one rate-limited or offline cloud call sets
+    // `onFallback`, and from then on every Telugu sentence of the reply went
+    // to a voice that cannot pronounce a word of it, silently, while the text
+    // appeared on screen as though it had been spoken.
+    const cannotRead = !!this.tts && OFFLINE_STREAMS.has(this.tts.name) && !isLatinText(text);
+    if (sarvamSwitch || piperSwitch || cannotRead || vibeSwitch) {
       // Sarvam fixes the language per connection; a reply that switches script
       // gets a fresh one for the new language.
       const old = this.tts!;
@@ -117,7 +140,7 @@ export class SpeechStream extends EventEmitter {
     const gen = this.generation;
     const now = (this.opts.now ?? Date.now)();
     const coolingDown = now - this.cloudFailedAt < CLOUD_RETRY_MS;
-    const stream = coolingDown ? this.offline() : (this.opts.createTts ?? createTtsStream)(this.cfg, text);
+    const stream = coolingDown ? this.fallbackFor(text) : (this.opts.createTts ?? createTtsStream)(this.cfg, text);
     if (!stream) return null;
     const standIn = coolingDown;
     this.ttsLang = lang;
@@ -136,7 +159,8 @@ export class SpeechStream extends EventEmitter {
         // used to leave the reply silent. Speak it locally instead.
         this.abandoned.add(stream);
         this.cloudFailedAt = (this.opts.now ?? Date.now)();
-        const local = this.offline();
+        this.lastFailedStream = stream.name;
+        const local = this.fallbackFor(text);
         this.wire(local, gen);
         try {
           await local.open();
@@ -156,6 +180,51 @@ export class SpeechStream extends EventEmitter {
 
   private offline(): TtsStream {
     return (this.opts.createOfflineTts ?? offlineTtsStream)(this.cfg);
+  }
+
+  /**
+   * The local voices speak English and nothing else.
+   *
+   * `offlineTtsStream` is Piper with an English model, or macOS `say` with an
+   * English voice. Handed a line of Telugu, neither refuses — they emit
+   * silence or a mangled transliteration, which is why the reply appeared on
+   * screen and was never heard. "Fell back to the local voice" and "the reply
+   * was spoken" are not the same thing once the reply is not in English.
+   *
+   * So a fallback for another script goes to Gemini's voice — the same one
+   * Gemini Live answers in — and only gives up on the local voice if there is
+   * no key to reach it with.
+   *
+   * Unless the cloud is what just failed. That case is a loop, and it is not
+   * hypothetical: with `ttsEngine: "gemini"` and the TTS quota spent, a Telugu
+   * reply went cloud → 429 → fall back to the cloud → 429, one REST round
+   * trip per lap, for as long as the sentence was owed. `GeminiTtsStream.open()`
+   * is a no-op, so each replacement reported success and only failed later on
+   * `speak`, which is why nothing caught it. English never looped, because its
+   * fallback is Piper — so this surfaced as "the Telugu voice is very late".
+   *
+   * When the only voice that can read the script is down there is no good
+   * answer, so take the honest one: the local voice, once, and say in the log
+   * that the reply will not be understandable rather than spinning.
+   */
+  private fallbackFor(text: string): TtsStream {
+    if (isLatinText(text)) return this.offline();
+    const key = process.env[this.cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"];
+    if (!key) return this.offline();
+    // Only refuse the voice that is actually broken. Sarvam timing out is no
+    // reason to stop reaching for Gemini to read a Telugu line.
+    const justFailed = this.lastFailedStream === "gemini-tts"
+      && (this.opts.now ?? Date.now)() - this.cloudFailedAt < CLOUD_RETRY_MS;
+    if (justFailed) {
+      console.log("[voice] the Gemini voice just failed and the local one cannot read this script — this reply will not sound right");
+      return this.offline();
+    }
+    console.log("[voice] the local voice cannot read this script — using the Gemini voice instead");
+    return new GeminiTtsStream(
+      key,
+      this.cfg.voice.realtime?.voice ?? "Charon",
+      this.cfg.voice.geminiTtsModel ?? "gemini-3.1-flash-tts-preview"
+    );
   }
 
   private wire(stream: TtsStream, gen: number): void {
@@ -192,9 +261,10 @@ export class SpeechStream extends EventEmitter {
     if (this.abandoned.has(stream)) return;
     this.abandoned.add(stream);
     this.cloudFailedAt = (this.opts.now ?? Date.now)();
+    this.lastFailedStream = stream.name;
     if (this.tts === stream) this.tts = null;
     stream.abort();
-    console.log(`[voice] ${stream.name} failed mid-turn — continuing with the offline voice`);
+    console.log(`[voice] ${stream.name} failed mid-turn — switching voice for the rest of the reply`);
     const owed = [...this.awaitingAudio].sort((a, b) => a - b);
     for (const idx of owed) {
       if (this.audioMsEnd[idx] !== undefined) {
@@ -202,7 +272,10 @@ export class SpeechStream extends EventEmitter {
         this.player.endSentence(idx);
       }
     }
-    const local = this.offline();
+    // Chosen for the sentences still owed, not for the engine that just died:
+    // handing a Telugu sentence to the English-only local voice is not a
+    // fallback, it is silence with a log line that says it worked.
+    const local = this.fallbackFor(owed.map((i) => this.sentences[i] ?? "").join(" "));
     this.wire(local, gen);
     // Held as the opening stream, so a sentence arriving meanwhile waits for
     // this voice rather than starting a second one.

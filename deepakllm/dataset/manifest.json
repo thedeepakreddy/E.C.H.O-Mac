@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-09-20T01:30:54.227Z",
-  "examples": 1146,
-  "examplesWithScreenshots": 300,
-  "uniqueScreenshots": 157,
+  "generatedAt": "2026-09-27T23:35:45.429Z",
+  "examples": 1242,
+  "examplesWithScreenshots": 311,
+  "uniqueScreenshots": 162,
   "droppedScreenshots": 0,
   "dropped": {
-    "unlabelled": 16,
-    "failed": 369,
+    "unlabelled": 17,
+    "failed": 461,
     "student": 0,
     "refused": 27
   },
   "sourceCounts": {
-    "gemini": 1335,
-    "claude": 218,
+    "gemini": 1516,
+    "claude": 226,
     "ollama": 5
   },
   "imagePaths": "relative to this folder",

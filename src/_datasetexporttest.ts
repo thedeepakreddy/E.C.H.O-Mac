@@ -1,0 +1,97 @@
+import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+const root = await mkdtemp(join(tmpdir(), 'echo-dataset-export-'));
+process.env.ECHO_DATA_ROOT = root;
+process.env.ECHO_MEMORY_ROOT = join(root, 'memory');
+process.env.JARVIS_TRAJECTORY_DIR = join(root, 'trajectories');
+process.env.ECHO_LOG_QUIET = '1';
+process.env.ECHO_MCP = '0';
+const {Recorder} = await import('./agent-replay/recorder.js');
+const {exportDataset} = await import('./learn/dataset-export.js');
+const learning = await import('./learn/trajectory.js');
+const {setPrivateTask} = await import('./memory/capture-policy.js');
+try {
+  const runs = join(root, 'runs');
+  for (const provider of ['openai', 'openrouter', 'gemini', 'claude', 'ollama', 'future-brain']) {
+    const rec = new Recorder(runs, provider);
+    rec.emit({type: 'run.start', provider, model: `${provider}-model`, taskId: `task-${provider}`});
+    rec.emit({type: 'agent.input', bodyRef: rec.blob('find the latest news')});
+    rec.emit({type: 'llm.request', bodyRef: rec.blob({model: `${provider}-fallback`, messages: [{role:'user', content:'hello'}], tools:[{name:'future_tool', inputSchema:{type:'object'}}]})});
+    rec.emit({type: 'tool.call', callId:'call-1', name:'future_tool', argsRef:rec.blob({query:'news', api_key:'secret-value'})});
+    rec.emit({type: 'tool.result', callId:'call-1', resultRef:rec.blob({text:'x'.repeat(15000), data:{items:[{id:42}]}, status:'success'})});
+    rec.emit({type: 'agent.text', textRef:rec.blob('Finished. password: hidden-password')});
+    rec.finish(true,'completed',1);
+  }
+  const pending = new Recorder(runs, 'pending');
+  pending.emit({type:'run.start', provider:'future-brain'});
+  pending.emit({type:'tool.call', name:'missing', argsRef:'a'.repeat(64)});
+  await writeFile(join(pending.dir,'events.jsonl'), '{torn', {flag:'a'});
+  await mkdir(join(root,'memory','conversations'), {recursive:true});
+  await writeFile(join(root,'memory','conversations','chat.jsonl'), JSON.stringify({role:'assistant', text:'A greeting without tools', provider:'future-brain'})+'\n');
+  learning.configureLearning({enabled:true, captureScreens:false});
+  learning.startTurn('read headlines','future-brain','future-model');
+  learning.recordStep({tool:'future_tool',args:{},tier:'low',reason:'read',allowed:true,resultText:'ok'});
+  learning.finishTurn('success','automatic completion');
+  const {RealtimeVoiceSession} = await import('./voice/realtime.js');
+  const {DEFAULTS_FOR_TESTS} = await import('./config.js');
+  const cfg = structuredClone(DEFAULTS_FOR_TESTS);
+  cfg.control.workingDir = process.cwd(); cfg.voice.realtime = {...cfg.voice.realtime, enabled: true, outsideTools: false};
+  let drive: (value: any) => void = () => {}, replies = 0;
+  const live = new RealtimeVoiceSession(cfg,'fixture-key',{allowedTools: new Set(['inspect_task']), transport: async callbacks => {
+    drive = callbacks.onmessage;
+    return {sendToolResponse: () => {replies++;}, sendClientContent: () => {}, close: () => {}};
+  }});
+  await live.connect();
+  drive({serverContent:{inputTranscription:{text:'Inspect my task'}}});
+  drive({toolCall:{functionCalls:[{id:'live-call',name:'inspect_task',args:{}}]}});
+  for (let i=0; i<100 && replies===0; i++) await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(replies,1);
+  drive({serverContent:{outputTranscription:{text:'Your task is recorded.'},turnComplete:true}});
+  await live.close();
+  const {archiveDatasetRun} = await import('./learn/dataset-archive.js');
+  await archiveDatasetRun(join(runs,'future-brain'));
+  await rm(join(runs,'future-brain'),{recursive:true});
+  const exported = await exportDataset({appRoot:process.cwd()});
+  assert.equal(exported.runs,8); assert.equal(exported.activeRuns,1);
+  assert(exported.providers.includes('future-brain')); assert.equal(exported.goldExamples,0);
+  assert.equal(exported.trainingExamples,1);
+  assert(exported.warnings.some(w=>w.includes('partial'))); assert(exported.warnings.some(w=>w.includes('Missing recorded payload')));
+  const liveEventsFile = exported.files.find(file => file.path.startsWith('raw/runs/Echo-voice--') && file.path.endsWith('events.jsonl'))!;
+  const liveEvents = (await readFile(join(exported.path, liveEventsFile.path), 'utf8')).split('\n').filter(Boolean).map(line=>JSON.parse(line));
+  for (const type of ['run.start','session.tools','tool.call','tool.result','session.toolrequest','session.toolresponse','agent.input','agent.text','run.end']) assert(liveEvents.some(event=>event.type === type), `Live records ${type}`);
+  assert.equal(await readFile(join(exported.path,'gold.jsonl'),'utf8'),'');
+  const manifest = JSON.parse(await readFile(join(exported.path,'manifest.json'),'utf8'));
+  for (const file of manifest.files) {
+    const content = await readFile(join(exported.path,file.path));
+    assert.equal(createHash('sha256').update(content).digest('hex'),file.sha256);
+    if (!file.path.endsWith('feature-context.json')) assert(!content.toString().includes('hidden-password'));
+  }
+  const resultRows = JSON.parse(await readFile(join(exported.path,'raw/runs/future-brain/events.jsonl'),'utf8').then(t=>t.split('\n').find(l=>l.includes('tool.result'))!));
+  const result = JSON.parse(await readFile(join(exported.path,'raw/runs/future-brain/blobs',resultRows.resultRef),'utf8'));
+  assert.equal(result.text.length,15000); assert.equal(result.data.items[0].id,42);
+  assert((await readFile(join(exported.path,'raw/conversations/chat.jsonl'),'utf8')).includes('A greeting without tools'));
+  assert((await readFile(join(exported.path,'feature-context.json'),'utf8')).includes('export_training_data'));
+  const {TOOL_MAP} = await import('./tools/registry.js');
+  const response = await TOOL_MAP.get('export_training_data')!.handler({});
+  assert((response.data as any).path !== exported.path); assert((await readFile(join(exported.path,'manifest.json'),'utf8')).includes(exported.snapshotId));
+  setPrivateTask('private-test',true);
+  await assert.rejects(exportDataset(),/private task/);
+  setPrivateTask('private-test',false);
+  const {pruneRunLogs} = await import('./agent-replay/recovery.js');
+  const retained = await pruneRunLogs(runs,{keepDays:0,keepRuns:1,now:Date.now()+7200000,beforeRemove:async()=>{throw new Error('simulated full archive disk');}});
+  assert.equal(retained,0);
+  assert((await readFile(join(runs,'openai','events.jsonl'),'utf8')).includes('run.start'));
+  const {forgetEverywhere} = await import('./memory/deletion.js');
+  const receipt = forgetEverywhere({taskId:'task-future-brain',appRoot:root});
+  assert.equal(receipt.failures.filter(path=>/dataset-history|datasets/.test(path)).length,0);
+  await assert.rejects(readFile(join(root,'dataset-history','runs','future-brain','events.jsonl.gz')));
+  await assert.rejects(readFile(join(exported.path,'manifest.json')));
+  // Local budget selection must preserve the save command.
+  const {fitLocalTools} = await import('./brain/localtools.js');
+  const definitions = [{type:'function',function:{name:'export_training_data',description:'Save dataset',parameters:{type:'object'}}}];
+  assert(fitLocalTools(definitions,'save dataset',1200).length === 1);
+  console.log('PASS complete provider-neutral dataset snapshots, full payloads, messages, privacy, gaps, hashes, pending flush and non-gold automatic labels');
+} finally { setPrivateTask('private-test',false); await rm(root,{recursive:true,force:true}); }

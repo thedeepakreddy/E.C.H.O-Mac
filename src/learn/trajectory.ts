@@ -48,7 +48,7 @@ const DIR = process.env.JARVIS_TRAJECTORY_DIR || join(dataRoot(), "trajectories"
 const SCREENS = join(DIR, "screens");
 
 /** Which brain produced the action. Never train on "deepakllm". */
-export type Source = "claude" | "gemini" | "ollama" | "deepakllm" | "openai" | "reflex" | "shortcut" | "unknown";
+export type Source = "claude" | "gemini" | "ollama" | "deepakllm" | "openai" | "openrouter" | "reflex" | "shortcut" | "unknown" | (string & {});
 
 export type Outcome = "success" | "failure" | "rejected";
 
@@ -328,6 +328,15 @@ export function recordStep(input: {
     // Scrub before storing: this observation is the screen the model saw, and a
     // visible credential on it must not be baked into the training data.
     if (input.resultText) obs.text = scrubSecrets(input.resultText).slice(0, 6000);
+    // Carry the pre-action pixels across. `captureGroundingFrame` took a frame
+    // moments ago, before this tool ran, so the image and the text it just
+    // returned are the SAME screen — and replacing the observation wholesale
+    // threw the image away, leaving the next step with text only unless it
+    // happened to be a grounding tool that would capture again.
+    const before = turn.observation;
+    if (!input.image && before?.image && Date.now() - before.at < FRESH_FRAME_MS) {
+      obs.image = before.image;
+    }
     turn.observation = obs;
 
     // Only the image is heavy (a sips subprocess). Convert it on the same
@@ -401,10 +410,26 @@ async function captureScreenFrame(): Promise<string | undefined> {
 }
 
 /**
- * Actions that place the cursor somewhere specific. The screen at the instant
- * one of these fires, paired with where it landed, is the grounding signal a
- * vision model needs — "this is what a Send button looks like, click here".
- * Nothing else on the list; typing or waiting teaches nothing about pixels.
+ * Tools whose example is worthless without the screen it was taken against.
+ *
+ * Two groups, for two reasons.
+ *
+ * Actions that place the cursor somewhere specific: the screen at the instant
+ * one fires, paired with where it landed, is the grounding signal a vision
+ * model needs — "this is what a Send button looks like, click here". Typing
+ * or waiting teaches nothing about pixels and stays off the list.
+ *
+ * And the tools that go and LOOK. Deciding to read the text, or to ask for the
+ * control list, is itself a judgement made from a screen — "I cannot tell what
+ * this says, look closer" — and it is one of the most common things Echo does.
+ * Counted over 1,793 recorded steps: `click` carried an image 98% of the time
+ * and `scroll` 96%, because they are above; `list_ui_elements` managed 19% and
+ * `read_screen_text` 34%, purely on the luck of a screenshot happening to come
+ * first. Those two are ~160 steps of the dataset that were mostly unusable.
+ *
+ * They cost a capture (~300ms) they would not otherwise pay — `list_ui_elements`
+ * advertises "costs no image" to the model and that stays true of the ANSWER;
+ * this is the recorder's own copy, taken only while learning is switched on.
  */
 const GROUNDING_TOOLS = new Set([
   "click",
@@ -414,6 +439,8 @@ const GROUNDING_TOOLS = new Set([
   "click_ui_element",
   "click_text",
   "scroll",
+  "read_screen_text",
+  "list_ui_elements",
 ]);
 
 /**
@@ -655,6 +682,7 @@ export interface TrainingExample {
   /** The action the teacher took, as the model should emit it. */
   action: { tool: string; arguments: Record<string, unknown> };
   source: Source;
+  turn?: string; taskId?: string; actorId?: string; callId?: string; step?: number; declaredModel?: string;
 }
 
 export interface ExportResult {
@@ -716,6 +744,7 @@ export function buildTrainingSet(rows: Row[]): ExportResult {
       observation: r.observation?.text ?? "",
       action: { tool: r.tool, arguments: r.args },
       source: r.source,
+      turn: r.turn, taskId: r.taskId, actorId: r.actorId, callId: r.callId, step: r.step, declaredModel: r.model,
     });
     res.kept += 1;
   }
@@ -735,6 +764,9 @@ export function toChatFormat(ex: TrainingExample): unknown {
     text: `Task: ${ex.command}\n\nScreen:\n${ex.observation || "(no text observation)"}\n\nRespond with the single next tool call as JSON.`,
   });
   return {
+    metadata: {source: ex.source, declaredModel: ex.declaredModel, turn: ex.turn, taskId: ex.taskId,
+      actorId: ex.actorId, callId: ex.callId, step: ex.step, splitGroup: ex.taskId ?? ex.turn,
+      quality: 'automatic-training-candidate'},
     messages: [
       {
         role: "system",

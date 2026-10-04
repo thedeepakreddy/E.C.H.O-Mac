@@ -21,6 +21,18 @@ import {
   toolNameFor,
   type ClientFactory,
 } from "./brain/mcp.js";
+
+/** Enable only the explicitly generated fixture config, never the user's MCP. */
+function readFixtureConfig(path: string) {
+  const previous = process.env.ECHO_MCP;
+  delete process.env.ECHO_MCP;
+  try {return loadMcpConfig(path);}
+  finally {
+    if (previous === undefined) delete process.env.ECHO_MCP;
+    else process.env.ECHO_MCP = previous;
+  }
+}
+
 import { runShutdown, setShutdownHandler } from "./lifecycle.js";
 
 let pass = 0;
@@ -56,13 +68,13 @@ console.log("\nMCP layer\n");
 
 console.log("  reading mcp.json");
 {
-  ok(Object.keys(loadMcpConfig(join(dir, "nope.json"))).length === 0, "a missing file is no servers, not a crash");
-  ok(Object.keys(loadMcpConfig(writeConfig("broken.json", "{ not json"))).length === 0,
+  ok(Object.keys(readFixtureConfig(join(dir, "nope.json"))).length === 0, "a missing file is no servers, not a crash");
+  ok(Object.keys(readFixtureConfig(writeConfig("broken.json", "{ not json"))).length === 0,
     "a malformed file is no servers, not a crash");
-  ok(Object.keys(loadMcpConfig(writeConfig("empty.json", { mcpServers: {} }))).length === 0,
+  ok(Object.keys(readFixtureConfig(writeConfig("empty.json", { mcpServers: {} }))).length === 0,
     "an empty server list is handled");
 
-  const mixed = loadMcpConfig(writeConfig("mixed.json", {
+  const mixed = readFixtureConfig(writeConfig("mixed.json", {
     mcpServers: {
       good: { command: "/bin/echo", args: ["hi"], env: { K: "v" } },
       broken: { args: ["no command"] },
@@ -81,14 +93,14 @@ console.log("  caching by path + mtime (the control panel calls this ~16x/sec)")
   // That is the actual thing worth proving: not "same content" (deep-equal
   // would pass even re-parsing every time) but "did the work happen again".
   const path = writeConfig("cached.json", { mcpServers: { a: { command: "/bin/echo" } } });
-  const first = loadMcpConfig(path);
-  const second = loadMcpConfig(path);
+  const first = readFixtureConfig(path);
+  const second = readFixtureConfig(path);
   ok(first === second, "an unchanged file returns the SAME object — no re-parse on repeated calls");
 
   // A real edit (new mtime) must still be picked up, not stuck on the cache.
   await new Promise((resolve) => setTimeout(resolve, 20));
   writeConfig("cached.json", { mcpServers: { a: { command: "/bin/echo" }, b: { command: "/bin/cat" } } });
-  const updated = loadMcpConfig(path);
+  const updated = readFixtureConfig(path);
   ok(updated !== first && Object.keys(updated).length === 2, "editing the file on disk invalidates the cache on the next call");
 }
 
@@ -152,13 +164,8 @@ console.log("  a hung TOOL CALL cannot hang the turn either");
     transport: { close: async () => {} },
   } as any);
   const { tools } = await connectMcpServers({ config: { s: { command: "x" } }, factory, timeout: 60 });
-  let message = "";
-  try {
-    await tools[0].call({});
-  } catch (err: any) {
-    message = String(err?.message ?? err);
-  }
-  ok(/timed out/.test(message), "a call that never returns rejects instead of stalling the loop");
+  const output = await tools[0].call({});
+  ok(output.status === "timeout" && output.error?.retryable === false, "a hung call returns an explicit timeout; remote effects must be checked before retry");
   await closeMcpServers();
 }
 

@@ -920,8 +920,8 @@ export async function startRemote(opts: {
         writeFileSync(wavPath, wav);
         try {
           const { transcribe } = await import("../voice/stt.js");
-          const { loadConfig } = await import("../config.js");
-          const text = await transcribe(wavPath, loadConfig(getAppPath()));
+          const { activeConfig } = await import("../config.js");
+          const text = await transcribe(wavPath, activeConfig(getAppPath()));
           if (text) {
             record(`You (phone): ${text}`, "go");
             try { commandHandler?.(text, "voice"); } catch {}

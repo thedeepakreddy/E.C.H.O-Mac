@@ -65,16 +65,27 @@ export interface CalEvent {
 /**
  * Upcoming events in the next `hoursAhead` hours via AppleScript. Calendar's
  * scripting is slow, so this asks only for a narrow window.
+ *
+ * Each start is returned as SECONDS FROM NOW, computed inside AppleScript. It
+ * used to come back as the date's display string and be parsed by JavaScript,
+ * which only understands US-style dates — on an Indian or British Mac every
+ * event parsed as NaN and was dropped, so reminders silently never fired.
+ *
+ * `onlyIfRunning`: `tell application "Calendar"` LAUNCHES Calendar, so a
+ * background check that used it opened Calendar every minute (and asked for
+ * automation permission on first launch). Background callers pass this.
  */
-export async function upcomingEvents(hoursAhead = 12): Promise<CalEvent[]> {
+export async function upcomingEvents(hoursAhead = 12, opts: { onlyIfRunning?: boolean } = {}): Promise<CalEvent[]> {
+  const hours = Math.min(Math.max(Number(hoursAhead) || 12, 1), 72);
   const script = `
     set output to ""
+    ${opts.onlyIfRunning ? 'if application "Calendar" is not running then return ""' : ""}
     set now to current date
-    set laterDate to now + (${hoursAhead} * hours)
+    set laterDate to now + (${hours} * hours)
     tell application "Calendar"
       repeat with cal in calendars
         repeat with e in (every event of cal whose start date is greater than now and start date is less than laterDate)
-          set output to output & (summary of e) & "|||" & ((start date of e) as string) & "\n"
+          set output to output & (summary of e) & "|||" & (((start date of e) - now) as integer) & "\n"
         end repeat
       end repeat
     end tell
@@ -88,14 +99,14 @@ export async function upcomingEvents(hoursAhead = 12): Promise<CalEvent[]> {
   const now = Date.now();
   const events: CalEvent[] = [];
   for (const line of raw.split("\n")) {
-    const [title, startStr] = line.split("|||");
-    if (!title || !startStr) continue;
-    const start = new Date(startStr).getTime();
-    if (Number.isNaN(start)) continue;
+    const [title, secondsStr] = line.split("|||");
+    const seconds = Number(secondsStr);
+    if (!title || !secondsStr || !Number.isFinite(seconds)) continue;
+    const start = now + seconds * 1000;
     events.push({
       title: title.trim(),
-      start: startStr.trim(),
-      minutesAway: Math.round((start - now) / 60000),
+      start: new Date(start).toISOString(),
+      minutesAway: Math.round(seconds / 60),
     });
   }
   return events.sort((a, b) => a.minutesAway - b.minutesAway);

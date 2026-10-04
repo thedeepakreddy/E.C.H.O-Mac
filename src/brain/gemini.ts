@@ -1,3 +1,6 @@
+import {toolGranted} from '../safety/tool-permissions.js';
+import {codingRequestToolAllowed} from '../coding/tool-selection.js';
+import {codingContinuationEligible} from '../coding/continuation.js';
 import { GoogleGenAI, Type } from "@google/genai";
 import { z } from "zod";
 import {
@@ -13,6 +16,10 @@ import type { AudioTurn, BrainExecutionLimits, SendOptions } from "./types.js";
 import { stripAudioParts, toInlineDataPart } from "../voice/audio-turn.js";
 import { TOOLS, ToolDef } from "../tools/registry.js";
 import { selectToolNames } from "./tool-router.js";
+import { INTERNAL_TOOLS } from '../memory/read-cache.js';
+import { modelToolResult } from "../memory/tool-context.js";
+import { ExternalToolCatalog } from "./external-tool-catalog.js";
+import { currentAgentRunContext } from "../agent-replay/context.js";
 import { runGated } from "../safety/gate.js";
 import { trimGeminiHistory } from "./history.js";
 import { modelHealth } from "./model-health.js";
@@ -22,8 +29,10 @@ import { resolveToolName } from "./localtools.js";
 import { currentLoop, normalizeGeminiFinish, classifyProviderError } from "../agent-replay/loop-log.js";
 import type { ExitReason } from "../agent-replay/recorder.js";
 import type { JarvisConfig } from "../config.js";
-import { connectMcpServers, loadMcpConfig, type McpConnection, type McpToolHandle } from "./mcp.js";
+import { connectMcpServers, loadMcpConfig, mcpToolDef, type McpConnection, type McpToolHandle } from "./mcp.js";
 import { ProviderMemoryContext } from "../memory/provider-context.js";
+import {streamStep,streamSilenceMs} from './stream-deadline.js';
+import { TurnQueue } from "./turn-queue.js";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 
@@ -105,8 +114,9 @@ export function toFunctionDeclaration(t: ToolDef) {
  */
 export function geminiFallbackReason(
   error: unknown
-): "quota" | "not found" | "temporarily overloaded" | null {
+): "quota" | "not found" | "temporarily overloaded" | "stalled" | null {
   const text = String((error as any)?.message ?? error ?? "");
+  if ((error as any)?.code==='ECHO_STREAM_STALLED' || /model request timed out|Model stream made no progress/.test(text)) return 'stalled';
   if (text.includes("429") || text.includes("Quota exceeded") || text.includes("RESOURCE_EXHAUSTED")) return "quota";
   if (text.includes("404") || text.includes("NOT_FOUND") || text.includes("no longer available")) return "not found";
   // A 503/UNAVAILABLE is normally a short-lived capacity spike. Move to the next
@@ -181,6 +191,8 @@ export class GeminiBrain extends Brain {
   private mcpReady: Promise<McpConnection> | null = null;
   private mcpConnection: McpConnection | null = null;
   private memory = new ProviderMemoryContext("gemini");
+  /** Messages that arrived while the loop was running — see turn-queue.ts. */
+  private queue = new TurnQueue<{ parts: any[]; audio: boolean }>();
 
   /**
    * Built once per session, not per request: it is re-sent on every one of up to
@@ -188,15 +200,18 @@ export class GeminiBrain extends Brain {
    * disk churn for a value that does not change mid-task.
    */
   private systemPrompt = JARVIS_PERSONA;
+  private externalCatalog: ExternalToolCatalog | null = null;
 
   constructor(private cfg: JarvisConfig, apiKey: string, private readonly limits: BrainExecutionLimits = {}) {
     super();
+    this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
     this.ai = new GoogleGenAI({ apiKey });
+    this.memory.configure(cfg.context);
     // A restricted agent (a custom fleet member — see frontier/fleet.ts) never
     // sees a tool outside its allowlist in the first place; per-turn pruning
     // (tool-router.ts) only ever narrows further within this.
     const allowed = this.limits.allowedTools;
-    this.functionDeclarations = (allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS).map(toFunctionDeclaration);
+    this.functionDeclarations = (allowed ? TOOLS.filter((t) => toolGranted(allowed,t.name)) : TOOLS).map(toFunctionDeclaration);
     // The listening instructions are only true when audio is actually attached,
     // so they are only in the prompt when it is.
     this.systemPrompt = buildSystemPrompt(
@@ -212,7 +227,7 @@ export class GeminiBrain extends Brain {
     // the first turn it is sixteen seconds of an assistant appearing to ignore
     // someone. Nothing awaits this until initMcp does.
     if (Object.keys(loadMcpConfig()).length) {
-      this.mcpReady = connectMcpServers().catch((err) => {
+      this.mcpReady = connectMcpServers({allowedTools: this.limits.allowedTools}).catch((err) => {
         console.error("[gemini] MCP startup failed:", (err as any)?.message ?? err);
         return { tools: [], servers: [], close: async () => {} };
       });
@@ -236,9 +251,10 @@ export class GeminiBrain extends Brain {
     this.mcpInitialized = true;
     // Await the connection started in the constructor. Connecting again here
     // would close those servers and spawn a second set.
-    this.mcpConnection = await (this.mcpReady ?? connectMcpServers());
+    this.mcpConnection = await (this.mcpReady ?? connectMcpServers({allowedTools: this.limits.allowedTools}));
     const { tools, servers } = this.mcpConnection;
     for (const tool of tools) {
+      if (this.limits.allowedTools && !toolGranted(this.limits.allowedTools,tool.name)) continue;
       const schema = jsonSchemaToGoogle(tool.inputSchema);
       this.functionDeclarations.push({
         name: tool.name,
@@ -272,7 +288,7 @@ export class GeminiBrain extends Brain {
 
   send(userText: string, audio?: AudioTurn, opts?: SendOptions) {
     this.lastSend = opts ?? {};
-    if (this.memory.begin(userText, opts)) this.contents = [];
+    const reset = this.memory.begin(userText, opts);
     // A spoken turn gets the per-turn reminder that it will be read aloud.
     if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
     // How the user is doing changes how a reply should read, and it changes
@@ -291,16 +307,46 @@ export class GeminiBrain extends Brain {
     // this is the order that says "here is what was said, and here is a guess
     // at it" rather than the reverse.
     const parts: any[] = [];
+    let heard = false;
     if (audio && this.hearsAudio) {
       const part = toInlineDataPart(audio);
       if (part) {
         parts.push(part);
-        this.audioPending = true;
+        heard = true;
       }
     }
     parts.push({ text: userText });
-    this.contents.push({ role: "user", parts });
-    if (!this.busy) void this.runLoop();
+    // Never straight into a live history: mid-task that lands between a tool
+    // call and its result, which Gemini rejects. The loop takes it in at its
+    // next step, or a fresh loop does once this one has stopped.
+    if (this.busy) {
+      this.queue.push({ parts, audio: heard }, reset);
+      return;
+    }
+    if (reset) this.contents = [];
+    this.appendUser(parts, heard);
+    void this.runLoop();
+  }
+
+  /**
+   * Add a user message, folding it into the last user turn when there is one.
+   *
+   * After a tool round the last turn is the user turn carrying the function
+   * responses, and a message added there keeps each response directly after
+   * its call — the same way screenshots already ride along with them.
+   */
+  private appendUser(parts: any[], heard: boolean) {
+    const last = this.contents[this.contents.length - 1];
+    if (last?.role === "user") last.parts = [...(last.parts ?? []), ...parts];
+    else this.contents.push({ role: "user", parts });
+    if (heard) this.audioPending = true;
+  }
+
+  /** Take in what was said while this loop was working. True if anything was. */
+  private joinQueued(): boolean {
+    const joined = this.queue.takeForRunningLoop();
+    for (const q of joined) this.appendUser(q.parts, q.audio);
+    return joined.length > 0;
   }
 
   /**
@@ -330,17 +376,27 @@ export class GeminiBrain extends Brain {
    * replay recorder and the history are none the wiser.
    */
   private async generateStreaming(request: any): Promise<any> {
-    const signal = this.turnAbort?.signal;
+    const parent = this.turnAbort?.signal;
+    const requestAbort = new AbortController();
+    const signal = parent ? AbortSignal.any([parent,requestAbort.signal]) : requestAbort.signal;
+    const hardLimit=Number(process.env.ECHO_LLM_TIMEOUT_MS??120000);
+    const overallMs=hardLimit>0?Math.max(1,hardLimit-1000):0;
+    const overallTimer=overallMs?setTimeout(()=>requestAbort.abort(new Error(`model request timed out after ${overallMs}ms`)),overallMs):undefined;
     const turnId = this.lastSend.turnId;
-    const stream = await this.ai.models.generateContentStream({
+    try {
+    const stream = await streamStep(()=>this.ai.models.generateContentStream({
       ...request,
       config: { ...request.config, abortSignal: signal },
-    });
+    }),requestAbort,streamSilenceMs(),parent);
     let text = "";
     const otherParts: any[] = [];
     let last: any = null;
     let streamedText = false;
-    for await (const chunk of stream as AsyncIterable<any>) {
+    const iterator=(stream as AsyncIterable<any>)[Symbol.asyncIterator]();
+    while(true) {
+      const step=await streamStep(()=>iterator.next(),requestAbort,streamSilenceMs(),parent);
+      if(step.done)break;
+      const chunk=step.value;
       last = chunk;
       const parts = chunk?.candidates?.[0]?.content?.parts ?? [];
       for (const p of parts) {
@@ -372,6 +428,7 @@ export class GeminiBrain extends Brain {
       ...last,
       candidates: [{ ...cand, content }],
     };
+    } finally {if(overallTimer)clearTimeout(overallTimer);requestAbort.abort();}
   }
 
   /**
@@ -390,11 +447,21 @@ export class GeminiBrain extends Brain {
   }
 
   private async runLoop() {
-    await this.initMcp();
+    // Busy BEFORE the first await. Set after it, a second message sent while
+    // the MCP servers were still connecting started a second loop on the same
+    // history.
     this.busy = true;
+    try {
+      await this.initMcp();
+    } catch (err) {
+      console.error("[gemini] MCP initialisation failed:", (err as any)?.message ?? err);
+    }
     this.aborted = false;
     this.turnAbort = new AbortController();
     this.emitEvent("status", "thinking");
+    this.externalCatalog = new ExternalToolCatalog([...this.mcpTools.values()]);
+    const run = currentAgentRunContext(); if (run) run.toolCatalog = this.externalCatalog;
+    await this.externalCatalog.begin(this.memory.query);
 
     // Tool pruning (AGI blueprint #9): computed once per turn, from the text
     // that started it, and held for every iteration of the loop below — a
@@ -450,6 +517,7 @@ export class GeminiBrain extends Brain {
       // rather than continuing to call tools. These bound an automatic nudge so
       // the user doesn't have to keep saying "finish it".
       let autoContinues = 0;
+      let successfulModelIndex = 0;
       let didAnyToolCall = false;
       const MAX_ITERATIONS = this.limits.maxIterations ?? LOOP_CAPS.gemini.maxIterations;
       const AUTO_CONTINUE_LIMIT = LOOP_CAPS.gemini.autoContinueLimit;
@@ -463,13 +531,16 @@ export class GeminiBrain extends Brain {
           stop("abort_signal", `interrupted at iteration ${i}`);
           break;
         }
+        // Anything said since the last step joins the conversation here, at
+        // a boundary, rather than wherever it happened to arrive.
+        this.joinQueued();
         iteration = i;
         log?.iterationStart(i, this.contents.length, approxTokens(this.contents));
 
         let res;
-        let attempt = 0;
+        let attempt = successfulModelIndex;
         let turnStartedAt = Date.now();
-        let currentModel = FALLBACK_MODELS[0];
+        let currentModel = FALLBACK_MODELS[attempt];
         
         // Auto-fallback logic for quota exhaustion
         while (attempt < FALLBACK_MODELS.length) {
@@ -477,12 +548,15 @@ export class GeminiBrain extends Brain {
             if (this.memory.takeInvalidation()) {
               this.contents = [{ role: "user", parts: [{ text: "Continue from the saved task state. Forgotten evidence is unavailable; re-observe if needed." }] }];
             }
+            const declarations = (this.activeFunctionDeclarations ?? this.functionDeclarations)
+              .filter((tool: any) => (!this.cfg.agi?.toolPruning?.enabled || !this.memory.isCodingTurn() || codingRequestToolAllowed(tool.name)) && (!this.mcpTools.has(tool.name) || this.externalCatalog?.selected.has(tool.name)));
+            const used = this.memory.prepareHistory(this.contents, declarations, this.systemPrompt, "gemini", currentModel);
             const request = {
               model: currentModel,
               contents: this.contents,
               config: {
-                systemInstruction: `${this.systemPrompt}\n\n${this.memory.packet()}`,
-                tools: [{ functionDeclarations: this.activeFunctionDeclarations ?? this.functionDeclarations }],
+                systemInstruction: `${this.systemPrompt}\n\n${this.memory.packet(used, true, currentModel)}`,
+                tools: [{ functionDeclarations: declarations }],
               },
             };
             log?.enterState("awaiting_llm", `gemini:${currentModel}`);
@@ -502,6 +576,7 @@ export class GeminiBrain extends Brain {
             );
             // If it succeeded, persist the successful model for the next turn
             this.cfg.gemini.model = currentModel;
+            successfulModelIndex = attempt;
             break;
           } catch (err: any) {
             const errStr = String(err?.message ?? err);
@@ -515,6 +590,7 @@ export class GeminiBrain extends Brain {
               // means its quota window has to pass first.
               if (reason === "not found") modelHealth.markDead(currentModel, errStr);
               else if (reason === "quota") modelHealth.markExhausted(currentModel, errStr);
+              else modelHealth.markUnavailable(currentModel,reason);
 
               const from = currentModel;
               attempt++;
@@ -524,6 +600,7 @@ export class GeminiBrain extends Brain {
               const next = FALLBACK_MODELS[attempt];
               console.warn(`[gemini] ${from} failed (${reason})${next ? `; trying ${next}` : ""}`);
               log?.note("llm.model_fallback", { from, to: next ?? null, reason, attempt });
+              this.emitEvent('progress',`The model ${reason==='stalled'?'stopped responding':'is unavailable'}. ${next?'Trying another model; saved work is preserved.':'No fallback is available; the task is not finished.'}`);
               if (!next) {
                 throw new Error(
                   `Gemini has no model left to try (${FALLBACK_MODELS.join(", ")}). Last error: ${errStr}`
@@ -597,28 +674,33 @@ export class GeminiBrain extends Brain {
         }
 
         if (!calls.length) {
+          // The user said something while this reply was being written. That
+          // is the next thing to answer, not a reason to end the turn.
+          if (!this.aborted && this.joinQueued()) continue;
           // A text-only reply normally ends the turn. But if Gemini has been
           // acting and this reply clearly means to keep going ("next I'll…",
           // "shall I continue?") rather than reporting completion, nudge it on
           // automatically instead of dumping the job back on the user.
           const said = parts.map((p: any) => p.text || "").join(" ").trim();
           const meansToContinue =
-            /\b(next|then|now i|after that|let me|i'?ll|i will|continu|proceed|moving on|going to|start(ing)? (with|by))\b/i.test(said) &&
+            /\b(next|then|now (?:i|installing|assembling|implementing|building|testing)|after that|let me|i['’]?ll|i will|i['’]?m (?:continuing|building|implementing)|continu(?:e|ing)|proceed|moving on|going to|start(ing)? (with|by))\b/i.test(said) &&
             !/\b(done|finished|complete|all set|here'?s the|the result|in summary|to summari[sz]e|anything else)\b/i.test(said);
           const asksToContinue = /\b(shall i|should i|do you want me to|would you like me to)\b/i.test(said);
-          if (didAnyToolCall && (meansToContinue || asksToContinue) && autoContinues < AUTO_CONTINUE_LIMIT) {
+          // With no tool run yet, eligibility already means the reply promised
+          // work ("I'm building it now") that nothing has started.
+          if (codingContinuationEligible(didAnyToolCall,this.memory.isCodingTurn(),said) && (meansToContinue || asksToContinue || !didAnyToolCall) && autoContinues < AUTO_CONTINUE_LIMIT) {
             autoContinues++;
             log?.note("loop.auto_continue", { n: autoContinues, limit: AUTO_CONTINUE_LIMIT });
             this.contents.push({
               role: "user",
-              parts: [{ text: "Continue and finish the task completely now. Do not stop, summarise, or ask — take the next step and keep going until it is fully done." }],
+              parts: [{ text: "Take the next concrete step now; a progress sentence alone does not finish the task. For a large coding build, open/inspect the saved project, save milestones and start_project_build so the foreground remains available. Continue using tools until checks and acceptance evidence pass. If a genuinely blocking requirement is missing, save it with ask_build_question and wait for the answer." }],
             });
             continue;
           }
 
           // The nudge budget is spent but the model still sounds mid-task. It
           // used to fall through this same `break` as a finished turn.
-          if (didAnyToolCall && (meansToContinue || asksToContinue)) {
+          if (codingContinuationEligible(didAnyToolCall,this.memory.isCodingTurn(),said) && (meansToContinue || asksToContinue || !didAnyToolCall)) {
             stop(
               "model_stop_no_tool_call",
               `auto-continue limit ${AUTO_CONTINUE_LIMIT} reached while still mid-task`,
@@ -671,48 +753,26 @@ export class GeminiBrain extends Brain {
               // so announcing it first reported each MCP call TWICE in the HUD
               // and the phone feed — and with the raw mcp__server__name at that,
               // where the gate's version reads "sarvam_tools_translate".
-              // Wrap the MCP tool in a ToolDef so it goes through the same safety gate
-              const mcpToolDef: ToolDef = {
-                name: call.name,
-                description: "MCP tool",
-                schema: {},
-                // MCP tools come from outside, so assume they can change something
-                // and make the safety gate judge them like any other write tool.
-                readOnly: false,
-                handler: async (args: any) => {
-                  // Deadlined inside the handle: a server that accepts the call
-                  // and never answers would otherwise hold the turn open.
-                  const result = await mcpInfo.call(args ?? {});
-                  const resultText = result.text ?? "";
-
-                  // Auto-play generated audio files from Sarvam/MCP tools
-                  const wavMatch = resultText.match(/(\/[^\s"']+\.wav)/i);
-                  if (wavMatch && existsSync(wavMatch[1])) {
-                    try {
-                      spawn("/usr/bin/afplay", [wavMatch[1]]);
-                    } catch (err) {
-                      console.error("[gemini] could not play generated audio:", (err as any)?.message ?? err);
-                    }
-                  }
-
-                  return { ...result, text: resultText || "done" };
-                }
-              };
-              const out = await runGated(mcpToolDef, call.args ?? {}, {
+              // One shared adapter (brain/mcp.ts) so every brain gates an outside
+              // tool identically — these copies had already drifted apart.
+              const def = mcpToolDef(mcpInfo);
+              const out = await runGated(def, call.args ?? {}, {
                 workingDir: this.cfg.control.workingDir,
+                allowedTools: this.limits.allowedTools,
                 emit: (e, p) => this.emitEvent(e as any, p),
               });
               parts.push({
-                functionResponse: { name: call.name, response: { result: withinBudget(out.text ?? "done"), status: out.status, data: out.data, error: out.error, verification: out.verification, callId: out.callId } },
+                functionResponse: { name: call.name, response: modelToolResult(out) },
               });
             } else if (tool) {
               // Through the shared gate, exactly as the other brains are.
               const out = await runGated(tool, call.args ?? {}, {
                 workingDir: this.cfg.control.workingDir,
+                allowedTools: this.limits.allowedTools,
                 emit: (e, p) => this.emitEvent(e as any, p),
               });
               parts.push({
-                functionResponse: { name: call.name, response: { result: withinBudget(out.text ?? "done"), status: out.status, data: out.data, error: out.error, verification: out.verification, callId: out.callId } },
+                functionResponse: { name: call.name, response: modelToolResult(out) },
               });
               if (out.image) {
                 parts.push({
@@ -742,18 +802,21 @@ export class GeminiBrain extends Brain {
          * exclusive lease on the pointer, so a batch cannot contend with itself.
          */
         const isObservation = (call: any): boolean => {
-          if (this.mcpTools.has(call.name)) return false; // an outside server may do anything
+          const handle = this.mcpTools.get(call.name);
+          if (handle) return mcpToolDef(handle).readOnly;
           const named = TOOLS.find((t) => t.name === call.name)
             ?? TOOLS.find((t) => t.name === resolveToolName(call.name));
-          return Boolean(named?.readOnly);
+          return Boolean(named?.readOnly) && !INTERNAL_TOOLS.has(named!.name);
         };
         let batched = 0;
         while (batched < calls.length && isObservation(calls[batched])) batched++;
 
         if (batched > 1) {
           log?.note("tool.parallel_batch", { count: batched, names: calls.slice(0, batched).map((c: any) => String(c?.name ?? "?")) });
-          const settled = await Promise.all(calls.slice(0, batched).map((call: any) => runOneCall(call)));
-          for (const parts of settled) responseParts.push(...parts);
+          for (let start = 0; start < batched; start += 3) {
+            const settled = await Promise.all(calls.slice(start, Math.min(start + 3, batched)).map((call: any) => runOneCall(call)));
+            for (const parts of settled) responseParts.push(...parts);
+          }
         } else {
           batched = 0;
         }
@@ -812,11 +875,36 @@ export class GeminiBrain extends Brain {
       log?.enterState("idle");
       this.emitEvent("turnEnd");
       this.emitEvent("status", "idle");
+      this.drainQueue();
     }
+  }
+
+  /**
+   * The loop has ended with messages still waiting.
+   *
+   * After a stop they are the user's NEXT request ("stop — do this instead"),
+   * so a fresh loop answers them, inside the run the recorder opened for them.
+   * After a failed run they stay in the history instead: the recorder's
+   * checkpoint already carries them into its recovery attempt, and running
+   * them here as well would do the work twice.
+   */
+  private drainQueue() {
+    const next = this.queue.takeForNextLoop();
+    if (!next.length) return;
+    if (!this.aborted) {
+      for (const q of next) this.appendUser(q.item.parts.filter((p: any) => !p.inlineData), false);
+      console.log(`[gemini] ${next.length} message(s) arrived as the task failed; kept for its recovery`);
+      return;
+    }
+    if (next.some((q) => q.reset)) this.contents = [];
+    for (const q of next) this.appendUser(q.item.parts, q.item.audio);
+    next[0].resume(() => void this.runLoop());
   }
 
   interrupt() {
     this.aborted = true;
+    // What was queued belonged to the task being stopped.
+    this.queue.clear();
     try {
       this.turnAbort?.abort();
     } catch {
@@ -831,6 +919,8 @@ export class GeminiBrain extends Brain {
 
   async stop() {
     this.aborted = true;
+    this.turnAbort?.abort();
+    this.queue.clear();
     // Every MCP server is a child process this brain spawned. Without this, a
     // brain switch left the old set running and started a second one.
     this.memory.close();

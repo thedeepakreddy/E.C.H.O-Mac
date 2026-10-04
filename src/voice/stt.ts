@@ -8,6 +8,7 @@ import { run } from "../tools/shell.js";
 import type { JarvisConfig } from "../config.js";
 import { buildVocabulary } from "./vocabulary.js";
 import { getAppPath } from "../utils/appPath.js";
+import { BoundedWork } from "../utils/bounded-work.js";
 
 /**
  * Speech-to-text, either locally via whisper.cpp or through Sarvam's cloud API.
@@ -28,6 +29,7 @@ import { getAppPath } from "../utils/appPath.js";
 let server: ChildProcess | null = null;
 let serverPort = 0;
 let serverReady: Promise<boolean> | null = null;
+const localWork = new BoundedWork(2);
 
 function serverBinFor(cliPath: string): string {
   return join(dirname(cliPath), "whisper-server");
@@ -51,12 +53,13 @@ function isEnglishOnlyModel(cfg: JarvisConfig): boolean {
   return /\.en\.bin$/.test(cfg.voice.sttModel);
 }
 
-async function waitForServer(port: number, timeoutMs = 30000): Promise<boolean> {
+async function waitForServer(port: number, alive: () => boolean, timeoutMs = 30000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (!alive()) return false;
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/`, { method: "GET" });
-      if (res.ok || res.status === 404) return true; // listening either way
+      const res = await fetch(`http://127.0.0.1:${port}/`, { method: "GET", signal: AbortSignal.timeout(1000) });
+      if (alive() && (res.ok || res.status === 404)) return true; // listening either way
     } catch {
       /* not up yet */
     }
@@ -79,11 +82,13 @@ function ensureServer(cfg: JarvisConfig): Promise<boolean> {
     await run("/usr/bin/pkill", ["-f", "whisper-server"]).catch(() => null);
 
     serverPort = 8178 + Math.floor(Math.random() * 400);
+    let child: ChildProcess;
     try {
-      server = spawn(
+      child = spawn(
         bin,
         [
           "-m", cfg.voice.sttModel,
+          "-t", "2", "-p", "1",
           "--port", String(serverPort),
           "-l", whisperLang(cfg),
           "-nt",
@@ -103,22 +108,26 @@ function ensureServer(cfg: JarvisConfig): Promise<boolean> {
         ],
         { stdio: "ignore" }
       );
-      server.on("exit", () => {
-        server = null;
-        serverReady = null; // allow a later retry
+      server = child;
+      child.on("exit", () => {
+        if (server === child) {
+          server = null;
+          serverReady = null; // allow a later retry
+        }
       });
+      child.on("error", () => { if (server === child) server = null; });
     } catch {
       return false;
     }
 
-    const up = await waitForServer(serverPort);
+    const up = await waitForServer(serverPort, () => server === child);
     if (!up) {
       try {
-        server?.kill("SIGKILL");
+        child.kill("SIGKILL");
       } catch {
         /* ignore */
       }
-      server = null;
+      if (server === child) server = null;
       return false;
     }
     console.log(`[jarvis] whisper server ready on :${serverPort} (model stays loaded)`);
@@ -149,6 +158,7 @@ function clean(text: string): string {
 }
 
 async function viaServer(wavPath: string): Promise<string | null> {
+  const signal = AbortSignal.timeout(30000);
   try {
     const form = new FormData();
     form.append("file", new Blob([readFileSync(wavPath)]), "audio.wav");
@@ -157,10 +167,16 @@ async function viaServer(wavPath: string): Promise<string | null> {
     const res = await fetch(`http://127.0.0.1:${serverPort}/inference`, {
       method: "POST",
       body: form,
+      signal,
     });
     if (!res.ok) return null;
     return clean(await res.text());
   } catch {
+    if (signal.aborted) {
+      // A client timeout alone leaves whisper computing and queues more work.
+      stopSttServer();
+      throw new Error("Local speech recognition timed out; the worker was stopped.");
+    }
     return null; // fall back to the CLI
   }
 }
@@ -168,7 +184,7 @@ async function viaServer(wavPath: string): Promise<string | null> {
 async function viaCli(wavPath: string, cfg: JarvisConfig): Promise<string> {
   const { stdout, stderr, code } = await run(
     cfg.voice.whisperBin,
-    ["-m", cfg.voice.sttModel, "-f", wavPath, "-l", whisperLang(cfg), "-nt", "-np"],
+    ["-m", cfg.voice.sttModel, "-f", wavPath, "-l", whisperLang(cfg), "-t", "2", "-p", "1", "-nt", "-np"],
     60000
   );
   if (code !== 0 && !stdout.trim()) {
@@ -209,7 +225,11 @@ async function viaSarvam(wavPath: string, cfg: JarvisConfig): Promise<string> {
 }
 
 /** Transcribe a WAV file with the local whisper.cpp model, ignoring sttProvider. */
-export async function transcribeLocal(wavPath: string, cfg: JarvisConfig): Promise<string> {
+export function transcribeLocal(wavPath: string, cfg: JarvisConfig): Promise<string> {
+  return localWork.run(() => transcribeLocalSerial(wavPath, cfg));
+}
+
+async function transcribeLocalSerial(wavPath: string, cfg: JarvisConfig): Promise<string> {
   if (!existsSync(cfg.voice.sttModel)) {
     throw new Error(
       `Whisper model not found at ${cfg.voice.sttModel}. Download it (see README) or fix voice.sttModel in config.json.`
@@ -254,15 +274,20 @@ export interface SpokenLanguage {
  * be measured counts as English.
  */
 export async function detectSpokenLanguage(wavPath: string, cfg: JarvisConfig): Promise<SpokenLanguage> {
+  return localWork.run(() => detectSpokenLanguageSerial(wavPath, cfg)).catch(() => ({ language: "en", english: 1 }));
+}
+
+async function detectSpokenLanguageSerial(wavPath: string, cfg: JarvisConfig): Promise<SpokenLanguage> {
   const english = { language: "en", english: 1 };
   if (isEnglishOnlyModel(cfg) || !(await ensureServer(cfg))) return english;
+  const signal = AbortSignal.timeout(30000);
   try {
     const form = new FormData();
     form.append("file", new Blob([readFileSync(wavPath)]), "audio.wav");
     form.append("response_format", "verbose_json");
     form.append("language", "auto");
     form.append("detect_language", "true");
-    const res = await fetch(`http://127.0.0.1:${serverPort}/inference`, { method: "POST", body: form });
+    const res = await fetch(`http://127.0.0.1:${serverPort}/inference`, { method: "POST", body: form, signal });
     if (!res.ok) return english;
     // whisper-server writes raw control characters inside its JSON strings.
     const data: any = JSON.parse((await res.text()).replace(/[\u0000-\u001f]/g, " "));
@@ -271,6 +296,7 @@ export async function detectSpokenLanguage(wavPath: string, cfg: JarvisConfig): 
     if (!top) return english;
     return { language: top[0], english: Number(probs.en ?? 0) };
   } catch {
+    if (signal.aborted) stopSttServer();
     return english;
   }
 }

@@ -43,10 +43,14 @@ export function speakable(cmd: string, max = 80): string {
 
 /** Tools that only observe. Nothing here can alter the machine. */
 export const READ_ONLY = new Set([
+  "read_creator_project",
+  'read_browser_page','inspect_supervised_task','read_supervised_evidence','submit_task_review','show_task_report',
+  "inspect_vercel_connection", "inspect_coding_tools", "inspect_project_recovery", "prepare_vercel_deployment", "inspect_vercel_deployment", "inspect_project_diagnostics", "inspect_project_preview", "inspect_project_recipe", "inspect_project", "search_project", "read_project_file", "project_diff", "read_process", "project_git_status",
   "screenshot",
   "get_screen_info",
   "list_ui_elements",
   "recall",
+  "conversation_history",
   "memory_status",
   // Queries and UI affordances — these observe or display, never act.
   "list_undo",
@@ -71,6 +75,7 @@ export const READ_ONLY = new Set([
   "web_search",
   "system_sitrep",
   // Reading a live Osiris feed is a GET against a public intelligence API.
+  "open_intel",
   "osiris_intel",
   "search_audio_log",
   "analyze_screen_visually",
@@ -101,12 +106,14 @@ export const READ_ONLY = new Set([
   "Glob",
   "Grep",
   "WebSearch",
+  'ToolSearch',
   "TodoWrite",
   "NotebookRead",
 ]);
 
 /** Tools that act on the UI but stay local and are trivially recoverable. */
 export const UI_ACTIONS = new Set([
+  'cancel_supervised_task',
   "move_mouse",
   "scroll",
   "click",
@@ -124,6 +131,7 @@ export const UI_ACTIONS = new Set([
   "osiris_focus",
   "show_neural_core",
   "show_creator_page",
+  "show_creator_project",
   "background_click",
 ]);
 
@@ -158,11 +166,50 @@ const DANGEROUS_SHELL: Array<[RegExp, string]> = [
   [/\bchmod\s+-R|\bchown\s+-R/, "change permissions recursively"],
   [/\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh/, "download and execute a script"],
   [/\bnpm\s+publish\b|\byarn\s+publish\b/, "publish a package publicly"],
-  [/\b(mail|sendmail|mutt)\b/, "send an email"],
+  // At command position only. As a bare word it matched "mail.google.com",
+  // so a shortcut that merely OPENS Gmail was confirmed as "send an email".
+  [/(?:^|[;&|(]\s*|\bsudo\s+)(mail|mailx|sendmail|mutt)\b(?!\.)/, "send an email"],
   [/\bcurl\b.*(-X\s*(POST|PUT|DELETE|PATCH)|--data|-d\s)/, "send data to an external service"],
   [/\bdefaults\s+write\b|\blaunchctl\b/, "change system settings"],
   [/\bcrontab\b/, "change scheduled jobs"],
   [/\bgh\s+(pr|issue|release)\s+(create|merge|close)/, "act on GitHub on your behalf"],
+
+  // ---- fork bombs -------------------------------------------------------
+  //
+  // `:(){ :|:& };:` defines a function that pipes itself into itself and
+  // backgrounds it, forever. It deletes nothing, downloads nothing and names
+  // no dangerous command, so every rule above missed it and it came out
+  // MEDIUM — which runs with no confirmation. It takes the machine down hard
+  // enough to need the power button.
+  //
+  // The backreference is what makes this precise rather than a guess at the
+  // conventional name: the function has to CALL ITSELF, whatever it is
+  // called, so `bomb(){ bomb|bomb& };bomb` is caught and an ordinary
+  // `deploy(){ npm run build; }` is not.
+  [/([\w:.]+)\s*\(\)\s*\{[^}]*\1\s*\|\s*\1[^}]*&/, "start a process that endlessly clones itself"],
+  [/\bwhile\s+(true|:)\b[^;]*;\s*do\b[^;]*&\s*;?\s*done/, "spawn processes in an endless loop"],
+
+  // ---- harvesting credentials -------------------------------------------
+  //
+  // `find ~ -name '*.key' -exec cat {} \;` prints every private key in the
+  // home directory. Nothing above matched it either — reading is not
+  // destructive, so it scored MEDIUM and ran unasked.
+  //
+  // Reading is exactly the danger here. The result does not stay on the
+  // machine: it goes into the model's context, which is a network service,
+  // and on Echo's own evidence a prompt-injected turn is a real way for that
+  // to be asked for. `SENSITIVE` already names these paths, but only for
+  // WRITES; this is the same list applied to reads.
+  [/\b(cat|bat|less|more|head|tail|strings|xxd|base64|cp|scp|rsync|tar|zip|open)\b[^|]*(\.ssh(\/|\b)|\.aws(\/|\b)|\.gnupg(\/|\b)|\.netrc\b|id_rsa|id_ed25519|id_ecdsa|\.pem\b|\.p12\b|\.pfx\b|Keychains)/,
+    "read private keys or credentials"],
+  [/\bsecurity\s+(dump-keychain|find-(generic|internet)-password)\b/, "read the macOS keychain"],
+  // A bulk read over the home directory. `find … -exec rm` is already above;
+  // this is its quieter twin, which copies instead of deleting.
+  [/\bfind\b[^|]*-exec\s+(cat|cp|scp|rsync|base64|xxd|curl|wget)\b/, "read or copy many files at once"],
+  // And the shape that matters most: a credential path on one side of a pipe
+  // and the network on the other.
+  [/(\.ssh(\/|\b)|\.aws(\/|\b)|\.env\b|\.netrc\b|id_rsa|credentials)[^|]*\|[^|]*\b(curl|wget|nc|ncat|netcat|ssh|mail)\b/,
+    "send credentials off this machine"],
 ];
 
 /**
@@ -210,6 +257,14 @@ export function classify(
   ctx: RiskContext
 ): RiskAssessment {
   const tool = bareToolName(toolName);
+  if(tool==='deploy_vercel_preview')return {tier:'high',reason:'publish project source to an external Vercel preview'};
+
+  if (tool === 'start_process') return classify('run_terminal_command', {command: [String(input?.program ?? ''), ...(Array.isArray(input?.args) ? input.args.map(String) : [])].join(' '), cwd: ctx.workingDir}, ctx);
+  if (tool === 'write_process_input') return {tier: 'medium', reason: 'send input to an owned coding process'};
+  if (tool === 'apply_project_patch' || tool === 'read_project_file') {
+    const path = firstString(input, ['path']) ?? '';
+    if (SENSITIVE.some(re => re.test(path))) return {tier: 'high', reason: 'access project credentials or settings', detail: path};
+  }
 
   if (READ_ONLY.has(tool)) {
     return { tier: "low", reason: `${tool} only reads` };
@@ -409,6 +464,28 @@ export function classify(
   if (tool === "lock_screen") {
     return { tier: "high", reason: "lock the screen right now" };
   }
+  // A system setting is usually trivial, but three of them cut the user off:
+  // sleep ends the session, Wi-Fi off drops every cloud brain and the phone
+  // remote, and Bluetooth off can take the keyboard and mouse with it.
+  if (tool === "control_mac_setting") {
+    const setting = firstString(input, ["setting"]) ?? "";
+    const action = firstString(input, ["action"]) ?? "toggle";
+    if (setting === "sleep") return { tier: "high", reason: "put the Mac to sleep" };
+    if ((setting === "wifi" || setting === "bluetooth") && action !== "on") {
+      return {
+        tier: "high",
+        reason: setting === "wifi"
+          ? `${action === "off" ? "turn Wi-Fi off" : "toggle Wi-Fi"}, which can disconnect me and the phone remote`
+          : `${action === "off" ? "turn Bluetooth off" : "toggle Bluetooth"}, which can disconnect a wireless keyboard or mouse`,
+      };
+    }
+    return { tier: "medium", reason: `change the ${setting.replace(/_/g, " ") || "system"} setting` };
+  }
+  // Hiding the translation overlay. The generic rule reads "clear" as a
+  // deletion, which asked permission to take a label off the screen.
+  if (tool === "clear_translation") {
+    return { tier: "low", reason: "hide the translation overlay" };
+  }
   if (tool === "pause_media") {
     return { tier: "medium", reason: "pause whatever is playing" };
   }
@@ -444,6 +521,22 @@ export function classify(
     return {
       tier: "high",
       reason: `start a background agent to ${speakable(firstString(input, ["task", "taskDescription", "goal"]) ?? "work on its own", 50)}`,
+    };
+  }
+
+  // A Mission starts several agents that act on their own — the same weight as
+  // spawning one, which already asked. It was rated medium, so the bigger
+  // version of the same decision was the one that went through unasked.
+  if (tool === 'run_supervised_task') {
+    // Supervision is Echo's default execution strategy for user-requested long
+    // work. Starting its bounded worker/inspector does not authorize their
+    // eventual actions: each action still passes through this same gate.
+    return {tier:'medium',reason:'plan and verify the requested long task with one worker and a read-only inspector'};
+  }
+  if (tool === "run_agent_mission") {
+    return {
+      tier: "high",
+      reason: `start a mission of agents working on their own to ${speakable(firstString(input, ["goal"]) ?? "finish a task", 50)}`,
     };
   }
 
@@ -603,16 +696,71 @@ function toolWords(name: string): string[] {
  * CAPABILITY, not the tool. A word list is a blunt instrument, but the failure
  * it prevents is irreversible and the failure it causes is one extra question.
  */
+/** Verbs that only ever look at something. Named so the leading-verb rule below can share them. */
+const READ_VERBS = ["get", "list", "read", "search", "find", "fetch", "retrieve", "show", "describe", "lookup", "count", "check", "status", "info", "view", "query", "verify"];
+
+/**
+ * How deep into a name a read verb may sit and still be the verb.
+ *
+ * `GITHUB_REREQUEST_A_CHECK_RUN` re-runs CI. Its real verb, "rerequest", is in
+ * no list, so the scan walked past it to "check" — a noun here, in "check run"
+ * — and called the whole thing a read. A real verb comes first: after the
+ * toolkit name and at most an article, never four words in.
+ */
+const READ_VERB_WITHIN = 3;
+
 const CAPABILITY: Array<[RiskTier, string[], string]> = [
-  ["high", ["delete", "destroy", "drop", "purge", "erase", "wipe", "remove", "revoke", "terminate", "uninstall", "truncate", "reset"], "delete something"],
-  ["high", ["send", "email", "mail", "message", "post", "publish", "tweet", "notify", "sms", "reply", "dm", "broadcast", "invite", "share"], "send something to someone"],
+  // "trash", "spam" and "junk" are here because of Gmail, and they are the same
+  // lesson a third time: the list named `delete` and `remove`, so
+  // GMAIL_MOVE_TO_TRASH matched only `move` and came out MEDIUM — which is
+  // auto-allowed. Echo could bin your mail without asking. Where something
+  // ends up is as much a deletion as what it is called.
+  ["high", ["delete", "destroy", "drop", "purge", "erase", "wipe", "remove", "revoke", "terminate", "uninstall", "truncate", "reset", "trash", "spam", "junk", "discard", "clear"], "delete something"],
+  // `email`, `mail` and `message` stay, even though they are nouns as often as
+  // verbs, because a missed send cannot be taken back and an extra question
+  // can. Dropping them to stop GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID asking also
+  // dropped SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL to medium, which is
+  // auto-allowed — the cure was worse. The read rule in `byCapability` fixes
+  // the fetches instead, without weakening this.
+  ["high", ["send", "email", "mail", "message", "post", "publish", "tweet", "notify", "sms", "reply", "forward", "dm", "broadcast", "invite", "share"], "send something to someone"],
   ["high", ["pay", "payment", "charge", "refund", "transfer", "invoice", "checkout", "subscribe", "purchase", "order", "billing"], "move money"],
   ["high", ["merge", "deploy", "release", "rollback", "revert", "force", "restart", "reboot", "shutdown", "scale"], "change something already running"],
   ["high", ["execute", "exec", "eval", "sql", "shell", "command", "script"], "execute code"],
-  ["high", ["grant", "permission", "role", "policy", "key", "secret", "token", "credential", "password"], "change access"],
+  ["high", ["grant", "permission", "role", "policy", "key", "secret", "token", "credential", "password", "access", "restriction"], "change access"],
+  // A standing rule keeps acting long after the turn that set it up ends, on
+  // mail Echo will never see. An auto-forward, a filter that bins everything
+  // from someone, a vacation responder writing to strangers in your name —
+  // each is one quiet `update` under the medium rule below, and each is worth
+  // one question.
+  ["high", ["filter", "forwarding", "vacation", "autoreply", "autoresponder", "webhook", "imap", "pop"], "change a rule that keeps acting on its own"],
   ["medium", ["create", "update", "write", "insert", "patch", "upload", "rename", "move", "copy", "add", "set", "edit", "modify", "close", "open", "start", "stop"], "change something"],
-  ["low", ["get", "list", "read", "search", "find", "fetch", "show", "describe", "lookup", "count", "check", "status", "info", "view", "query"], "read something"],
+  // No "low" row. A read is decided by WHERE the read verb sits, in
+  // `byCapability` below, not by it appearing anywhere in the name:
+  // `GITHUB_REREQUEST_A_CHECK_RUN` re-runs CI and was rated low off the noun
+  // in "check run".
 ];
+
+/**
+ * A verb matches in its plain or third-person form.
+ *
+ * Composio writes both `GMAIL_SEND_EMAIL` and
+ * `SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL`, and an exact-word list only
+ * caught the first. Nobody names a tool after a plural noun that is also a
+ * dangerous verb, so this is cheap.
+ */
+const forms = (v: string): string[] => [v, `${v}s`];
+const rule = (what: string): string[] => CAPABILITY.find(([, , w]) => w === what)![1];
+
+/**
+ * Words that make an action worth a question however the name is built.
+ *
+ * These are the ones the read rule below may never talk its way out of, so
+ * `LIST_AND_DELETE` stays high even though its first verb is "list".
+ */
+const IRREVERSIBLE = new Set([...rule("delete something"), ...rule("move money")].flatMap(forms));
+/** Every word any rule reacts to, so the read rule can find which one is the verb. */
+const ACTION_WORDS = new Set([...CAPABILITY.flatMap(([, verbs]) => verbs), ...READ_VERBS].flatMap(forms));
+const READ_SET = new Set(READ_VERBS.flatMap(forms));
 
 /**
  * What a tool's name implies, when nothing else is known about it.
@@ -621,9 +769,32 @@ const CAPABILITY: Array<[RiskTier, string[], string]> = [
  * reads AND writes is a write.
  */
 export function byCapability(tool: string, input: Record<string, unknown> = {}): RiskAssessment {
-  const words = new Set(toolWords(tool));
+  const list = toolWords(tool);
+  const words = new Set(list);
+
+  /**
+   * A read that names what it reads is still a read.
+   *
+   * Word-bag matching has no idea which word is the verb, so `LIST_SEND_AS`
+   * (show me my sending aliases) scored as "send something to someone", and
+   * `GET_VACATION_SETTINGS` as changing a standing rule. Both only look.
+   *
+   * A tool name is a verb followed by what it acts on, so the FIRST word that
+   * is a verb at all decides — not the first word, which on anything from an
+   * MCP server is the toolkit ("gmail", "hackernews"), and not merely the
+   * presence of a verb somewhere in the name.
+   *
+   * The exception is anything irreversible: `LIST_AND_DELETE` opens with a
+   * read and is still a delete.
+   */
+  const at = list.findIndex((w) => ACTION_WORDS.has(w));
+  const verb = at >= 0 && at < READ_VERB_WITHIN ? list[at] : undefined;
+  if (verb && READ_SET.has(verb) && ![...IRREVERSIBLE].some((v) => words.has(v))) {
+    return { tier: "low", reason: `${speakable(tool, 40)} only reads`, detail: JSON.stringify(input).slice(0, 200) };
+  }
+
   for (const [tier, verbs, what] of CAPABILITY) {
-    const hit = verbs.find((v) => words.has(v));
+    const hit = verbs.find((v) => words.has(v) || words.has(`${v}s`));
     if (!hit) continue;
     // A read verb only wins if nothing heavier matched, which the ordering
     // above already guarantees by the time we reach it.
@@ -633,6 +804,8 @@ export function byCapability(tool: string, input: Record<string, unknown> = {}):
       detail: JSON.stringify(input).slice(0, 200),
     };
   }
-  // Nothing recognisable in the name: unchanged from before, medium.
+  // Nothing recognisable, or a read verb too deep in the name to be the verb.
+  // Medium rather than low: an unreadable name is an unknown action, and the
+  // cheap mistake is asking about one that turns out to be harmless.
   return { tier: "medium", reason: `run ${tool}` };
 }

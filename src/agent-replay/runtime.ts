@@ -16,6 +16,7 @@ import {
 import {
   createRecoveryCheckpoint,
   pendingRecoveryCheckpoints,
+  pruneRunLogs,
   recoveryPrompt,
   writeRecoveryCheckpoint,
   type RecoveryCheckpoint,
@@ -26,9 +27,12 @@ import { currentInvocation } from "../memory/invocation.js";
 import { consolidateTask, recordTaskStarted } from "../memory/consolidate.js";
 import { setPrivateTask } from "../memory/capture-policy.js";
 import { dataRoot } from "../memory/paths.js";
+import { conversationId, conversations, seedConversationFromRecordings } from "../memory/conversation.js";
+import { memoryService } from "../memory/service.js";
+import { ProviderMemoryContext } from "../memory/provider-context.js";
 
 /** Diagnostics can be off while the authoritative task coordinator remains active. */
-function ephemeralRecorder(runId: string): Recorder {
+export function ephemeralRecorder(runId: string): Recorder {
   let seq = 0;
   const rec: any = { runId, dir: "", mirror: null, blob: contentHash, close() {}, finish() {},
     emit(event: any) { const full = { ...event, seq: seq++, ts: Date.now(), mono: 0, runId }; rec.mirror?.(full); return full; } };
@@ -467,6 +471,7 @@ export function recordLLM<T>(
 }
 
 export interface RecordingBrainOptions {
+  limits?: {allowedTools?: ReadonlySet<string>};
   identity?: AgentIdentity;
   /** Disable only for diagnostics/tests. User-facing brains recover by default. */
   autoResume?: boolean;
@@ -516,10 +521,24 @@ export class RecordingBrain extends Brain {
   private readonly autoResume: boolean;
   private readonly maxRecoveryAttempts?: number;
   private readonly recoveryDelayMs?: number;
+  private readonly allowedTools?: ReadonlySet<string>;
+  private toolAbort: AbortController | null = null;
+  private privateConversationId?: string;
+
+  private recordConversation(role: "user" | "assistant", text: string, taskId?: string): void {
+    if (isReplaying() || this.provider === "test" || this.identity.kind === "rehearsal" || !ProviderMemoryContext.enabled || this.lastSendOpts?.privateMode) return;
+    const opts = this.lastSendOpts;
+    if (!opts?.conversationId || memoryService.isSuppressed(opts.scope ?? {}, taskId)) return;
+    try {
+      if (role === "user" && this.identity.kind === "main") seedConversationFromRecordings(opts.conversationId, this.identity.id, opts.scope);
+      conversations.append(opts.conversationId, { role, text, taskId, provider: this.provider,
+      actorId: this.identity.id, projectId: opts.scope?.projectId }); }
+    catch (error) { console.error("[context] conversation recording failed", error); }
+  }
 
   constructor(
     private readonly inner: Brain,
-    private readonly provider: string,
+    readonly provider: string,
     private readonly loopConfig: Record<string, unknown> = {},
     options: RecordingBrainOptions = {}
   ) {
@@ -528,7 +547,8 @@ export class RecordingBrain extends Brain {
     this.autoResume = options.autoResume !== false;
     this.maxRecoveryAttempts = options.maxRecoveryAttempts;
     this.recoveryDelayMs = options.recoveryDelayMs;
-    for (const event of ["status", "text", "textDelta", "textDone", "tool", "risk", "error", "turnEnd"] as const) {
+    this.allowedTools = options.limits?.allowedTools === undefined ? undefined : new Set(options.limits.allowedTools);
+    for (const event of ["status", "text", "textDelta", "textDone", "tool", "risk", "error", "turnEnd", "progress"] as const) {
       inner.on(event, (...args: any[]) => this.forward(event, args));
     }
   }
@@ -581,6 +601,7 @@ export class RecordingBrain extends Brain {
 
   private forward(event: string, args: any[]): void {
     const context = this.contextForEvent();
+    if (event === "text" && !this.stopped) this.recordConversation("assistant", String(args[0] ?? ""), context?.taskId ?? this.checkpoint?.taskId);
     const rec = context?.recorder ?? null;
     try {
       if (rec && !context?.loop.hasExited && event === "text") {
@@ -695,6 +716,13 @@ export class RecordingBrain extends Brain {
   ): void {
     checkpoint.lastExitReason = reason;
     checkpoint.lastExitDetail = typeof payload.detail === "string" ? payload.detail : undefined;
+    if (reason === 'no_progress') {
+      checkpoint.status = 'exhausted';
+      taskCoordinator.finish(checkpoint.taskId, {status: 'blocked', summary: 'Repeated tool calls produced no new progress.'});
+      this.persistCheckpoint(context.recorder.dir, checkpoint);
+      this.cleanup(context);
+      return;
+    }
 
     if (reason === "completed") {
       checkpoint.status = "completed";
@@ -711,7 +739,13 @@ export class RecordingBrain extends Brain {
       return;
     }
 
-    const recoverable = INCOMPLETE_EXITS.has(reason);
+    // Retrying an exhausted account cannot advance this task and delays the
+    // actual provider error behind several checkpoint announcements.
+    const providerFailure = [checkpoint.lastExitDetail, ...this.pendingErrors,
+      payload.error instanceof Error ? payload.error.message : String(payload.error ?? "")].join("\n");
+    const exhaustedQuota = reason === "provider_error" &&
+      /subscription sharing.*usage limit|reached.*usage limit|out of (?:credits|quota)|insufficient_quota|exceeded.*(?:current quota|session limit)|(?:quota|session limit).*exhausted/i.test(providerFailure);
+    const recoverable = INCOMPLETE_EXITS.has(reason) && !exhaustedQuota;
     const canRetry = recoverable && checkpoint.restartable !== false && this.autoResume &&
       checkpoint.recoveryAttempts < checkpoint.maxRecoveryAttempts;
     if (canRetry) {
@@ -760,7 +794,7 @@ export class RecordingBrain extends Brain {
     // and `finalFailureMessage` already speaks it. It should not displace a
     // real provider failure, nor be appended beside it.
     if (this.pendingErrors.length === 0) this.notePendingError(message);
-    this.finalFailureMessage = message;
+    this.finalFailureMessage = exhaustedQuota ? null : message;
     queueMicrotask(() => this.emitTerminal(context.recorder.runId));
   }
 
@@ -784,6 +818,9 @@ export class RecordingBrain extends Brain {
       task.taskId = checkpoint?.taskId ?? this.lastSendOpts?.taskId ?? task.taskId;
       task.privateMode = privateMode;
       task.scope = this.lastSendOpts?.scope ?? checkpoint?.scope ?? {};
+      this.lastSendOpts = { ...this.lastSendOpts, taskId: task.taskId, scope: task.scope, privateMode };
+      if (!this.lastSendOpts.conversationId) this.lastSendOpts.conversationId = conversationId(this.identity.id, task.scope);
+      if (!checkpoint) this.recordConversation("user", userText, task.taskId);
       task.restartable = !privateMode && fullPayload && !!task.originalPrompt;
       if (!replay) {
         const state = taskCoordinator.create({ taskId: task.taskId, parentTaskId: this.lastSendOpts?.parentTaskId ?? this.identity.parentTaskId, ownerActorId: this.identity.id, goal: userText, scope: task.scope, privateMode });
@@ -813,12 +850,17 @@ export class RecordingBrain extends Brain {
       task.provider = this.provider;
       task.model = String(this.loopConfig.model ?? "unknown");
       const log = new LoopLog(recorder, this.provider, String(this.loopConfig.model ?? "unknown"));
+      this.toolAbort = new AbortController();
       const context: AgentRunContext = {
         identity: task.actor,
         taskId: task.taskId,
+        conversationId: this.lastSendOpts.conversationId,
         recorder,
         loop: log,
         payloadRecording: fullPayload,
+        provider: this.provider,
+        allowedTools: this.allowedTools,
+        toolSignal: this.toolAbort.signal,
         privateMode,
         scope: task.scope,
       };
@@ -836,9 +878,15 @@ export class RecordingBrain extends Brain {
       activeRecorders.add(recorder);
       fallbackActive = recorder;
       setCurrentLoop(log);
+      let lastProgressAt=0;
       recorder.mirror = (event) => {
         if (recorder.dir && !privateMode && process.env.ECHO_LOG_QUIET?.trim() !== "1") consoleMirror(event);
         this.updateCheckpoint(event, task, recorder.dir);
+        if(event.type==='loop.heartbeat'&&event.state!=='idle'&&Number(event.elapsedInStateMs)>=15000&&Number(event.ts)-lastProgressAt>=30000){
+          lastProgressAt=Number(event.ts);
+          const wait=event.state==='awaiting_llm'?'the model response':event.state==='awaiting_tool'?'the current tool':'the current step';
+          this.emit('progress',`Waiting for ${wait} (${Math.round(Number(event.elapsedInStateMs)/1000)} seconds). The task is not finished.`);
+        }
       };
 
       log.onExit((reason, payload) => {
@@ -855,6 +903,12 @@ export class RecordingBrain extends Brain {
         try { this.inner.interrupt(); }
         catch { /* the separate recovery attempt still starts from the checkpoint */ }
       });
+      context.onNoProgress = () => {
+        if (log.hasExited) return;
+        this.finalFailureMessage = "I stopped a repeating tool loop. The progress is saved, but the task is not complete.";
+        log.exit('no_progress', {detail: 'Repeated successful observation without new progress'});
+        this.inner.interrupt();
+      };
       log.runStart({
         ...this.loopConfig,
         env: safeEnv(),
@@ -887,9 +941,9 @@ export class RecordingBrain extends Brain {
   get currentTaskState(): TaskState | null { return this.currentTaskId ? taskCoordinator.get(this.currentTaskId) : null; }
   getTaskId(): string | undefined { return this.currentTaskId; }
   exportTaskState(): TaskState | null { return this.currentTaskState; }
-  get projectHint(): string | undefined { return (this.inner as any).projectHint; }
-  set projectHint(value: string | undefined) { (this.inner as any).projectHint = value; }
-  invalidateMemory(): void { (this.inner as any).invalidateMemory?.(); }
+  get projectHint(): string | undefined { return this.inner.projectHint; }
+  set projectHint(value: string | undefined) { this.inner.projectHint = value; }
+  invalidateMemory(): void { this.inner.invalidateMemory(); }
 
   private finalizeTask(checkpoint: RecoveryCheckpoint, status: "completed" | "failed" | "cancelled"): void {
     if (isReplaying()) return;
@@ -970,15 +1024,21 @@ export class RecordingBrain extends Brain {
 
   noteInterrupted(spoken: string): void {
     this.inner.noteInterrupted?.(spoken);
+    this.recordConversation("assistant", `Delivery correction: the reply was interrupted. The user heard only: ${spoken}`, this.currentTaskId);
   }
 
   send(userText: string, audio?: AudioTurn, opts?: SendOptions): void {
-    this.lastSendOpts = opts;
+    const scope = opts?.scope ?? {};
+    if (opts?.privateMode && !this.privateConversationId) this.privateConversationId = conversationId(`${this.identity.id}:private:${randomUUID()}`, scope);
+    if (!opts?.privateMode) this.privateConversationId = undefined;
+    this.lastSendOpts = { ...opts, conversationId: opts?.conversationId ?? this.privateConversationId ?? conversationId(this.identity.id, scope) };
     this.cancelPendingRecovery("superseded");
     if (this.context && !this.context.loop.hasExited) {
       // A follow-up can arrive while the provider is still draining the same
       // conversation. Keep it in the owning clone's async context and tape.
       const context = this.context;
+      this.lastSendOpts = { ...this.lastSendOpts, taskId: context.taskId, conversationId: context.conversationId, privateMode: context.privateMode, scope: context.scope };
+      this.recordConversation("user", userText, context.taskId);
       if (context.payloadRecording) {
         const bodyRef = context.recorder.blob(userText);
         context.recorder.emit({ type: "agent.input", bodyRef, queued: true });
@@ -1015,6 +1075,7 @@ export class RecordingBrain extends Brain {
 
   interrupt(): void {
     this.interrupted = true;
+    this.toolAbort?.abort();
     // Before the unconditional clear below, which would otherwise drop the
     // timer and leave the checkpoint behind as pending.
     this.cancelPendingRecovery("halted");
@@ -1027,6 +1088,7 @@ export class RecordingBrain extends Brain {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.toolAbort?.abort();
     this.interrupted = true;
     // Quitting mid-backoff is the likeliest way to hit this: the loop has just
     // gone quiet after a 429, and the app is closed before the retry fires.
@@ -1036,6 +1098,21 @@ export class RecordingBrain extends Brain {
     const context = this.context;
     context?.loop.exit("abort_signal", { detail: "brain stopped" });
     await this.inner.stop();
+  }
+}
+
+/** Age out old run logs under the live log root. Never throws. */
+export async function pruneOldRunLogs(): Promise<number> {
+  if (configuredReplayRun()) return 0;
+  const root = loopLogRoot();
+  if (!root) return 0;
+  try {
+    const {learningEnabled} = await import('../learn/trajectory.js');
+    const {archiveDatasetRun} = await import('../learn/dataset-archive.js');
+    return await pruneRunLogs(root, {beforeRemove: learningEnabled() ? archiveDatasetRun : undefined});
+  } catch (err) {
+    console.error("[echo:log] pruning failed:", (err as any)?.message ?? err);
+    return 0;
   }
 }
 

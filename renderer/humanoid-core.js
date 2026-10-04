@@ -789,20 +789,16 @@
 
   if (reduceMotion) return;
 
-  /* Idle still runs at a fluid rate — dropping to a few frames a second
-     turned the ambient drift into a slideshow. The saving comes from the
-     draw itself being cheap, not from starving it of frames. */
-  var IDLE_FRAME_MS = 33;
-  var last = bootAt, nextIdleAt = 0;
+  // Keep expensive canvas painting out of the way of buttons and scrolling.
+  var IDLE_FRAME_MS = 1000 / 15, ACTIVE_FRAME_MS = 1000 / 30;
+  var last = bootAt, nextPaintAt = 0;
 
   function frame(now) {
     requestAnimationFrame(frame);
-    if (document.hidden || !stage.visible) return;
+    if (document.hidden || !stage.visible || !document.hasFocus()) return;
 
-    if (document.body.dataset.renderMode === "idle") {
-      if (now < nextIdleAt) return;
-      nextIdleAt = now + IDLE_FRAME_MS;
-    }
+    if (now < nextPaintAt) return;
+    nextPaintAt = now + (document.body.dataset.renderMode === "idle" ? IDLE_FRAME_MS : ACTIVE_FRAME_MS);
 
     var dt = Math.min(now - last, 50);
     last = now;

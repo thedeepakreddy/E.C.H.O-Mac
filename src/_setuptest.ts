@@ -15,6 +15,8 @@ const ks = await import("./keystore.js");
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => (c ? (pass++, console.log(`  ✓ ${m}`)) : (fail++, console.log(`  ✗ ${m}`)));
 
+const { dataRoot } = await import("./memory/paths.js");
+
 console.log("\nSetup / API keys\n");
 
 console.log("  a fresh install");
@@ -25,7 +27,15 @@ console.log("  saving");
 ks.writeKeys({ GEMINI_API_KEY: "AIza-test-123" });
 ok(ks.readKeys().GEMINI_API_KEY === "AIza-test-123", "a key round-trips to disk");
 ok(existsSync(ks.keysPath), "written to the user's own directory, not the app bundle");
-ok(ks.keysPath.startsWith(sandbox), "under HOME, so it survives app updates");
+// The guarantee is "in the user's own data directory, never inside the app
+// bundle" — so it is checked against the RESOLVED root, not against a guess
+// at where that root is. `dataRoot()` honours ECHO_DATA_ROOT, which the test
+// runner sets to an isolated scratch directory; asserting `startsWith(HOME)`
+// made this fail under `npm test` while passing on its own, which is the
+// worst of both — a red suite that says nothing.
+ok(ks.keysPath.startsWith(dataRoot()), `in the resolved data directory (${ks.keysPath})`);
+ok(!ks.keysPath.startsWith(process.cwd() + "/dist") && !/\.app\//.test(ks.keysPath),
+  "and not inside the app bundle, so it survives app updates");
 
 // Credentials in a world-readable file are a real exposure on a shared Mac.
 const mode = statSync(ks.keysPath).mode & 0o777;

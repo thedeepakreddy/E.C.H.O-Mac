@@ -2,7 +2,7 @@
   "mcpServers": {
     "composio": {
       "type": "http",
-      "url": "https://backend.composio.dev/v3/mcp/55644595-9a7c-426c-b29b-c48c8aae4298?user_id=deepak",
+      "url": "https://backend.composio.dev/v3/mcp/78dd1faa-b71a-4372-9fd9-8a2c222aa429?user_id=pg-test-e8b31db0-67c8-4e78-83f2-959a85aefb64",
       "headers": {
         "x-api-key": "${COMPOSIO_API_KEY}"
       }
@@ -19,5 +19,6 @@
         "SARVAM_API_KEY": "${SARVAM_API_KEY}"
       }
     }
-  }
+  },
+  "//composio": "73 tools across github/gmail/googledrive/linkedin/perplexity/reddit. Deliberately curated: the six toolkits offer 1080 tools in total, and MCP tools are exempt from the top-K pruning Echo applies to its own registry, so every one of them would be sent on every request. Widen or narrow with `allowed_tools` on the Composio MCP server."
 }

@@ -25,6 +25,7 @@ import { dataRoot } from "../memory/paths.js";
 export type HealthReason = "not found" | "quota";
 
 interface Note {
+  temporary?: string;
   /** Why the model was written off, when it 404s. */
   dead?: string;
   /** Epoch ms after which a quota-exhausted model is worth trying again. */
@@ -107,13 +108,37 @@ class ModelHealth {
     this.save();
     console.warn(`[gemini] ${model} is not available to this key — dropping it from the ladder`);
   }
+  markUnavailable(model:string,reason:string):void {
+    const notes=this.load();if(notes[model]?.dead)return;
+    notes[model]={until:Date.now()+60000,at:Date.now(),temporary:reason};this.save();
+  }
 
   /**
    * Out of quota. A daily cap holds until Google's reset (midnight Pacific), a
    * per-minute one clears in moments, and the error text says which it is.
+   *
+   * It says it two different ways, and only one of them was being read. The
+   * full error carries `quotaId: GenerateRequestsPerDayPerProjectPerModel`,
+   * which `PerDay` matches — but the SDK often surfaces the message alone:
+   *
+   *   Quota exceeded for metric:
+   *   generativelanguage.googleapis.com/generate_content_free_tier_requests,
+   *   limit: 20, model: gemini-3.5-flash. Please retry in 12.7s.
+   *
+   * No "PerDay" anywhere in that, so a DAILY exhaustion was filed as a
+   * momentary rate limit and cleared after five minutes. Any turn more than
+   * five minutes after the last one therefore re-discovered, from scratch,
+   * that the same three models were out of quota — three failed round trips
+   * before the first token of every reply, which is exactly what the voice
+   * log shows. Worse on a free tier, where that cap is 20 requests per day
+   * per model and Echo was spending three or four of them per turn learning
+   * what it already knew.
+   *
+   * `generate_content_free_tier_requests` IS the per-day request cap, so the
+   * metric name settles it when the quotaId is missing.
    */
   markExhausted(model: string, detail: string): void {
-    const daily = /per ?day|PerDay|GenerateRequestsPerDay/i.test(detail);
+    const daily = /per ?day|PerDay|GenerateRequestsPerDay|generate_content_free_tier_requests/i.test(detail);
     const until = daily ? nextPacificMidnight() : Date.now() + RATE_LIMIT_COOLDOWN_MS;
     const notes = this.load();
     notes[model] = { until, at: Date.now() };
@@ -134,7 +159,7 @@ class ModelHealth {
       const note = notes[m];
       if (!note) continue;
       if (note.dead) parts.push(`${m}: not available to this key`);
-      else if (note.until && note.until > now) parts.push(`${m}: out of quota until ${new Date(note.until).toLocaleTimeString()}`);
+      else if (note.until && note.until > now) parts.push(`${m}: ${note.temporary??'out of quota'} until ${new Date(note.until).toLocaleTimeString()}`);
     }
     return parts.join("; ");
   }

@@ -29,3 +29,8 @@ vendor/
 # Scratch scripts that held a hard-coded API key — never commit them.
 test_mcp_call.cjs
 test_mcp_tools.cjs
+
+# Personal runtime data. Echo now writes these to ~/.jarvis; the copies here
+# are legacy and must never be committed (prefetch.json holds spoken commands).
+prefetch.json
+health_record.txt

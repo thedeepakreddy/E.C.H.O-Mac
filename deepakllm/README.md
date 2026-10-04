@@ -11,7 +11,7 @@ deepakllm/
   README.md          you are here
   Modelfile          Ollama definition — system prompt and sampling
   tools.json         the 95-tool vocabulary the model speaks   (npm run toolspec)
-  dataset/           portable training snapshot                (npm run dataset -- --export)
+  dataset/           legacy training snapshot (new exports use ~/.jarvis/datasets/)
     training.jsonl     chat-format examples, relative image paths
     screens/           the screenshots those examples reference
     manifest.json      counts, and what was dropped and why
@@ -47,12 +47,39 @@ normally. Every action a teacher brain takes becomes an example.
 
 ```bash
 npm run dataset                 # how much is there, and is it enough yet
-npm run dataset -- --export     # snapshot into dataset/, paths made relative
+npm run dataset -- --export     # save a new snapshot under ~/.jarvis/datasets/, relative paths
 npm run toolspec                # regenerate tools.json after adding tools
 ```
 
 The live journal stays in `~/.jarvis/trajectories`; export takes a snapshot.
-Re-export after adding tools or collecting more.
+Re-export after adding tools or collecting more. “Save dataset” and the CLI now
+save a new portable folder under `~/.jarvis/datasets/<snapshot-id>/`, preserving
+previous exports. It contains `raw/runs/` (all available providers, messages,
+requests, tool calls/results and errors), `raw/conversations/`,
+`raw/trajectories/`, current tool schemas in `feature-context.json`, and
+`training.jsonl` with automatically labelled training candidates. Use the new
+snapshot's `training.jsonl` as the trainer's `--data` argument.
+
+`gold.jsonl` starts empty. Run completion and automatic success labels do not
+prove answer correctness. Independently verify task outcomes and evidence,
+review tool/schema validity, deduplicate whole tasks and check held-out split
+leakage before promoting examples to a benchmark. `review.json` lists those
+requirements. The manifest records provider names, pending runs, missing
+payloads, parse errors and SHA-256 file hashes. Failed/refused/unlabelled rows
+remain in raw history even when excluded from imitation training.
+
+With learning enabled, diagnostic log retention compresses old runs into
+`~/.jarvis/dataset-history/runs/` before deleting live copies. Exports merge
+that history with current logs; an archive failure keeps the original run.
+Echo's forget operation invalidates owned snapshots containing forgotten
+records and removes matching archived runs. Copies moved outside Echo's
+managed folders cannot be recalled by that operation.
+
+Private tasks and disabled recording are respected. Expired/deleted or
+never-recorded history cannot be reconstructed; active tasks are saved only
+through the snapshot boundary. Text credentials are redacted; screenshots may
+still contain visible private information. Hidden model reasoning and raw
+unrecorded voice audio are not recoverable. No export is automatically uploaded.
 
 Volume needed, measured against the failure it fixes:
 

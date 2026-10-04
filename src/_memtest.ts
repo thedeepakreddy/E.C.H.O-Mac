@@ -80,6 +80,7 @@ try {
     ["Finder", "Downloads", "Downloads"],
     ["Safari", "", "Safari"],
     ["Terminal", "-zsh", "Terminal"],
+    ["Terminal", "Echo Mac — -zsh — 80×24", "Echo Mac"],
   ];
   for (const [app, title, want] of cases) {
     const got = deriveProject(app, title);
