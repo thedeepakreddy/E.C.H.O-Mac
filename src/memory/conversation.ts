@@ -188,7 +188,7 @@ export function seedConversationFromRecordings(id: string, actorId: string, scop
       if (statSync(file).size > 2_000_000) continue;
       const checkpoint = JSON.parse(readFileSync(file, "utf8"));
       if (checkpoint.version !== 1 || checkpoint.actor?.id !== actorId || checkpoint.actor?.kind !== "main" || checkpoint.privateMode || checkpoint.restartable === false ||
-        !["claude", "gemini", "openai", "ollama"].includes(checkpoint.provider) || !checkpoint.originalPrompt ||
+        !["claude", "gemini", "openai", "openrouter", "nvidia", "ollama"].includes(checkpoint.provider) || !checkpoint.originalPrompt ||
         (checkpoint.scope?.projectId ?? "") !== (scope.projectId ?? "")) continue;
       candidates.push({ checkpoint, dir });
     } catch { /* no valid migration source */ }

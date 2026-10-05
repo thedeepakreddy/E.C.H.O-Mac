@@ -6,7 +6,9 @@ import { dataRoot, atomicWrite } from "./memory/paths.js";
 export interface JarvisConfig {
   /** Shared working context across providers. All token sizes are estimates. */
   context?: import("./memory/conversation.js").ContextSettings;
-  brain: "claude" | "gemini" | "ollama" | "openai" | "openrouter";
+  brain: "claude" | "gemini" | "ollama" | "openai" | "openrouter" | "nvidia";
+  /** NVIDIA's hosted Chat Completions API; inference runs in the cloud. */
+  nvidia: {model: string; apiKeyEnv: string; baseUrl: string; maxOutputTokens: number; reasoningEffort: 'low' | 'high' | 'max'};
   /**
    * `systemPromptPreset`: "none" (the default) gives Claude Echo's own prompt
    * alone. "claude_code" puts Claude Code's system prompt first — it tells
@@ -454,6 +456,7 @@ export const OPENROUTER_MODELS = [
 ];
 
 const DEFAULTS: JarvisConfig = {
+  nvidia: {model: 'moonshotai/kimi-k3', apiKeyEnv: 'NVIDIA_API_KEY', baseUrl: 'https://integrate.api.nvidia.com/v1', maxOutputTokens: 16384, reasoningEffort: 'low'},
   context: { maxTokens: 128000, outputReserveTokens: 16000, compactAt: 0.75, providerLimits: {} },
   brain: "claude",
   claude: { model: "claude-opus-4-8", systemPromptPreset: "none" },

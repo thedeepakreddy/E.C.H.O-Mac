@@ -22,6 +22,8 @@ import { ProviderMemoryContext } from "../memory/provider-context.js";
 import { TurnQueue } from "./turn-queue.js";
 import { chatgpt, explainPlanError } from "./chatgpt-auth.js";
 import type { OpenAIAuth } from "./openai-auth.js";
+import { completionRequest, readCompletionStream } from './chat-completions.js';
+import { streamStep } from './stream-deadline.js';
 
 /**
  * The OpenAI brain, on the Responses API.
@@ -74,6 +76,11 @@ export interface ResponsesEndpoint {
    * the request affordable and costs nothing, since replies here are spoken.
    */
   maxOutputTokens?: number;
+  protocol?: 'responses' | 'chat-completions';
+  reasoningEffort?: 'low' | 'high' | 'max';
+  firstResponseTimeoutMs?: number;
+  streamSilenceMs?: number;
+  requestTimeoutMs?: number;
 }
 
 const OPENAI_ENDPOINT: ResponsesEndpoint = { url: RESPONSES_URL, label: "openai" };
@@ -188,7 +195,8 @@ export function replayableOutput(output: any[]): any[] {
       const content = (item.content ?? [])
         .filter((c: any) => c?.type === "output_text" && typeof c.text === "string")
         .map((c: any) => ({ type: "output_text", text: c.text }));
-      if (content.length) items.push({ type: "message", role: "assistant", content });
+      if (content.length || typeof item.reasoning_content === 'string') items.push({ type: "message", role: "assistant", content,
+        ...(typeof item.reasoning_content === 'string' ? {reasoning_content: item.reasoning_content} : {}) });
     } else if (item?.type === "function_call") {
       // No ids: with store:false there is nothing on the server for an id to
       // point at. Reasoning items are dropped for the same reason.
@@ -226,7 +234,7 @@ export class OpenAIBrain extends Brain {
   private lastSend: SendOptions = {};
   private mcpReady: Promise<McpConnection> | null = null;
   private mcpConnection: McpConnection | null = null;
-  private memory = new ProviderMemoryContext("openai");
+  private memory: ProviderMemoryContext;
   private systemPrompt = JARVIS_PERSONA;
   private turnAbort: AbortController | null = null;
   /** The plan model, resolved once from the account's catalog when none is configured. */
@@ -243,6 +251,7 @@ export class OpenAIBrain extends Brain {
     private readonly endpoint: ResponsesEndpoint = OPENAI_ENDPOINT
   ) {
     super();
+    this.memory = new ProviderMemoryContext(endpoint.label);
     this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
     this.memory.configure(cfg.context);
     const allowed = this.limits.allowedTools;
@@ -359,7 +368,8 @@ export class OpenAIBrain extends Brain {
    */
   private async streamResponse(request: any, token: string): Promise<{ output: any[]; usage: any; incomplete?: string }> {
     const turnId = this.lastSend.turnId;
-    const res = await fetch(this.endpoint.url, {
+    const controller = this.turnAbort ?? new AbortController();
+    const send = () => fetch(this.endpoint.url, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -368,13 +378,25 @@ export class OpenAIBrain extends Brain {
         ...(this.endpoint.headers ?? {}),
       },
       body: JSON.stringify(request),
-      signal: this.turnAbort?.signal,
+      signal: this.endpoint.requestTimeoutMs
+        ? AbortSignal.any([controller.signal, AbortSignal.timeout(this.endpoint.requestTimeoutMs)]) : controller.signal,
     });
+    const res = this.endpoint.firstResponseTimeoutMs
+      ? await streamStep(send, controller, this.endpoint.firstResponseTimeoutMs) : await send();
     if (!res.ok || !res.body) {
       const body: any = await res.json().catch(() => null);
       const code = body?.error?.code ?? undefined;
-      const message = body?.error?.message ?? body?.detail ?? `OpenAI request failed (${res.status})`;
+      const message = body?.error?.message ?? body?.detail ?? `${this.endpoint.label} request failed (${res.status})`;
       throw new OpenAIRequestError(String(message), res.status, code ? String(code) : undefined);
+    }
+
+    if (this.endpoint.protocol === 'chat-completions') {
+      let text = '';
+      const result = await readCompletionStream(res, delta => {
+        text += delta; this.emitEvent('textDelta', {text: delta, turnId});
+      }, this.endpoint.streamSilenceMs ? {controller, silenceMs: this.endpoint.streamSilenceMs} : undefined);
+      if (text) this.emitEvent('textDone', {text, turnId});
+      return result;
     }
 
     const reader = res.body.getReader();
@@ -531,17 +553,18 @@ export class OpenAIBrain extends Brain {
           store: false,
           stream: true,
         };
-        log?.enterState("awaiting_llm", `openai:${model}`);
+        log?.enterState("awaiting_llm", `${this.endpoint.label}:${model}`);
         log?.setModel(model);
         const startedAt = Date.now();
-        const res = await recordLLM(request, () => this.streamResponse(request, token), 0, { willRetry: () => false });
+        const wireRequest = this.endpoint.protocol === 'chat-completions' ? completionRequest(request, this.endpoint.reasoningEffort) : request;
+        const res = await recordLLM(wireRequest, () => this.streamResponse(wireRequest, token), 0, { willRetry: () => false });
 
         const output = res.output ?? [];
         const calls = output.filter((o: any) => o?.type === "function_call");
         lastFinish = res.incomplete ?? (calls.length ? "tool_calls" : "stop");
         log?.turnEnd({
           iteration: i,
-          provider: "openai",
+          provider: this.endpoint.label,
           model,
           finishReason: res.incomplete ? "length" : calls.length ? "tool_calls" : "stop",
           rawFinishReason: lastFinish,

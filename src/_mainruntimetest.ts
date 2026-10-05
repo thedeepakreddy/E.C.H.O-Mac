@@ -263,11 +263,11 @@ await test('real sign-out action removes one key and retires its active credenti
 await test('saving unrelated keys preserves the current task on every provider', async () => {
   for (const provider of PROVIDERS) {
     const refreshes: string[] = [];
-    const config = {gemini: {apiKeyEnv: 'GEMINI_KEY'}, openai: {apiKeyEnv: 'OPENAI_KEY'}, openrouter: {apiKeyEnv: 'ROUTER_KEY'}};
+    const config = {gemini: {apiKeyEnv: 'GEMINI_KEY'}, openai: {apiKeyEnv: 'OPENAI_KEY'}, openrouter: {apiKeyEnv: 'ROUTER_KEY'}, nvidia: {apiKeyEnv: 'NVIDIA_KEY'}};
     const context = runtime(['refreshChangedKeys'], {cfg: config, brainLifecycle: {provider, ready: async () => true},
       refreshCredentialBrain: async (name: string) => {refreshes.push(name); return 'updated';}});
     assert.equal(await context.refreshChangedKeys(['VERCEL_TOKEN']), ''); assert.equal(refreshes.length, 0);
-    const key = {claude: 'ANTHROPIC_API_KEY', gemini: 'GEMINI_KEY', openai: 'OPENAI_KEY', openrouter: 'ROUTER_KEY', ollama: ''}[provider];
+    const key = {claude: 'ANTHROPIC_API_KEY', gemini: 'GEMINI_KEY', openai: 'OPENAI_KEY', openrouter: 'ROUTER_KEY', nvidia: 'NVIDIA_KEY', ollama: ''}[provider];
     assert.equal(await context.refreshChangedKeys([key]), provider === 'ollama' ? '' : 'updated');
     assert.equal(refreshes.length, provider === 'ollama' ? 0 : 1);
   }

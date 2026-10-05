@@ -166,7 +166,8 @@
     "browserpagetest": "esbuild src/_browserpagetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_browserpagetest.js --log-level=error && ECHO_MCP=0 node dist/_browserpagetest.js",
     "superviseduitest": "esbuild src/_superviseduitest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_superviseduitest.js --log-level=error && ECHO_MCP=0 electron dist/_superviseduitest.js",
     "supervisedwiringtest": "esbuild src/_supervisedwiringtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_supervisedwiringtest.js --log-level=error && ECHO_MCP=0 node dist/_supervisedwiringtest.js",
-    "automatictasktest": "esbuild src/_automatictasktest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_automatictasktest.js --log-level=error && ECHO_MCP=0 node dist/_automatictasktest.js"
+    "automatictasktest": "esbuild src/_automatictasktest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_automatictasktest.js --log-level=error && ECHO_MCP=0 node dist/_automatictasktest.js",
+    "nvidiatest": "esbuild src/_nvidiatest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_nvidiatest.js --log-level=error && ECHO_MCP=0 node dist/_nvidiatest.js"
   },
   "author": "",
   "license": "MIT",

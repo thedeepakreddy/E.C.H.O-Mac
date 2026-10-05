@@ -190,9 +190,9 @@ export const SYSTEM_TOOLS: ToolDef[] = [
   },
   {
     name: "switch_brain",
-    description: "Switch Echo's brain between Claude, Gemini, OpenAI, and Ollama (the local model). The swap happens live — no restart — though it does start a fresh conversation on the new brain. Use this when the user asks you to switch models or brains.",
+    description: "Switch Echo's brain between Claude, Gemini, OpenAI, OpenRouter, NVIDIA / Kimi, and Ollama (the local model). The swap happens live — no restart — though it does start a fresh conversation on the new brain. Use this when the user asks you to switch models or brains.",
     schema: {
-      brain: z.enum(["claude", "gemini", "ollama", "openai"]).describe("Which brain to use"),
+      brain: z.enum(["claude", "gemini", "ollama", "openai", "openrouter", "nvidia"]).describe("Which brain to use"),
     },
     readOnly: false,
     handler: async (a) => {

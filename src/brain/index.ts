@@ -118,6 +118,22 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
     };
   }
 
+  if (requestedProvider === 'nvidia') {
+    const key = process.env[cfg.nvidia.apiKeyEnv]?.trim();
+    if (!key && !replayDir) throw new Error(`${cfg.nvidia.apiKeyEnv} isn't set; add the NVIDIA key in Echo's API Keys page.`);
+    const base = cfg.nvidia.baseUrl.replace(/\/+$/, '');
+    selected = new OpenAIBrain({...cfg, openai: {...cfg.openai, model: cfg.nvidia.model}},
+      key ? {via: 'apiKey', key} : null, options.limits, {
+        url: `${base}/chat/completions`, label: 'nvidia', protocol: 'chat-completions',
+        maxOutputTokens: cfg.nvidia.maxOutputTokens, reasoningEffort: cfg.nvidia.reasoningEffort,
+        firstResponseTimeoutMs: 45000, streamSilenceMs: 30000,
+        requestTimeoutMs: 110000,
+      });
+    provider = 'nvidia';
+    return {brain: new RecordingBrain(selected, provider, {...LOOP_CAPS.openai,
+      maxIterations: options.limits?.maxIterations ?? LOOP_CAPS.openai.maxIterations, model: cfg.nvidia.model}, options), provider};
+  }
+
   selected = new ClaudeBrain(cfg, options.limits);
   provider = "claude";
   return {

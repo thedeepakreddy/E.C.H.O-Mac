@@ -30,6 +30,7 @@ console.log("  labelled passwords are removed");
 console.log("  known credential shapes are removed anywhere");
 {
   ok(gone("sk-ant-api03-abc123def456ghi789", "my key is sk-ant-api03-abc123def456ghi789 ok"), "Anthropic key");
+  ok(gone('nvapi-abcdefghijklmnopqrstuvwxyz0123456789', 'nvapi-abcdefghijklmnopqrstuvwxyz0123456789'), 'bare NVIDIA key');
   ok(gone("AIzaSyD-abc123def456ghi789jkl012mno", "AIzaSyD-abc123def456ghi789jkl012mno"), "Google key");
   ok(gone("ghp_abcdefghijklmnopqrstuvwxyz0123", "token ghp_abcdefghijklmnopqrstuvwxyz0123"), "GitHub token");
   ok(gone("AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"), "AWS access key id");

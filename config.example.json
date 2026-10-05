@@ -1,5 +1,12 @@
 {
   "brain": "claude",
+  "nvidia": {
+    "model": "moonshotai/kimi-k3",
+    "apiKeyEnv": "NVIDIA_API_KEY",
+    "baseUrl": "https://integrate.api.nvidia.com/v1",
+    "maxOutputTokens": 16384,
+    "reasoningEffort": "low"
+  },
   "context": {
     "maxTokens": 128000,
     "outputReserveTokens": 16000,

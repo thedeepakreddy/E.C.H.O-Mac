@@ -1,7 +1,7 @@
 import {toolGranted} from '../safety/tool-permissions.js';
 import {codingRequestToolAllowed} from '../coding/tool-selection.js';
-import {codingContinuationEligible} from '../coding/continuation.js';
-import { GoogleGenAI, Type } from "@google/genai";
+import {codingContinuationEligible, codingActionRequest, CODING_ACTION_TOOLS} from '../coding/continuation.js';
+import { FunctionCallingConfigMode, GoogleGenAI, Type } from "@google/genai";
 import { z } from "zod";
 import {
   AUDIO_TURN_GUIDANCE,
@@ -551,12 +551,20 @@ export class GeminiBrain extends Brain {
             const declarations = (this.activeFunctionDeclarations ?? this.functionDeclarations)
               .filter((tool: any) => (!this.cfg.agi?.toolPruning?.enabled || !this.memory.isCodingTurn() || codingRequestToolAllowed(tool.name)) && (!this.mcpTools.has(tool.name) || this.externalCatalog?.selected.has(tool.name)));
             const used = this.memory.prepareHistory(this.contents, declarations, this.systemPrompt, "gemini", currentModel);
+            // Until a coding turn has done something, a text-only reply is not
+            // allowed: Flash-Lite answered "I'm building it now" five turns in
+            // a row and never called a tool. Forced only for an instruction (or
+            // after a nudge), so "Can you build an app?" still gets an answer.
+            const forced = !didAnyToolCall && this.memory.isCodingTurn() && (autoContinues > 0 || codingActionRequest(this.memory.query))
+              ? declarations.map((tool: any) => tool.name).filter((name: string) => CODING_ACTION_TOOLS.has(name))
+              : [];
             const request = {
               model: currentModel,
               contents: this.contents,
               config: {
                 systemInstruction: `${this.systemPrompt}\n\n${this.memory.packet(used, true, currentModel)}`,
                 tools: [{ functionDeclarations: declarations }],
+                ...(forced.length ? { toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: forced } } } : {}),
               },
             };
             log?.enterState("awaiting_llm", `gemini:${currentModel}`);

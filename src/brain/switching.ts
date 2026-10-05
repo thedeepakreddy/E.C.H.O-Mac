@@ -15,7 +15,7 @@ import type { Provider } from "./index.js";
  * alone and goes to the brain as a normal command.
  */
 
-export const PROVIDERS: Provider[] = ["claude", "gemini", "ollama", "openai", "openrouter"];
+export const PROVIDERS: Provider[] = ["claude", "gemini", "ollama", "openai", "openrouter", "nvidia"];
 
 export function isProvider(value: unknown): value is Provider {
   return typeof value === 'string' && PROVIDERS.includes(value as Provider);
@@ -28,6 +28,7 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   ollama: "the local model",
   openai: "ChatGPT",
   openrouter: "OpenRouter",
+  nvidia: 'NVIDIA / Kimi',
 };
 
 /**
@@ -60,6 +61,9 @@ const ALIASES: Record<string, Provider> = {
   // words almost always means.
   openrouter: "openrouter",
   router: "openrouter",
+  nvidia: 'nvidia',
+  kimi: 'nvidia',
+  moonshot: 'nvidia',
 };
 
 /**
@@ -117,7 +121,8 @@ export function unavailableReason(
   env: NodeJS.ProcessEnv,
   geminiKeyEnv = "GEMINI_API_KEY",
   openaiKeyEnv = "OPENAI_API_KEY",
-  openrouterKeyEnv = "OPENROUTER_API_KEY"
+  openrouterKeyEnv = "OPENROUTER_API_KEY",
+  nvidiaKeyEnv = 'NVIDIA_API_KEY'
 ): string | null {
   if (provider === "gemini" && !env[geminiKeyEnv]?.trim()) {
     return `${geminiKeyEnv} isn't set`;
@@ -126,5 +131,6 @@ export function unavailableReason(
     return `${openaiKeyEnv} isn't set`;
   }
   if (provider === 'openrouter' && !env[openrouterKeyEnv]?.trim()) return `${openrouterKeyEnv} isn't set`;
+  if (provider === 'nvidia' && !env[nvidiaKeyEnv]?.trim()) return `${nvidiaKeyEnv} isn't set`;
   return null;
 }

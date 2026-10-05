@@ -532,6 +532,7 @@ const BRAIN_SOURCES: Record<string, LearnSource> = {
   ollama: "ollama",
   openai: "openai",
   openrouter: "openrouter",
+  nvidia: 'nvidia',
 };
 
 function brainProvider(): string {
@@ -550,6 +551,7 @@ function learnModel(): string {
   if (provider === "ollama") return cfg.ollama?.model ?? "";
   if (provider === "openai") return cfg.openai?.model ?? "";
   if (provider === "openrouter") return cfg.openrouter?.model ?? "";
+  if (provider === "nvidia") return cfg.nvidia.model;
   if (provider === "claude") return cfg.claude?.model ?? "";
   // Preserve future provider metadata rather than attributing it to Claude.
   return String((brain as any)?.model ?? (cfg as any)[provider]?.model ?? "");
@@ -1600,7 +1602,7 @@ async function saveControlSettings(input: Partial<ControlSettings> | undefined):
 function brainUnavailable(provider: Provider): string | null {
   return provider === "openai"
     ? openAIUnavailableReason(cfg)
-    : unavailableReason(provider, process.env, cfg.gemini?.apiKeyEnv, cfg.openai?.apiKeyEnv, cfg.openrouter?.apiKeyEnv);
+    : unavailableReason(provider, process.env, cfg.gemini?.apiKeyEnv, cfg.openai?.apiKeyEnv, cfg.openrouter?.apiKeyEnv, cfg.nvidia?.apiKeyEnv);
 }
 
 /** The OpenAI model in use: the plan's when paying with ChatGPT, else the API-key model. */
@@ -1671,7 +1673,7 @@ async function refreshChangedKeys(changed: readonly string[]): Promise<string> {
   if (!lifecycle || shuttingDown || !await lifecycle.ready()) return "";
   const provider = lifecycle.provider;
   const env = provider === "claude" ? "ANTHROPIC_API_KEY" : provider === "gemini" ? cfg.gemini.apiKeyEnv
-    : provider === "openai" ? cfg.openai.apiKeyEnv : provider === "openrouter" ? cfg.openrouter.apiKeyEnv : null;
+    : provider === "openai" ? cfg.openai.apiKeyEnv : provider === "openrouter" ? cfg.openrouter.apiKeyEnv : provider === 'nvidia' ? cfg.nvidia.apiKeyEnv : null;
   return env && changed.includes(env) ? refreshCredentialBrain(provider) : "";
 }
 
@@ -2137,6 +2139,7 @@ function controlRuntime(): ControlRuntime {
         : id === "gemini" ? cfg.gemini.model
         : id === "openai" ? openAIModelLabel()
         : id === "openrouter" ? cfg.openrouter.model
+        : id === 'nvidia' ? cfg.nvidia.model
         : cfg.ollama.model,
       active: id === provider,
       available: !brainUnavailable(id),
