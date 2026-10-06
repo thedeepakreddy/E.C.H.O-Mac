@@ -73,6 +73,13 @@ export class RelayAgent {
     /** Told when the relay starts or stops answering. */
     private readonly onConnected: (connected: boolean) => void,
     private readonly log: (line: string) => void = () => {},
+    /**
+     * The cloud-pass generation (cloudpass.ts): sent on every poll so the relay
+     * refuses cancelled passes, and raised when the relay knows a higher one.
+     */
+    private readonly passGen?: { get(): number; adopt(n: number): void },
+    /** Told how many hand-off jobs are waiting, whenever the relay says (on each poll). */
+    private readonly onHandoffs?: (waiting: number) => void,
   ) {}
 
   get base(): string {
@@ -108,7 +115,7 @@ export class RelayAgent {
       this.aborts.add(abort);
       try {
         const res = await fetch(`${this.base}/agent/poll`, {
-          headers: { authorization: `Bearer ${this.secret}` },
+          headers: { authorization: `Bearer ${this.secret}`, ...(this.passGen ? { "x-echo-pass-gen": String(this.passGen.get()) } : {}) },
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(40_000)]),
         });
         if (res.status === 404 || res.status === 401) {
@@ -118,6 +125,10 @@ export class RelayAgent {
           await this.backoff(true);
           continue;
         }
+        const waiting = Number(res.headers.get("x-relay-handoffs"));
+        if (this.onHandoffs && Number.isInteger(waiting) && waiting > 0) { try { this.onHandoffs(waiting); } catch { /* never stop polling */ } }
+        const relayGen = Number(res.headers.get("x-relay-pass-gen"));
+        if (this.passGen && Number.isInteger(relayGen)) this.passGen.adopt(relayGen);
         if (res.status === 204) { this.failures = 0; this.setConnected(true); continue; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         this.failures = 0;
@@ -139,6 +150,31 @@ export class RelayAgent {
       } finally {
         this.aborts.delete(abort);
       }
+    }
+  }
+
+  /** Read something from the relay itself, e.g. waiting hand-off jobs. */
+  async get(path: string): Promise<any | null> {
+    try {
+      const res = await fetch(`${this.base}${path}`, { headers: { authorization: `Bearer ${this.secret}` }, signal: AbortSignal.timeout(20_000) });
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Send something to the relay itself (not a reply to the phone), e.g. the briefing digest. */
+  async post(path: string, body: unknown): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.base}${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.secret}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20_000),
+      });
+      return res.ok;
+    } catch {
+      return false;
     }
   }
 

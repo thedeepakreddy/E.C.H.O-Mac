@@ -15,6 +15,9 @@ import { join } from "node:path";
 import { ChatLog, MAX_MESSAGES } from "./frontier/remote-chat.js";
 import { PasskeyStore, decodeCbor } from "./frontier/passkeys.js";
 import { parseRemoteAction, routeOf } from "./frontier/remote.js";
+import { signPass, PassGeneration } from "./frontier/cloudpass.js";
+import { RelayAgent } from "./frontier/relay-agent.js";
+import http from "node:http";
 
 let pass = 0, fail = 0;
 const ok = (c: boolean, m: string) => (c ? (pass++, console.log(`  ✓ ${m}`)) : (fail++, console.log(`  ✗ ${m}`)));
@@ -109,6 +112,54 @@ console.log("  Face ID (passkeys)");
   const other = new PasskeyStore(join(dir, "passkeys.json"));
   ok(other.count === 1, "registrations survive a restart");
   throws(() => new PasskeyStore(null).verify(assertion("login"), ORIGIN, RP, "login"), "a phone that never registered cannot sign in");
+
+  console.log("  hand-off to the Mac (Face ID over the task itself)");
+  const { taskChallenge, processHandoffs, SeenTasks } = await import("./frontier/handoff.js");
+  const now = Date.now();
+  const task = { id: "0a1b2c3d-1111-4222-8333-444455556666", text: "Build the settings screen for the weather app", createdAt: now - 3600_000, device: "f".repeat(32) };
+  let counter = 10; // the key above is device-bound and at 5 now: each signature counts up
+  const signedFor = (t: any) => assertion("confirm", { challenge: taskChallenge(t), count: ++counter });
+  ok(taskChallenge(task) === taskChallenge({ ...task }) && taskChallenge(task) !== taskChallenge({ ...task, text: task.text + "!" }), "the challenge is the hash of exactly the task");
+  ok(store.verifySigned(signedFor(task), ORIGIN, RP, taskChallenge(task)) === true, "Face ID over a task verifies on the Mac, with no challenge from the Mac");
+  throws(() => store.verifySigned(signedFor(task), ORIGIN, RP, taskChallenge({ ...task, text: "Delete my Documents folder" })), "a task edited after Face ID is refused", /approved something else/);
+  throws(() => store.verifySigned(assertion("confirm", { challenge: taskChallenge(task), sign: false, count: ++counter }), ORIGIN, RP, taskChallenge(task)), "a forged signature is refused", /didn't match/);
+  throws(() => store.verifySigned(assertion("confirm", { challenge: taskChallenge(task), origin: "https://evil.example.com", count: ++counter }), ORIGIN, RP, taskChallenge(task)), "a task approved on another site is refused", /somewhere else/);
+
+  const updates: string[] = [];
+  const ran: string[] = [];
+  const seen = new SeenTasks(join(dir, "seen.json"));
+  const old = { ...task, id: "0a1b2c3d-2222-4222-8333-444455556666", createdAt: now - 8 * 86400_000 };
+  const edited = { ...task, id: "0a1b2c3d-3333-4222-8333-444455556666" };
+  const second = { ...task, id: "0a1b2c3d-4444-4222-8333-444455556666", text: "Then run its tests", createdAt: now - 1800_000 };
+  let busyAfter = Infinity;
+  const deps = (list: any[]) => ({
+    list: async () => list,
+    update: async (id: string, status: string, summary?: string) => { updates.push(`${id.slice(9, 13)}:${status}${summary ? `:${summary.slice(0, 24)}` : ""}`); },
+    verify: (t: any, a: any) => { store.verifySigned(a, ORIGIN, RP, taskChallenge(t)); },
+    run: async (t: any) => { ran.push(t.text); return { ok: true, summary: `Done: ${t.text}` }; },
+    busy: () => ran.length >= busyAfter,
+    seen, now: () => now,
+  });
+  const aTask = signedFor(task), aSecond = signedFor(second); // signed in the order they'll run (the key counts up)
+  const n = await processHandoffs(deps([
+    { task: second, assertion: aSecond },
+    { task, assertion: aTask },
+    { task: old, assertion: signedFor(old) },
+    { task: edited, assertion: signedFor({ ...edited, text: "something else" }) },
+  ]));
+  ok(n === 2 && ran.join(" | ") === "Build the settings screen for the weather app | Then run its tests", "approved jobs run, oldest first");
+  ok(updates.includes("1111:started") && updates.some((u) => u.startsWith("1111:done:Done: Build")), "each reports started, then done with Echo's answer");
+  ok(updates.some((u) => u.startsWith("2222:rejected:That job is more than")), "a job over a week old is refused");
+  ok(updates.some((u) => u.startsWith("3333:rejected:Face ID check failed")), "a job whose Face ID approved different text is refused");
+  updates.length = 0;
+  await processHandoffs(deps([{ task, assertion: signedFor(task) }]));
+  ok(ran.length === 2 && updates[0] === "1111:done:Already done on your Mac", "a job never runs twice, even if the relay offers it again");
+  ok(new SeenTasks(join(dir, "seen.json")).has(task.id), "and that survives a restart");
+  busyAfter = 0;
+  const third = { ...task, id: "0a1b2c3d-5555-4222-8333-444455556666" };
+  updates.length = 0;
+  const waited = await processHandoffs(deps([{ task: third, assertion: signedFor(third) }]));
+  ok(waited === 0 && !updates.some((u) => u.startsWith("5555:started")), "while Echo is busy, jobs wait");
 }
 
 console.log("  actions");
@@ -118,6 +169,75 @@ console.log("  actions");
   ok(parseRemoteAction({ type: "open-neural" })?.type === "open-neural", "opening the neural map on the Mac is allowed");
   ok(parseRemoteAction({ type: "shutdown" }) === null, "the control panel's own shutdown is still refused");
   ok(routeOf("/passkey/options") === "passkey-options" && routeOf("/passkey/login") === "passkey-login" && routeOf("/passkey/register") === "passkey-register", "the Face ID routes exist");
+}
+
+console.log("  Phone mode (cloud pass and chat import)");
+{
+  // The same vector echo-remote's test checks (test/phone.test.mjs): Echo signs, the relay verifies.
+  const vector = signPass("v".repeat(40), { device: "f".repeat(32), gen: 3, now: 1791300000000 });
+  ok(vector === "cp1.eyJ2IjoxLCJkIjoiZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJpYXQiOjE3OTEzMDAwMDAsImV4cCI6MTc5Mzg5MjAwMCwiZyI6M30.pOA4SN7qh0I460FKakT56xpRZMA7ATc6gwJFKZ8NiUs",
+    "a cloud pass signed here is byte-for-byte what the relay expects");
+  const genFile = join(dir, "pass-gen.json");
+  const g = new PassGeneration(genFile);
+  ok(g.get() === 1, "passes start at generation 1");
+  g.bump();
+  ok(new PassGeneration(genFile).get() === 2, "\"sign out every phone\" survives a restart");
+  g.adopt(5); g.adopt(3);
+  ok(new PassGeneration(genFile).get() === 5, "a higher generation from the relay is adopted, a lower one ignored");
+
+  const log = new ChatLog(join(dir, "chat-import.json"));
+  log.add("you", "earlier on the Mac");
+  const t0 = Date.now() - 60_000;
+  const n = log.importFromPhone([
+    { ref: "c-abc1", from: "you", text: "what's the weather?", at: t0 },
+    { ref: "c-abc2", from: "echo", text: "14° and raining.", at: t0 + 2000 },
+    { ref: "bad ref!", from: "you", text: "x", at: t0 },
+    { ref: "c-abc3", from: "someone" as any, text: "x", at: t0 },
+  ]);
+  ok(n === 2, "Phone mode's messages are copied in; malformed ones are skipped");
+  ok(log.importFromPhone([{ ref: "c-abc1", from: "you", text: "what's the weather?", at: t0 }]) === 0, "a retried copy is never duplicated");
+  const copied = log.since(0).filter((m) => m.via === "phone");
+  ok(copied.length === 2 && copied[0].at === t0 && copied[0].ref === "c-abc1", "they keep their times and the phone's id");
+  ok(routeOf("/chat/import") === "chat-import", "/chat/import is a route");
+
+  // The agent tells the relay its generation on every poll, and adopts the relay's when higher.
+  let sent = "";
+  const fake = http.createServer((req, res) => {
+    sent ||= String(req.headers["x-echo-pass-gen"] ?? ""); // the first poll, before any adoption
+    res.writeHead(204, { "x-relay-pass-gen": "9" });
+    res.end();
+  });
+  await new Promise<void>((r) => fake.listen(0, "127.0.0.1", () => r()));
+  const gen = new PassGeneration(null);
+  const agent = new RelayAgent(`http://127.0.0.1:${(fake.address() as any).port}`, "x".repeat(40), "http://127.0.0.1:1", () => {}, () => {}, { get: () => gen.get(), adopt: (k) => gen.adopt(k) });
+  agent.start();
+  for (let i = 0; i < 40 && gen.get() !== 9; i++) await new Promise((r) => setTimeout(r, 50));
+  agent.stop();
+  fake.closeAllConnections?.();
+  fake.close();
+  ok(sent === "1", "each poll carries Echo's pass generation");
+  ok(gen.get() === 9, "and a sign-out done from the phone (higher on the relay) reaches Echo");
+}
+
+console.log("  Morning briefing digest");
+{
+  const { emailsFrom, recentMissions } = await import("./frontier/phone-digest.js");
+  const gmail = { data: { messages: [
+    { messageId: "1", sender: "Anna Kovacs <anna@example.com>", subject: "Contract draft", preview: { body: "secret body" } },
+    { messageId: "2", from: "\"Render\" <no-reply@render.com>", subject: "Deploy failed" },
+    { messageId: "3", sender: "Anna Kovacs <anna@example.com>", subject: "Contract draft" },
+  ] } };
+  const found = emailsFrom([null, gmail]);
+  ok(found.length === 2 && found[0].from === "Anna Kovacs" && found[1].from === "Render", "sender names and subjects are found in Gmail's results, duplicates dropped");
+  ok(!JSON.stringify(found).includes("secret body"), "and never a message body");
+  ok(emailsFrom([{ nested: { deeper: [{ sender: "X", subject: "" }] } }])[0].subject === "(no subject)", "however deep, and an empty subject says so");
+  const now = Date.now();
+  const missions = recentMissions({ missions: [
+    { goal: "weather app tests", status: "completed", updatedAt: now - 3600_000 },
+    { goal: "still going", status: "running", updatedAt: now },
+    { goal: "last week", status: "completed", updatedAt: now - 8 * 86400_000 },
+  ] }, now);
+  ok(missions.length === 1 && missions[0].goal === "weather app tests", "only missions that finished in the last day");
 }
 
 rmSync(dir, { recursive: true, force: true });
