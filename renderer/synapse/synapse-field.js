@@ -823,7 +823,7 @@
   };
 
   SynapseField.prototype.setState = function (name) {
-    if (!STATES[name]) return;
+    if (!STATES[name] || this.state === name) return;
     this.state = name;
     this.target = STATES[name];
     if (name === 'acting') this.burst(7);
@@ -1041,27 +1041,33 @@
   SynapseField.prototype.start = function () {
     if (this.running) return;
     this.running = true;
+    var generation = this.frameGeneration = (this.frameGeneration || 0) + 1;
     var self = this, last = performance.now(), acc = 0, frames = 0;
     var minStep = this.opt.fps > 0 ? 1 / this.opt.fps - 0.002 : 0;
     function loop(now) {
-      if (!self.running) return;
+      if (!self.running || self.frameGeneration !== generation) return;
       var dt = (now - last) / 1000;
-      if (minStep && dt < minStep) { requestAnimationFrame(loop); return; }
+      if (minStep && dt < minStep) { self.frameRequest = requestAnimationFrame(loop); return; }
       dt = Math.min(0.05, dt);
       last = now;
       acc += dt; frames++;
       if (acc > 0.5) { self.stats.fps = Math.round(frames / acc); acc = 0; frames = 0; }
       self._frame(dt);
       if (self.onframe) self.onframe(self.stats);
-      requestAnimationFrame(loop);
+      if (self.running && self.frameGeneration === generation) self.frameRequest = requestAnimationFrame(loop);
     }
-    requestAnimationFrame(loop);
+    this.frameRequest = requestAnimationFrame(loop);
   };
 
-  SynapseField.prototype.stop = function () { this.running = false; };
+  SynapseField.prototype.stop = function () {
+    this.running = false;
+    this.frameGeneration = (this.frameGeneration || 0) + 1;
+    if (this.frameRequest != null) cancelAnimationFrame(this.frameRequest);
+    this.frameRequest = null;
+  };
 
   SynapseField.prototype.destroy = function () {
-    this.running = false;
+    this.stop();
     if (this.stage && this.stage.parentNode) this.stage.parentNode.removeChild(this.stage);
     this.host.classList.remove('sf-host', 'sf-interactive', 'sf-dragging');
     this.impulses = []; this.px = null; this.lit = null; this.bright = null; this.skel = null;

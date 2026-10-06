@@ -1,8 +1,21 @@
 {
   "brain": "claude",
+  "nvidia": {
+    "model": "moonshotai/kimi-k3",
+    "apiKeyEnv": "NVIDIA_API_KEY",
+    "baseUrl": "https://integrate.api.nvidia.com/v1",
+    "maxOutputTokens": 16384,
+    "reasoningEffort": "low"
+  },
+  "context": {
+    "maxTokens": 128000,
+    "outputReserveTokens": 16000,
+    "compactAt": 0.75,
+    "providerLimits": {}
+  },
   "claude": {
     "model": "claude-opus-4-8",
-    "systemPromptPreset": "claude_code"
+    "systemPromptPreset": "none"
   },
   "gemini": {
     "model": "gemini-2.0-flash",
@@ -26,7 +39,7 @@
     "maxUtteranceMs": 15000,
     "//wakeEngine": "auto = Porcupine .ppn or openWakeWord .onnx if wakeKeywordPath points at one, else the built-in template spotter (models/wake/templates.json, `npm run enroll`), else the transcript matcher. Also: porcupine | onnx | template | whisper | none.",
     "wakeKeywordPath": "",
-    "wakeTranscriptFallback": true,
+    "wakeTranscriptFallback": false,
     "//vadModel": "Silero VAD (MIT). Empty = RMS level detection.",
     "vadModel": "models/silero_vad.onnx",
     "//sttStreaming": "Transcribe WHILE you speak (Sarvam realtime WebSocket); the transcript is final within ~0.5 s of your last word instead of after a file round trip. sttProvider 'apple' (on-device, en/hi) needs NSSpeechRecognitionUsageDescription in the packaged app's Info.plist and falls back to the file path otherwise.",
@@ -40,6 +53,15 @@
     "maxSpokenSentences": 6,
     "conversationMode": true,
     "conversationWindowMs": 12000
+  },
+  "helpers": {
+    "shadow": false,
+    "ghost": false,
+    "autoDebug": false,
+    "shadowIntervalSeconds": 60,
+    "screenHistory": false,
+    "screenHistoryIntervalSeconds": 120,
+    "memoryIndexing": false
   },
   "control": {
     "cliclickBin": "/opt/homebrew/bin/cliclick",

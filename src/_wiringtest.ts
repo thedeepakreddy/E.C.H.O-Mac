@@ -17,6 +17,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import ts from "typescript";
 import { TOOLS, TOOL_MAP } from "./tools/registry.js";
 import { JARVIS_PERSONA } from "./brain/types.js";
 import { LOCAL_TOOL_NAMES, resolveToolName } from "./brain/localtools.js";
@@ -69,7 +70,7 @@ function ok(value: unknown, message: string): void {
   const loaded = TOOLS.filter((t) => core.has(t.name)).length;
   ok(loaded > 20 && loaded < TOOLS.length,
     `the always-loaded set is a real subset (${loaded} of ${TOOLS.length})`);
-  ok([...core].every((n) => TOOLS.some((t) => t.name === n) || true), "core names are checked against the registry");
+  ok([...core].every((n) => TOOLS.some((t) => t.name === n)), "core names are checked against the registry");
 }
 
 // ---- every brain gets every feature ----------------------------------------
@@ -99,12 +100,112 @@ function ok(value: unknown, message: string): void {
     ["memory invalidation", /takeInvalidation\(/],
     ["fleet allowedTools", /allowedTools/],
     ["struggle-aware style", /styleFor\(assess\(\)\)/],
-    ["voice turn contract", /VOICE_TURN_CONTRACT/],
+    // The spoken (and Telegram chat) per-turn reminder, chosen by turnContract.
+    ["voice turn contract", /turnContract\(opts\)/],
+    // Ollama had none of this. The other three could read mail and search
+    // GitHub through Composio; the offline one answered that no such tool
+    // existed — the same account, a different Echo.
+    //
+    // Two legitimate routes, hence the alternation. Gemini, OpenAI and Ollama
+    // drive the shared client themselves; the Claude brain hands the same
+    // `mcp.json` entries to the Agent SDK, which owns the connection. Both
+    // end at the same servers, and a row that demanded one mechanism would
+    // be testing the plumbing rather than whether the tools arrive.
+    ["outside tools (MCP)", /connectMcpServers\(|mcpServers:\s*\{/],
+    // Gated through ONE adapter. Gemini and OpenAI each carried their own
+    // copy, which had already drifted (one logged a failed audio playback,
+    // the other swallowed it). Claude is the exception on purpose: the SDK
+    // routes its MCP calls through `canUseTool`, which reaches the same
+    // `decide()` the adapter does.
+    ["one MCP→gate adapter", /mcpToolDef\(|canUseTool/],
+    // Jev lives inside decide(), which only runGated and Claude's canUseTool
+    // reach. A brain that ran a handler directly would skip the second
+    // opinion without skipping anything visible.
+    ["TypeSafe Jev (via the gate)", /runGated\(|decide\(/],
   ];
   for (const [name, re] of features) {
-    const missing = brains.filter((b) => !re.test(src[b]));
+    // Local models use the shared compact persona and bounded memory packet;
+    // demanding the much larger cloud prompt would undo the M2 resource fix.
+    const missing = brains.filter((b) => name === 'shared persona + memory' && b === 'ollama'
+      ? !(/LOCAL_PERSONA/.test(src[b]) && /this\.memory\.packet\(/.test(src[b]))
+      : !re.test(src[b]));
     ok(missing.length === 0, missing.length ? `${name} is MISSING in ${missing.join(", ")}` : `${name} reaches every brain`);
   }
+}
+
+// ---- every brain is recognisable to the training recorder ------------------
+//
+// `learnSource` mapped claude/gemini/ollama and fell through to "unknown" for
+// everything else — and `Source` has always allowed "openai". So a turn on the
+// OpenAI brain was filed as unknown, and `learnModel` fell through ITS last
+// line and recorded the Claude model name against it. Not a gap: wrong data,
+// in a file whose whole purpose is to be trained on.
+//
+// The two lists are in different files, which is how they drifted, so this
+// compares them directly.
+{
+  console.log("\n  the trajectory recorder knows every brain");
+  const mainSrc = readFileSync(join(process.cwd(), "src", "main.ts"), "utf8");
+  const cfgSrc = readFileSync(join(process.cwd(), "src", "config.ts"), "utf8");
+
+  // The brains config.ts allows, straight from its union.
+  const union = /brain:\s*((?:"[a-z]+"\s*\|\s*)*"[a-z]+")\s*;/.exec(cfgSrc)?.[1] ?? "";
+  const brains = [...union.matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
+  ok(brains.length >= 4, `config allows ${brains.length} brains (${brains.join(", ")})`);
+
+  const map = mainSrc.slice(mainSrc.indexOf("const BRAIN_SOURCES"));
+  const mapped = map.slice(0, map.indexOf("};"));
+  for (const b of brains) {
+    ok(new RegExp(`\\b${b}:`).test(mapped), `${b} maps to a real source, not "unknown"`);
+  }
+  // And a model name for each, so none falls through to another brain's.
+  const model = mainSrc.slice(mainSrc.indexOf("function learnModel"));
+  const body = model.slice(0, model.indexOf("\n}"));
+  for (const b of brains) {
+    ok(new RegExp(`provider === "${b}"`).test(body) || b === "claude",
+      `${b} records its own model name`);
+  }
+}
+
+// ---- the spoken path is recorded too ---------------------------------------
+//
+// `recordStep` and `finishTurn` both return early without an active turn, so
+// a path that never calls `beginLearnedTurn` contributes nothing and its
+// `finishTurn("success")` labels a turn that was never opened. The realtime
+// session did exactly that — and since language routing sends every
+// non-English turn there, the Telugu and Hindi half of real usage was
+// invisible to the dataset.
+{
+  console.log("\n  the spoken session is recorded like any other turn");
+  const mainSrc = readFileSync(join(process.cwd(), "src", "main.ts"), "utf8");
+  const fn = mainSrc.slice(mainSrc.indexOf("async function dispatchToRealtime"));
+  const body = fn.slice(0, fn.indexOf("\n}"));
+  ok(/beginLearnedTurn\(/.test(body), "it opens a recorded turn before streaming audio");
+  // Ordering: a turn opened after the tools have run records none of them.
+  ok(body.indexOf("beginLearnedTurn(") < body.indexOf("session.push"),
+    "and opens it BEFORE the audio goes out, not after");
+}
+
+// ---- the voice path is a brain too -----------------------------------------
+//
+// Speech-to-speech is a fifth place that runs tools, and it is invisible in
+// the table above because it is not in src/brain. It matters most for exactly
+// the tools added last: non-English turns route to Gemini Live, so without
+// this, "read my email" worked in English and answered "I have no such tool"
+// in Telugu.
+{
+  console.log("\n  the realtime voice session reaches the same tools");
+  const rt = readFileSync(join(process.cwd(), "src", "voice", "realtime.ts"), "utf8");
+  ok(/connectMcpServers\(/.test(rt), "it connects the configured MCP servers");
+  ok(/mcpToolDef\(/.test(rt), "and gates what they return through the shared adapter");
+  ok(/runGated\(/.test(rt), "which means the same risk gate as every brain");
+  // A Live session fixes its tool list in the setup message, so attaching
+  // after the socket is open would silently offer nothing for the whole call.
+  const open = rt.slice(rt.indexOf("private async open("));
+  ok(open.indexOf("attachMcp()") < open.indexOf("this.opts.transport"),
+    "and attaches them BEFORE the session opens, when the tool list is still changeable");
+  ok(/allowedTools && !allowed/.test(rt) || /if \(allowed && !allowed\.has\(t\.name\)\) continue;/.test(rt),
+    "a restricted session filters outside tools too, not just Echo's own");
 }
 
 // ---- only one Echo ---------------------------------------------------------
@@ -121,7 +222,7 @@ function ok(value: unknown, message: string): void {
   ok(/requestSingleInstanceLock\(\)/.test(main), "the single-instance lock is taken");
   ok(/if \(!isPrimaryInstance\) \{[\s\S]{0,200}?app\.exit\(/.test(main),
     "losing it calls app.exit (immediate), not app.quit (async, and blockable by before-quit)");
-  ok(/app\.whenReady\(\)[\s\S]{0,200}?if \(!isPrimaryInstance\) return;/.test(main),
+  ok(/app\.whenReady\(\)[\s\S]{0,200}?if \(!isPrimaryInstance(?: \|\| shuttingDown)?\) return;/.test(main),
     "and whenReady refuses to start a second assistant even if the exit is slow");
 }
 
@@ -217,7 +318,8 @@ console.log("  prompts name tools that exist");
 
 console.log("  every way in answers a pending permission question");
 {
-  // main.ts is not otherwise testable, and this is a wiring fault that looks
+  // Check the exact entry-point bodies; behavioral races are also covered
+  // by mainruntimetest. This wiring fault looks
   // exactly like the model being stupid: Echo asks "shall I send this?", the
   // answer arrives by a path that does not know a question is open, the answer
   // becomes a new command, the question times out as a refusal, and the model
@@ -225,15 +327,21 @@ console.log("  every way in answers a pending permission question");
   // typed answer lost. Pin all four entry points to the shared check.
   // The bundle runs from dist/, so reach back to the source tree.
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const ast = ts.createSourceFile('main.ts', main, ts.ScriptTarget.Latest, true);
+  const bodyContains = (name: string, text: string) => ast.statements.some(node =>
+    ts.isFunctionDeclaration(node) && node.name?.text === name && node.body?.getText(ast).includes(text));
+  ok(bodyContains('handleTypedInput', 'maybeAnswerConfirmation'), 'typing in the HUD routes an answer to the waiting question');
+  ok(bodyContains('handleRemoteCommand', 'maybeAnswerConfirmation'), 'the phone remote and Telegram route an answer to the waiting question');
   const entryPoints: Array<[string, RegExp]> = [
     ["the voice path", /confirmations\.isWaiting/],
     // send-text delegates to handleTypedInput (shared with other typed-input
     // callers), so check the function that actually handles it — same style
     // as the Telegram entry below — rather than the registration call site,
     // which no longer has the check inline.
-    ["typing in the HUD", /function handleTypedInput[\s\S]{0,400}?maybeAnswerConfirmation/],
-    ["the phone remote", /setCommandHandler\([\s\S]{0,400}?maybeAnswerConfirmation/],
-    ["Telegram", /handleTelegramCommand[\s\S]{0,400}?maybeAnswerConfirmation/],
+    // The phone and Telegram share one handler, so check that it asks, and
+    // that both actually go through it.
+    ["the phone remote", /setCommandHandler\(\(text: string(?:, via)?\) => handleRemoteCommand\(text, "phone"/],
+    ["Telegram", /function handleTelegramCommand[\s\S]{0,120}?handleRemoteCommand\(text, "telegram"\)/],
   ];
   for (const [what, pattern] of entryPoints) {
     ok(pattern.test(main), `${what} routes an answer to the waiting question`);

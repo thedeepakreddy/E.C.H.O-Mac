@@ -39,7 +39,8 @@ import { classify } from "./safety/risk.js";
 import { toolsForLocalModel } from "./brain/localtools.js";
 
 let pass = 0, fail = 0;
-const ok = (c: boolean, m: string) => (c ? (pass++, console.log(`  ✓ ${m}`)) : (fail++, console.log(`  ✗ ${m}`)));
+const ok = (c: boolean, m: string, extra = "") =>
+  c ? (pass++, console.log(`  ✓ ${m}`)) : (fail++, console.log(`  ✗ ${m}${extra ? ` — ${extra}` : ""}`));
 
 console.log("\nOsiris grid\n");
 
@@ -288,6 +289,141 @@ console.log("  probing for a local checkout");
   // checked, and only a page that identifies as Osiris counts.
   ok(LOCAL_PORTS.length > 1 && LOCAL_PORTS[0] === 3000,
      "more than one local port is considered, starting at the documented one");
+}
+
+// ── cameras ───────────────────────────────────────────────────────────────
+//
+// Reported: "I asked Echo to show a live camera feed from the US — it showed
+// a black screen, then said there are no cameras."
+//
+// It was telling the truth about what it could see. `cameras` existed as a
+// map LAYER, which puts markers on the globe, and as nothing else: there was
+// no `cameras` FEED, so nothing could READ them. Meanwhile /api/cctv serves
+// ~37,000 live streams and /api/stats has been counting them the whole time.
+console.log("\n  cameras are readable, not just drawable");
+{
+  ok(!!resolveFeed("cameras"), "there is a cameras feed at all — this is the whole bug");
+  for (const spoken of ["cctv", "webcam", "webcams", "live camera", "traffic cameras"])
+    ok(resolveFeed(spoken)?.id === "cameras", `"${spoken}" resolves to it`);
+  ok(resolveFeed("cameras")?.path === "/api/cctv", "pointed at the route that actually serves them");
+}
+
+console.log("\n  a country is somewhere you are IN, not within 350km of");
+{
+  // The trap that would have made the feed useless even once it existed: the
+  // default radius on a geocoded centroid of a 4,500km-wide country returns
+  // almost nothing, which reads to the user as "there are no cameras" all
+  // over again. These records carry `country`, so a named country uses it.
+  const cams = [
+    { id: "a", lat: 39.4, lng: -123.8, city: "Fort Bragg", country: "US", stream_url: "http://x/1" },
+    { id: "b", lat: 40.7, lng: -74.0, city: "New York", country: "US", stream_url: "http://x/2" },
+    { id: "c", lat: 32.0, lng: 34.7, city: "Tel Aviv", country: "Israel", stream_url: "http://x/3" },
+  ];
+  // Geocoding "United States" lands near Kansas; both US cameras are far
+  // outside any sane radius of it, and both must still be found.
+  const usFilter = { lat: 39.8, lng: -98.5, radiusKm: 350, label: "United States" };
+  const out = summarize("cameras", { cameras: cams }, usFilter as any);
+  ok(/^2 cameras in United States/.test(out.speech),
+     `both US cameras found, and phrased as "in" (${out.speech.slice(0, 60)})`);
+  ok(!/near United States/.test(out.speech), "not \"near\" a whole country");
+
+  // The spoken form and the stored form differ, and both sides normalise.
+  for (const said of ["the US", "USA", "united states of america", "America"]) {
+    const o = summarize("cameras", { cameras: cams }, { lat: 0, lng: 0, radiusKm: 1, label: said } as any);
+    ok(/^2 cameras in /.test(o.speech), `"${said}" folds onto the records' "US"`, o.speech.slice(0, 50));
+  }
+  // And a place that is NOT a country still uses the radius.
+  const near = summarize("cameras", { cameras: cams }, { lat: 32.0, lng: 34.7, radiusKm: 50, label: "Tel Aviv" } as any);
+  ok(/^1 camera near Tel Aviv/.test(near.speech), `a city still uses the radius (${near.speech.slice(0, 40)})`);
+}
+
+console.log("\n  the answer carries an address, not just a name");
+{
+  // From runs/voice/2026-09-30T20-15-14: "show me any live camera from the
+  // US" took 70 SECONDS and ended with "clicking the camera link doesn't
+  // actually..." — Echo had the camera's NAME and no url, so it went hunting
+  // on the 3D globe. That route cannot work: the hosted grid publishes no map
+  // handle, so focusOsiris falls back to typing into the site's search box,
+  // which in an earlier session left the globe stuck on Hungary.
+  const cams = [{ id: "a", lat: 1, lng: 1, name: "Shibuya Crossing", city: "Tokyo",
+                  country: "Japan", stream_url: "https://example.com/live" }];
+  const out = summarize("cameras", { cameras: cams });
+  ok(out.open === "https://example.com/live",
+     "the summary carries the stream url the model must open",
+     "a name alone sends it to the map, which is a minute it will not get back");
+
+  // Feeds that are not about a watchable thing must not invent one.
+  ok(summarize("earthquakes", { earthquakes: [{ lat: 1, lng: 1, mag: 5, place: "x" }] }).open === undefined,
+     "and other feeds leave it unset");
+  ok(summarize("cameras", { cameras: [{ id: "b", lat: 1, lng: 1, name: "X" }] }).open === undefined,
+     "as does a camera with no stream");
+}
+
+console.log("\n  it offers a camera a browser can actually show");
+{
+  // Live session: Echo opened the first US camera and got **503**, then said
+  // "that's the stream host itself refusing". The feed's own order puts
+  // Indiana DOT HLS prerolls first for the US — and a bare .m3u8 handed to a
+  // browser downloads a playlist rather than showing a picture, so even a
+  // healthy one was never going to work through open_url.
+  const cams = [
+    { id: "hls", lat: 1, lng: 1, name: "I-69 preroll", country: "US", stream_type: "hls",
+      stream_url: "https://skysfs4.trafficwise.org/preroll/INDOT_409.m3u8" },
+    { id: "jpg", lat: 1, lng: 1, name: "SR-20 Fort Bragg", country: "US", feed_url: "https://dot.ca.gov/x.jpg" },
+    { id: "yt", lat: 1, lng: 1, name: "Times Square", country: "US", stream_type: "iframe",
+      stream_url: "https://www.youtube.com/embed/abc" },
+  ];
+  const out = summarize("cameras", { cameras: cams });
+  ok(out.open === "https://www.youtube.com/embed/abc",
+     `the embed wins over the playlist (${out.open})`,
+     "an m3u8 downloads a file instead of playing, which is what 503'd in the real session");
+  ok(/Times Square/.test(out.speech), "and it is the one named out loud");
+
+  // 12,777 of 18,868 US cameras carry ONLY `feed_url`. Reading `stream_url`
+  // alone saw a tenth of them.
+  const onlyFeed = summarize("cameras", { cameras: [cams[1]] });
+  ok(onlyFeed.open === "https://dot.ca.gov/x.jpg", "a camera with only feed_url is still offered", String(onlyFeed.open));
+
+  // A viewer page beats the raw playlist on the SAME record.
+  const both = summarize("cameras", { cameras: [{ id: "b", lat: 1, lng: 1, name: "TxDOT", country: "US",
+    stream_type: "hls", stream_url: "https://x/y.m3u8", external_url: "https://its.txdot.gov/cameras" }] });
+  ok(both.open === "https://its.txdot.gov/cameras", "the operator's viewer page beats the playlist", String(both.open));
+}
+
+console.log("\n  a country still narrows when the geocoder is down");
+{
+  // Observed: /api/geosearch stopped answering, "the US" produced no filter,
+  // and the answer offered a camera in Tel Aviv. Country matching needs the
+  // WORD, not coordinates — the field is in every record.
+  const cams = [
+    { id: "a", lat: 39, lng: -98, name: "Abilene", country: "US", feed_url: "https://x/1.jpg" },
+    { id: "b", lat: 32, lng: 34, name: "Tel Aviv", country: "Israel", stream_type: "iframe", stream_url: "https://y/2" },
+  ];
+  const noCoords = { lat: NaN, lng: NaN, radiusKm: 0, label: "the US" };
+  const out = summarize("cameras", { cameras: cams }, noCoords as any);
+  ok(/^1 camera in the US/.test(out.speech), `still narrowed to the US (${out.speech.slice(0, 40)})`);
+  ok(/Abilene/.test(out.speech), "and offers the American one, not the Israeli one");
+
+  // A CITY with no coordinates cannot be narrowed, and must not pretend.
+  const city = summarize("cameras", { cameras: cams }, { lat: NaN, lng: NaN, radiusKm: 0, label: "New York" } as any);
+  ok(/^2 cameras\./.test(city.speech), `an unplaceable city falls back to global without claiming it (${city.speech.slice(0, 32)})`);
+  ok(!/near New York|in New York/.test(city.speech), "and does not say a place it never filtered by");
+}
+
+console.log("\n  the answer is watchable, not just a count");
+{
+  // "There are 23,204 cameras" with no way to see one is the same dead end
+  // in a politer voice.
+  const cams = [{ id: "a", lat: 1, lng: 1, name: "Shibuya Crossing", city: "Tokyo", country: "Japan", stream_url: "https://example.com/live" }];
+  const out = summarize("cameras", { cameras: cams });
+  ok(/Shibuya Crossing/.test(out.speech), "it names one");
+  ok(out.html.includes("https://example.com/live"), "and the link is in the panel");
+
+  // A feed that returns cameras with no streams must say so rather than
+  // promising something it cannot open.
+  const dead = summarize("cameras", { cameras: [{ id: "b", lat: 1, lng: 1, name: "X" }] });
+  ok(/none of them are streaming/.test(dead.speech), "no stream urls is said out loud", dead.speech);
+  ok(/No cameras on the feed/.test(summarize("cameras", { cameras: [] }).speech), "and an empty feed is honest");
 }
 
 console.log(`\n${pass}/${pass + fail} Osiris checks passed\n`);

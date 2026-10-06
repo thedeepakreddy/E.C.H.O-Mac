@@ -14,6 +14,8 @@ import { replay as replayWorkflow } from "../../frontier/replay.js";
 import * as journal from "../../frontier/journal.js";
 import { minePatterns } from "../../frontier/watchers.js";
 import { appRoot, memoryScope } from "./shared.js";
+import { activeConfig } from "../../config.js";
+import { readShortcuts, writeShortcuts } from "../../shortcuts-store.js";
 
 export const SKILL_TOOLS: ToolDef[] = [
   {
@@ -74,7 +76,10 @@ export const SKILL_TOOLS: ToolDef[] = [
       // Screen the plan: any high-risk step means Echo hands the plan back to be
       // run step by step (with the usual confirmations) rather than auto-running
       // something irreversible in a batch.
-      const screen = screenPlan(skill, (tool, args) => classify(tool, args, { workingDir: appRoot() }).tier);
+      // Judged against the user's working folder, like every other tool call —
+      // not the app's own folder, which made writes look like they were elsewhere.
+      const workingDir = activeConfig(appRoot()).control.workingDir;
+      const screen = screenPlan(skill, (tool, args) => classify(tool, args, { workingDir }).tier);
       const plan = skill.steps.map((s, i) => `${i + 1}. ${s.tool}${Object.keys(s.args ?? {}).length ? " " + JSON.stringify(s.args) : ""}`).join("\n");
       if (!screen.autoRunnable) {
         return { text: `The "${skill.name}" skill includes step(s) ${screen.highSteps.join(", ")} that change things, so I'll run it with you step by step. Plan:\n${plan}` };
@@ -90,7 +95,7 @@ export const SKILL_TOOLS: ToolDef[] = [
         }
         try {
           const args = z.object(tool.schema).parse(step.args ?? {});
-          const result = normalizeToolOutput(await runGated(tool, args, { workingDir: appRoot() }));
+          const result = normalizeToolOutput(await runGated(tool, args, { workingDir }));
           results.push({ step: index + 1, tool: step.tool, result });
           if (result.status !== "success") {
             return { status: results.length > 1 ? "partial" : result.status, verification: "unverified", data: { results },
@@ -125,15 +130,9 @@ export const SKILL_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (a) => {
-      const shortcutsPath = join(appRoot(), "shortcuts.json");
-      let shortcuts: Record<string, any> = {};
-      if (existsSync(shortcutsPath)) {
-        try {
-          shortcuts = JSON.parse(readFileSync(shortcutsPath, "utf8"));
-        } catch (e) {
-          /* ignore parse errors */
-        }
-      }
+      // The user's own shortcuts file — see shortcuts-store.ts for why it is
+      // no longer the one inside the app folder.
+      const shortcuts = readShortcuts(appRoot());
 
       if (a.action === "list") {
         const keys = Object.keys(shortcuts);
@@ -145,7 +144,7 @@ export const SKILL_TOOLS: ToolDef[] = [
         if (!a.phrase) return { text: "You must provide a phrase to remove." };
         if (!shortcuts[a.phrase]) return { text: `Shortcut '${a.phrase}' not found.` };
         delete shortcuts[a.phrase];
-        writeFileSync(shortcutsPath, JSON.stringify(shortcuts, null, 2), "utf8");
+        writeShortcuts(shortcuts);
         return { text: `Removed shortcut: ${a.phrase}` };
       }
 
@@ -154,27 +153,11 @@ export const SKILL_TOOLS: ToolDef[] = [
           return { text: "You must provide a phrase, a bash command, and a spoken reply to add a shortcut." };
         }
         shortcuts[a.phrase.toLowerCase()] = { command: a.command, reply: a.reply };
-        writeFileSync(shortcutsPath, JSON.stringify(shortcuts, null, 2), "utf8");
+        writeShortcuts(shortcuts);
         return { text: `Added shortcut: '${a.phrase}' -> runs '${a.command}' and says '${a.reply}'` };
       }
       
       return { text: "Invalid action." };
-    },
-  },
-  {
-    name: "create_jarvis_tool",
-    description: "Deprecated and disabled. To give Echo a new ability, use create_skill, which safely chains tools Echo already has instead of writing and running new code.",
-    schema: {
-      toolCodeString: z.string().optional().describe("Ignored."),
-    },
-    readOnly: true,
-    handler: async () => {
-      // Writing new code into the app's own source and rebuilding/rebooting is
-      // arbitrary code execution and cannot work in a signed, packaged app.
-      // Retired in favour of create_skill (safe composition of existing tools).
-      return {
-        text: "That unsafe self-programming path is disabled. Use create_skill instead — it lets me learn a new ability by chaining tools I already have, with no code generation.",
-      };
     },
   },
   {

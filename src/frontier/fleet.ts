@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { z } from 'zod';
 import { join } from "node:path";
 import { TOOLS } from "../tools/registry.js";
-import { dataRoot } from "../memory/paths.js";
+import { atomicWrite, dataRoot } from "../memory/paths.js";
 
 /**
  * The agent fleet: named, standing team members you dispatch a task to,
@@ -17,9 +18,8 @@ import { dataRoot } from "../memory/paths.js";
  *   The tool list a custom agent may hold comes from the registry's own
  *   `readOnly` flag, never a second hand-maintained list here that could drift
  *   and offer something the brain-construction boundary (brain/types.ts's
- *   `allowedTools`, enforced in every brain's constructor and, for Claude,
- *   ALSO in its canUseTool hook so the SDK's own Bash/Write/Edit cannot slip
- *   through) would then refuse. One list, one truth.
+ *   `allowedTools`, enforced by the shared execution gate and by Claude's
+ *   canUseTool hook for SDK-native tools) would then refuse.
  *
  *   A built-in agent cannot be edited or removed, so a mistake in the roster
  *   can never leave the fleet without a working member.
@@ -134,36 +134,42 @@ interface FleetFile {
   custom: FleetMember[];
 }
 
-function ensure(): void {
-  if (!existsSync(dir())) mkdirSync(dir(), { recursive: true });
-}
+const VALID_ID = /^[a-z][a-z0-9-]{0,23}$/;
+const fleetFileSchema = z.object({
+  version: z.literal(1),
+  custom: z.array(z.object({
+    id: z.string().regex(VALID_ID), name: z.string().trim().min(1).max(40),
+    description: z.string().max(160), brief: z.string().trim().min(1).max(4000),
+    tier: z.enum(['fast', 'balanced', 'deep']),
+    tools: z.array(z.string()), custom: z.literal(true),
+  }).strict()).max(MAX_CUSTOM),
+}).strict().refine(file => new Set(file.custom.map(member => member.id)).size === file.custom.length &&
+  file.custom.every(member => !BUILT_IN.some(builtin => builtin.id === member.id)), 'Duplicate or reserved agent identity');
 
-function loadCustom(): FleetMember[] {
+function loadCustom(forMutation = false): FleetMember[] {
   if (!existsSync(FILE())) return [];
   try {
-    const parsed = JSON.parse(readFileSync(FILE(), "utf8")) as FleetFile;
-    if (parsed?.version !== 1 || !Array.isArray(parsed.custom)) return [];
-    return parsed.custom;
-  } catch {
+    const parsed = fleetFileSchema.parse(JSON.parse(readFileSync(FILE(), "utf8")));
+    const grantable = new Set(grantableTools());
+    return parsed.custom.map(member => ({...member, tools: [...new Set(member.tools.filter(tool => grantable.has(tool)))]}));
+  } catch (error) {
+    if (forMutation) throw new Error(`The agent roster is invalid. Repair ${FILE()} before changing it.`, {cause: error});
     return [];
   }
 }
 
 function saveCustom(members: FleetMember[]): void {
-  ensure();
-  writeFileSync(FILE(), JSON.stringify({ version: 1, custom: members } satisfies FleetFile, null, 2));
+  atomicWrite(FILE(), JSON.stringify(fleetFileSchema.parse({ version: 1, custom: members } satisfies FleetFile), null, 2));
 }
 
 /** Every agent, built-in first, in the shape the control panel renders. */
 export function listFleet(): FleetMember[] {
-  return [...BUILT_IN, ...loadCustom()];
+  return [...BUILT_IN, ...loadCustom()].map(member => ({...member, tools: [...member.tools]}));
 }
 
 export function getFleetMember(id: string): FleetMember | null {
   return listFleet().find((m) => m.id === id) ?? null;
 }
-
-const VALID_ID = /^[a-z][a-z0-9-]{0,23}$/;
 
 /** Add or replace one of the user's own agents. Never touches a built-in id. */
 export function addFleetMember(input: NewAgent): FleetMember {
@@ -178,7 +184,7 @@ export function addFleetMember(input: NewAgent): FleetMember {
   const grantable = new Set(grantableTools());
   const tools = [...new Set((input.tools ?? []).filter((t) => grantable.has(t)))];
 
-  const custom = loadCustom();
+  const custom = loadCustom(true);
   const existingIndex = custom.findIndex((m) => m.id === id);
   const member: FleetMember = { id, name, description: (input.description || "").trim().slice(0, 160), brief, tier, tools, custom: true };
   if (existingIndex < 0 && custom.length >= MAX_CUSTOM) {
@@ -191,7 +197,7 @@ export function addFleetMember(input: NewAgent): FleetMember {
 
 export function removeFleetMember(id: string): void {
   if (BUILT_IN.some((m) => m.id === id)) throw new Error(`"${id}" is one of Echo's own agents and cannot be removed.`);
-  saveCustom(loadCustom().filter((m) => m.id !== id));
+  saveCustom(loadCustom(true).filter((m) => m.id !== id));
 }
 
 /**
@@ -199,7 +205,7 @@ export function removeFleetMember(id: string): void {
  * `null` for a built-in agent means no restriction at all.
  */
 export function allowedToolsFor(member: FleetMember): Set<string> | null {
-  if (!member.custom) return null;
+  if (!member.custom && BUILT_IN.some(builtin => builtin.id === member.id)) return null;
   const grantable = new Set(grantableTools());
   return new Set(member.tools.filter((t) => grantable.has(t)));
 }

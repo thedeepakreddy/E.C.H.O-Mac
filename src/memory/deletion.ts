@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { createHash, randomUUID } from "node:crypto";
 import { memoryService } from "./service.js";
 import type { MemoryScope } from "./types.js";
@@ -7,6 +8,7 @@ import { taskCoordinator } from "./task-state.js";
 import { atomicWrite, dataRoot, memoryRoot } from "./paths.js";
 import { invalidateCaptures } from "./capture-policy.js";
 import { getAppPath } from "../utils/appPath.js";
+import { conversations } from "./conversation.js";
 
 export interface ForgetRequest { ids?: string[]; query?: string; scope?: MemoryScope; taskId?: string; appRoot?: string }
 export interface DeletionReceipt {
@@ -38,11 +40,27 @@ export function forgetEverywhere(request: ForgetRequest): DeletionReceipt {
     return Boolean(value && typeof value === "object" && Object.values(value).some(match));
   };
   const note = (file: string, count = 1) => { receipt.stores[file] = (receipt.stores[file] ?? 0) + count; };
+  try {
+    const terms = request.query?.toLocaleLowerCase().split(/\s+/).filter(Boolean) ?? [];
+    const count = conversations.forget(row => {
+      if (request.scope?.projectId && row.projectId !== request.scope.projectId) return false;
+      const selected = match(row) || Boolean(terms.length && terms.every(term => row.text.toLocaleLowerCase().includes(term)));
+      // Task snapshots and replay checkpoints are derived copies of this
+      // transcript. Remove them too, or a shared task summary restores it.
+      if (selected && row.taskId) taskIds.add(row.taskId);
+      return selected;
+    });
+    if (taskIds.size) conversations.forget(row => !!row.taskId && taskIds.has(row.taskId));
+    if (count) note(join(memoryRoot(), "conversations"), count);
+  } catch { receipt.failures.push("conversation history"); }
   const safeRemove = (file: string) => {
     if (!existsSync(file) || lstatSync(file).isSymbolicLink()) return;
     rmSync(file, { recursive: true, force: true }); note(file);
   };
   const roots = [...new Set([dataRoot(), resolve(request.appRoot ?? getAppPath())])];
+  // Coding captures are derivatives. Never delete the external project root.
+  for(const root of roots){const dir=join(root,'coding','sessions');if(!existsSync(dir))continue;for(const entry of readdirSync(dir,{withFileTypes:true})){if(!entry.isFile()||entry.isSymbolicLink()||!entry.name.endsWith('.json'))continue;try{const file=join(dir,entry.name),session=JSON.parse(readFileSync(file,'utf8'));if(match(session)){ids.add(session.id);safeRemove(file);}}catch{receipt.failures.push('coding session capture');}}
+    for(const rel of ['processes','patches']){const captures=join(root,'coding',rel);if(!existsSync(captures))continue;for(const entry of readdirSync(captures,{withFileTypes:true})){if(entry.isSymbolicLink())continue;const path=join(captures,entry.name);try{const record=JSON.parse(readFileSync(entry.isDirectory()?join(path,'change.json'):path,'utf8'));if(match(record))safeRemove(path);}catch{receipt.failures.push('coding derivative capture');}}}}
   // This can remove rollback evidence, but never the user-owned original file.
   const attached = (row: any, root: string) => {
     if (row.shot) safeRemove(join(root, "scans", "shots", basename(String(row.shot))));
@@ -120,6 +138,23 @@ export function forgetEverywhere(request: ForgetRequest): DeletionReceipt {
         });
         if (hit && run.name !== "voice") safeRemove(p);
         else if (run.name === "voice") visitFiles(p, (file) => { if (file.endsWith(".jsonl")) filterJsonl(file, root); });
+      }
+    });
+    // Owned dataset snapshots and compressed history are derived copies too.
+    // Invalidate only bundles/runs containing the forgotten evidence.
+    for (const rel of ['dataset-history/runs', 'datasets']) attempt(join(root, rel), () => {
+      const dir = join(root, rel); if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, {withFileTypes: true})) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        const bundle = join(dir, entry.name); let hit = false;
+        visitFiles(bundle, file => {
+          if (hit || /\.(jpg|jpeg|png|webp)$/.test(file)) return;
+          const bytes = readFileSync(file);
+          const raw = (file.endsWith('.gz') ? gunzipSync(bytes) : bytes).toString('utf8');
+          const lines = file.replace(/\.gz$/, '').endsWith('.jsonl') ? raw.split('\n').filter(Boolean) : [raw];
+          for (const line of lines) {try {if (match(JSON.parse(line))) hit = true;} catch {/* preserve corrupt evidence and report through the manifest */}}
+        });
+        if (hit) {safeRemove(bundle); receipt.limitations.push('Dataset bundles containing forgotten evidence were invalidated; rebuild from remaining recordings.');}
       }
     });
     // Remove matched chunks and their aligned vectors together. This deletes an

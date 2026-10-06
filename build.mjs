@@ -82,6 +82,7 @@ const entries = [
   // preload as ESM when it ends in .mjs, so an ESM bundle named .js fails to
   // load — contextBridge never runs and window.jarvis is undefined in the HUD.
   { in: "src/preload.ts", out: "dist/preload.cjs", format: "cjs" },
+  { in: 'src/tasks/report-preload.ts', out: 'dist/report-preload.cjs', format: 'cjs' },
 ];
 
 const watch = process.argv.includes("--watch");

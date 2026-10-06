@@ -38,6 +38,16 @@ const MIN_TEMPLATE = 20;
 const MAX_TEMPLATE = 110;
 /** Speech-ish energy in the last ~300 ms before DTW is even attempted. */
 const ENERGY_HISTORY = 10;
+/**
+ * Quietest speech the spotter will attempt to match.
+ *
+ * Below this the DTW is not even run, so a microphone turned down far enough
+ * makes the wake word silently impossible while everything else still works —
+ * whisper normalises its input, so transcription and click-to-talk carry on
+ * perfectly and nothing anywhere says why the name stopped working. Exported
+ * so the listener can warn against the SAME number the gate uses.
+ */
+export const WAKE_MIN_RMS = 90;
 
 export class TemplateWake implements WakeDetector {
   readonly name = "template";
@@ -97,7 +107,7 @@ export class TemplateWake implements WakeDetector {
     if (++this.sinceCheck < CHECK_EVERY) return null;
     this.sinceCheck = 0;
     if (this.ring.length < MIN_TEMPLATE + 10) return null;
-    if (Math.max(...this.recentRms) < Math.max(90, this.floor * 1.5)) return null;
+    if (Math.max(...this.recentRms) < Math.max(WAKE_MIN_RMS, this.floor * 1.5)) return null;
 
     const cost = this.bestCost();
     this.lastCost = cost;

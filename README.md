@@ -12,7 +12,7 @@ the web, runs code and answers out loud, narrating each step so you can watch it
 ```
  you speak ─► "Echo" wake word ─► speech-to-text ─► BRAIN (Claude / Gemini / GPT / local) ─► voice reply
                                                         │
-                                  143 tools: see the screen · click · type · open apps · search the web
+                                  140 tools: see the screen · click · type · open apps · search the web
                                   remember · run code · background agents · phone remote · world intel …
                                                         │
                                   every action passes one RISK GATE: risky ones need your spoken "yes"
@@ -48,7 +48,7 @@ search and system health (`npm run selfhosted:setup`), and your own copy of the 
 
 ## 2. What Echo can do
 
-Echo has **143 tools**, grouped the same way as the code (`src/tools/registry/`):
+Echo has **140 tools**, grouped the same way as the code (`src/tools/registry/`):
 
 | Area | What it means in practice | Examples |
 |---|---|---|
@@ -157,8 +157,26 @@ Every action any brain or agent takes goes through **one risk gate** (`src/safet
   (a local embedding model; nothing is sent out).
 - **Episodic memory:** what happened and how much it mattered; frequently used facts are
   promoted over time.
+- **Shared conversation:** Claude, Gemini, OpenAI, Ollama and realtime voice use the
+  same saved conversation for the current project. Changing brains or restarting
+  preserves recent messages, user constraints and task outcomes. The working
+  history is initially seeded from the latest 20 real task recordings for that
+  project; private recordings and test runs are excluded. The working
+  context starts at **128,000 tokens**, including instructions, tools and history;
+  16,000 tokens are reserved for output. At 75% of capacity, completed tool rounds
+  compact into current task state and an extractive rolling summary. Original
+  messages remain available through `conversation_history`. Private turns are
+  excluded; memory/cloud-recall settings and forgetting apply to the archive.
+  Local model capacity is read from Ollama and capped at 8,192 tokens on Macs
+  with 8 GB RAM or less (16,384 on larger machines). Local requests use a compact
+  prompt and relevant tools that fit this budget; the Stop button cancels inference.
+  Claude's SDK session compaction is
+  configured with the same window target; its internal history is managed by the SDK.
 - **Scan this page:** *"scan this"* keeps a permanent, searchable copy of whatever is on screen.
 - **Screen history:** *"what was on my screen when…"*, *"what changed while I was away?"*
+  New background capture is opt-in with `helpers.screenHistory`; existing history
+  remains searchable. Captures default to two minutes apart, never overlap, and
+  pause while the Mac sleeps, the screen is locked, or a private task is active.
 - **Your files:** *"index my files"*, then *"find the contract with Acme"*.
 - **Workflows:** *"watch me do this"* records a task once, and Echo repeats it, re-finding
   each button every time. Replays still go through the risk gate.
@@ -253,6 +271,18 @@ languages apart. `ggml-base.en.bin` is smaller and faster, but English-only.
 npm run login        # Claude: opens the bundled CLI, type /login
 ```
 
+**ChatGPT plan, no API key.** In **Control panel → Models → ChatGPT**, click
+**Sign in with ChatGPT**, sign in in your browser, and allow Echo to use your plan.
+The ChatGPT brain then runs on your ChatGPT Plus/Pro usage instead of API credits;
+check or cap what Echo uses at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage).
+This is OpenAI's [plan-usage flow for open-source, locally run apps](https://developers.openai.com/siwc/token-sharing-open-source):
+it is available because Echo is open source and runs on your Mac. A closed-source
+or commercial build would need OpenAI's approval. Audio input is not available on
+this route (Echo's hearing pass describes tone instead). Set `openai.auth` to
+`"chatgpt"`, `"apiKey"` or `"auto"` (default: the plan when signed in, else the key),
+and `openai.chatgptModel` to pick a model; empty uses the first your plan offers.
+The sign-in is stored in `~/.jarvis/chatgpt/`, encrypted with the macOS Keychain.
+
 Or add keys in **Control panel → Settings → API keys**, or in a `.env` file:
 
 ```bash
@@ -318,12 +348,20 @@ macOS gives these to the app that **launches** Echo: your terminal and/or
 | `voice.sttLanguage` | `en` | Keep `en`: it helps the wake word in every language |
 | `voice.wakeWord` | on | Listen for "Echo" |
 | `voice.wakeEngine` | `auto` | `auto`, `template`, `porcupine`, `onnx`, `none` |
+| `voice.wakeTranscriptFallback` | off | Also transcribe room speech alongside the acoustic wake detector; costs extra local inference. Transcript fallback still runs if no acoustic detector is available. |
 | `voice.conversationWindowMs` | 12000 | How long you can reply without "Echo" |
 | `voice.bargeIn` | on | Talk over Echo to stop it |
 | `voice.sendAudioToBrain` | off | Let the brain hear your tone, not just the words |
 | `voice.inputDevice` | `-1` | Microphone: `-1` = system default, or a name |
 | `memory.enabled` | on | Long-term memory |
+| `context.maxTokens` | 128000 | Shared context target; increase this to grow the working window |
+| `context.outputReserveTokens` | 16000 | Output space reserved inside that target |
+| `context.compactAt` | 0.75 | Fraction at which accumulated tool history is compacted |
+| `context.providerLimits` | `{}` | Smaller caps by model/provider, where required |
 | `memory.retentionDays` | 0 | Delete memories older than N days (0 = keep) |
+| `helpers.screenHistory` | off | Background screen OCR; restart after changing |
+| `helpers.screenHistoryIntervalSeconds` | 120 | Delay after each capture finishes; minimum 30 seconds |
+| `helpers.memoryIndexing` | off | Background Ollama vector indexing of screen history; restart after changing |
 | `hud.skin` | `jarvis` | HUD look |
 | `learning.enabled` | off | Record runs as training data for the local model |
 | `osiris.baseUrl` | hosted | Pin one Osiris instance |
@@ -370,7 +408,7 @@ OSIRIS_URL=http://localhost:3000
 | `npm run voicelog` | Voice timing per turn (end of speech → first sound) |
 | `npm run hudpreview` / `panelpreview` | Render the HUD or control panel for checking layout |
 | `npm run media` | Re-record the README's demo clips into `docs/media/` (add a name for one: `-- hud`) |
-| `npm run dataset` | Export recorded runs as training data |
+| `npm run dataset` | Inspect training candidates; add `-- --export` to snapshot all available recorded providers/messages/tools into `~/.jarvis/datasets/` |
 
 ---
 
@@ -497,3 +535,9 @@ Ask first: **Deepak (AskDeepakAI)**, [@thedeepakreddy](https://github.com/thedee
 **Platform:** macOS only (uses `cliclick`, `screencapture`, AppleScript and native helpers).
 The brain, tools, voice and HUD are platform-independent; porting would mean a new
 `tools/computer-actions.ts` for another OS.
+
+### Graceful shutdown
+
+Use **Power off** in the control panel, or run `npm run stop` from the Echo Mac project directory. The terminal command asks the existing instance to release resources; it does not start a new assistant when Echo is already stopped. Ctrl+C in Echo’s launch terminal and SIGTERM/SIGHUP also use the same cleanup routine. Repeated requests do not run cleanup twice.
+
+Shutdown closes the microphone, speech/realtime sessions, shared Piper workers, managed coding processes, brain/MCP connections, remote server, windows and sensor helpers. Project files and saved progress remain on disk. Failed or stalled cleanup steps are logged and bounded so other resources can still be released. SIGKILL (`kill -9`) cannot run graceful cleanup.

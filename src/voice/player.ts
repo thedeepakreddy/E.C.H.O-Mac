@@ -75,6 +75,7 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
   private stopped = false;
   private disposed = false;
   private recovering = false;
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private restarts = 0;
   private lastRestartAt = 0;
 
@@ -175,6 +176,12 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
     });
     const args = capture ? ["--capture"] : [];
     this.proc = spawn(this.bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    // Ctrl+C reaches the helper too. Its pipe may close before Echo sends
+    // the final stop/quit message; stream errors are separate from child errors.
+    this.proc.stdin!.on('error', (error: NodeJS.ErrnoException) => {
+      if (this.disposed || error.code === 'EPIPE' || error.code === 'ERR_STREAM_DESTROYED') return;
+      console.error(`[voiceio] control pipe failed: ${error.message}`);
+    });
     this.proc.stdout!.on("data", (d: Buffer) => this.onData(d));
     this.proc.stderr!.on("data", (d: Buffer) => {
       const line = d.toString().trim();
@@ -232,7 +239,9 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
       const waiters = this.frameWaiters.splice(0);
       if (waiters.length) console.log("[voiceio] capture died with the player — hearing falls back to the plain recorder");
     }
-    setTimeout(() => {
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (this.disposed) { this.recovering = false; return; }
       this.launch(false)
         .then(() => {
           this.rate = 0; // force a config message before the next sentence
@@ -249,7 +258,7 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
   }
 
   private send(type: number, payload: Buffer): void {
-    if (!this.proc?.stdin?.writable) return;
+    if (!this.proc?.stdin?.writable || this.proc.stdin.destroyed || this.proc.killed) return;
     const head = Buffer.alloc(5);
     head.writeUInt32LE(payload.length + 1, 0);
     head[4] = type;
@@ -350,6 +359,8 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
 
   dispose(): void {
     this.disposed = true;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
     try {
       this.control({ cmd: "quit" });
       this.proc?.stdin?.end();
@@ -467,12 +478,34 @@ function wavOf(pcm: Buffer, rate: number): Buffer {
  * The best player this machine can offer: voiceio (with echo-cancelled capture
  * unless the config says otherwise), else afplay.
  */
+/**
+ * Keep an `error` listener attached from the moment a player exists.
+ *
+ * An EventEmitter with no `error` listener THROWS when one is emitted, and
+ * `createPlayer` below probes the helper, tears it down and builds a second
+ * one — all before the caller has had a chance to attach anything. A real
+ * boot hit exactly that window:
+ *
+ *   engine failed to start: … com.apple.coreaudio.avfaudio error -10875
+ *   [echo:process.uncaughtException] ERR_UNHANDLED_ERROR
+ *   [perf] main process stalled ~3131ms
+ *
+ * An audio device that will not open is an ordinary Tuesday on a laptop with
+ * headphones coming and going; it must cost the helper, not the process.
+ * Callers still add their own listener — more than one is fine.
+ */
+function guardErrors(p: AudioPlayer, label: string): AudioPlayer {
+  p.on("error", (m: unknown) => console.error(`[voiceio] ${label}: ${String(m)}`));
+  return p;
+}
+
 export async function createPlayer(cfg: JarvisConfig, appRoot: string): Promise<AudioPlayer> {
   const bin = VoiceIoPlayer.available(appRoot);
   const engine = cfg.voice.captureEngine ?? "auto";
   if (bin) {
     const wantCapture = engine !== "pvrecorder";
-    const p = new VoiceIoPlayer(bin, wantCapture);
+    const p = new VoiceIoPlayer(bin, wantCapture) as VoiceIoPlayer;
+    guardErrors(p, "probe");
     try {
       await p.start();
       if (p.captureDead) {
@@ -484,12 +517,13 @@ export async function createPlayer(cfg: JarvisConfig, appRoot: string): Promise<
         console.warn("[voiceio] releasing the microphone so the plain recorder can open it cleanly");
         p.dispose();
         const playbackOnly = new VoiceIoPlayer(bin, false);
+        guardErrors(playbackOnly, "playback");
         try {
           await playbackOnly.start();
           return playbackOnly;
         } catch {
           playbackOnly.dispose();
-          return new AfplayPlayer();
+          return guardErrors(new AfplayPlayer(), "afplay");
         }
       }
       return p;
@@ -498,5 +532,5 @@ export async function createPlayer(cfg: JarvisConfig, appRoot: string): Promise<
       p.dispose();
     }
   }
-  return new AfplayPlayer();
+  return guardErrors(new AfplayPlayer(), "afplay");
 }

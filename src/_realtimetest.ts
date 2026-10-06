@@ -18,6 +18,13 @@
  *     is the silent stop this project has already fixed twice in the text loop.
  */
 import { z } from "zod";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const contextTestRoot = mkdtempSync(join(tmpdir(), "echo-realtime-test-"));
+process.env.ECHO_MEMORY_ROOT = join(contextTestRoot, "os");
+process.env.ECHO_DATA_ROOT = contextTestRoot;
+process.on("exit", () => rmSync(contextTestRoot, { recursive: true, force: true }));
 
 process.env.ECHO_LOG_QUIET = "1";
 

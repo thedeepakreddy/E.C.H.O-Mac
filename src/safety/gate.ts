@@ -33,6 +33,8 @@ import { taskCoordinator } from "../memory/task-state.js";
 import { normalizeToolOutput } from "../memory/tool-result.js";
 import { noteToolOutcome } from "../memory/consolidate.js";
 import { captureAllowed } from "../memory/capture-policy.js";
+import { runWithReadReuse, INTERNAL_TOOLS } from "../memory/read-cache.js";
+import { toolPermitted, withToolPermissions } from './tool-permissions.js';
 
 /**
  * The one gate every tool call goes through.
@@ -60,6 +62,8 @@ import { captureAllowed } from "../memory/capture-policy.js";
 
 export interface GateContext {
   workingDir: string;
+  /** Undefined is unrestricted; an empty set grants no tools. */
+  allowedTools?: ReadonlySet<string>;
   /** Lets a brain surface risk and tool events in its own shape. */
   emit?: (event: string, payload: any) => void;
 }
@@ -104,7 +108,21 @@ function rememberedDecision(key: string, now: number): boolean | null {
   return hit.allowed;
 }
 
-/** Forget cached decisions. Used by tests, and whenever a turn ends. */
+/**
+ * Drop decisions past their reuse window.
+ *
+ * Entries were only ever removed when the same key was looked up again, and
+ * almost none are — so the map held every tool call of the session. Swept on
+ * write instead, which keeps it to roughly the last fifteen seconds of calls.
+ */
+function rememberDecision(key: string, now: number, allowed: boolean): void {
+  if (recent.size > 100) {
+    for (const [k, v] of recent) if (now - v.at > DEDUPE_MS) recent.delete(k);
+  }
+  recent.set(key, { at: now, allowed });
+}
+
+/** Forget cached decisions. Used by tests. */
 export function resetGateMemory(): void {
   recent.clear();
   guiFailureStreak.clear();
@@ -128,7 +146,11 @@ const offeredDemo = new Set<string>();
 export function noteGuiOutcome(taskId: string | undefined, tool: string, succeeded: boolean): void {
   if (!taskId || !GUI_TOOLS.has(bareToolName(tool))) return;
   if (succeeded) guiFailureStreak.delete(taskId);
-  else guiFailureStreak.set(taskId, (guiFailureStreak.get(taskId) ?? 0) + 1);
+  else {
+    // Keyed by task and never cleared at a task's end, so bound it.
+    if (guiFailureStreak.size > 200) guiFailureStreak.clear();
+    guiFailureStreak.set(taskId, (guiFailureStreak.get(taskId) ?? 0) + 1);
+  }
 }
 
 /**
@@ -228,8 +250,8 @@ export async function decide(
       }
     };
 
-    if (bareTool === "Bash" || bareTool === "BashOutput" || bareTool === "KillShell" || bareTool === "run_terminal_command") {
-      const cmd = typeof input?.command === "string" ? input.command : (typeof input?.cmd === "string" ? input.cmd : "");
+    if (bareTool === "Bash" || bareTool === "BashOutput" || bareTool === "KillShell" || bareTool === "run_terminal_command" || bareTool === "start_process") {
+      const cmd = bareTool === "start_process" ? `${String(input.program)} ${JSON.stringify(input.args ?? [])}` : typeof input?.command === "string" ? input.command : (typeof input?.cmd === "string" ? input.cmd : "");
       if (cmd) {
         const p = await ask({ command: cmd }, "isDangerous",
           "Does this shell command delete files, format disks, change system settings, or send data externally?");
@@ -286,7 +308,7 @@ export async function decide(
     if (assessment.snapshot) {
       await capture(assessment.snapshot, assessment.reason).catch(() => null);
     }
-    recent.set(key, { at: now, allowed: true });
+    rememberDecision(key, now, true);
     return { allowed: true, assessment };
   }
 
@@ -300,7 +322,7 @@ export async function decide(
     `I'm about to ${assessment.reason}.${undoable} Should I go ahead?`
   );
 
-  recent.set(key, { at: now, allowed: approved });
+  rememberDecision(key, now, approved);
   return {
     allowed: approved,
     assessment,
@@ -320,13 +342,47 @@ export async function runGated(
   args: Record<string, unknown>,
   ctx: GateContext
 ): Promise<ToolOutput> {
+  return withToolPermissions(ctx.allowedTools, () => runAuthorizedTool(def, args, ctx));
+}
+
+async function runAuthorizedTool(def: ToolDef, args: Record<string, unknown>, ctx: GateContext): Promise<ToolOutput> {
   const run = currentAgentRunContext();
+  if (!toolPermitted(def.name, run?.allowedTools)) {
+    const message = `This agent has no grant for ${def.name}. The tool was not executed.`;
+    const denied: ToolOutput = {text: message, status: 'denied', verification: 'unverified', error: {category: 'tool_not_granted', message, retryable: false}};
+    if (run && !isReplaying() && !run.loop?.hasExited) {
+      try {
+        const invocation = createInvocation(run.taskId, run.identity.id, def.name, args, ctx.workingDir);
+        return runInInvocation(invocation, () => {
+          taskCoordinator.startCall(invocation, def.name, 'internal');
+          recordToolDenied(def.name, args, message);
+          ctx.emit?.('tool', {name: def.name, summary: message});
+          const output = {...denied, callId: invocation.callId, taskId: run.taskId};
+          taskCoordinator.endCall(invocation, output);
+          return output;
+        });
+      } catch { /* A stopped task still receives the same refusal. */ }
+    }
+    recordToolDenied(def.name, args, message);
+    ctx.emit?.('tool', {name: def.name, summary: message});
+    return denied;
+  }
+  // Resolve names before risk assessment and resource leasing, so aliases and
+  // UUIDs cannot acquire separate locks for the same coding project.
+  if (typeof args.projectId === 'string' && Object.hasOwn(def.schema, 'projectId')) {
+    const {CODING_TOOL_NAMES} = await import('../coding/tool-selection.js');
+    if (CODING_TOOL_NAMES.includes(def.name)) {
+      try { const {resolveProjectId} = await import('../coding/session.js'); args = {...args, projectId:resolveProjectId(args.projectId)}; }
+      catch (error:any) {return {status:'failed',verification:'unverified',text:error.message};}
+    }
+  }
   if (!run || isReplaying()) return executeGated(def, args, ctx);
+  if (run.loop?.hasExited) return {status: 'cancelled', text: 'The task has stopped; this action was not attempted.', error: {category: 'task_stopped', message: 'No tool may start after the task exits', retryable: false}};
   let invocation;
   try { invocation = createInvocation(run.taskId, run.identity.id, def.name, args, ctx.workingDir); }
   catch (error: any) { return { text: error.message, status: "cancelled", error: { category: "task_unavailable", message: error.message } }; }
   return runInInvocation(invocation, async () => {
-    taskCoordinator.startCall(invocation, def.name);
+    taskCoordinator.startCall(invocation, def.name, INTERNAL_TOOLS.has(def.name) ? 'internal' : def.readOnly ? 'observation' : 'action');
     const lease = taskCoordinator.acquireResources(invocation);
     let out: ToolOutput;
     if (!lease.ok) {
@@ -420,6 +476,16 @@ function acceptedArguments(def: ToolDef): { json: any; text: string } {
 }
 
 function validateArguments(def: ToolDef, args: Record<string, unknown>): ToolOutput | null {
+  if (def.validateInput) {
+    let detail: string | null;
+    try { detail = def.validateInput(args); }
+    catch (error) { detail = `Input validation unavailable: ${String(error)}`; }
+    if (detail) {
+      const message = `${def.name}: ${detail}. Nothing was executed; correct the tool arguments.`;
+      return {text: message, status: 'failed', verification: 'unverified', error: {category: 'invalid_arguments', message, retryable: true}};
+    }
+    return null;
+  }
   // An empty shape means the tool declares no arguments to check. MCP tools are
   // wrapped that way on purpose: their server owns validation, not Echo.
   if (!def.schema || Object.keys(def.schema).length === 0) return null;
@@ -554,7 +620,8 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     // is on, and best-effort, so it can never delay or break the action.
     if (currentInvocation()) taskCoordinator.assertInvocation(currentInvocation()!);
     if (captureAllowed()) await captureGroundingFrame(bare);
-    const out = await recordTool(def.name, args ?? {}, async () => normalizeToolOutput(await def.handler(args ?? {})));
+    const out = await recordTool(def.name, args ?? {}, () => runWithReadReuse(currentAgentRunContext(), def, args ?? {},
+      currentInvocation()?.callId, async () => normalizeToolOutput(await def.handler(args ?? {}))));
     toolFailed = out.status !== "success";
     toolDetail = out.error?.message;
     learn(out.text ?? "", out.image ?? null, out.status === "success");

@@ -10,6 +10,8 @@ import {
   type TaskResultStatus,
 } from "../memory/task-state.js";
 import { getFleetMember } from "./fleet.js";
+import {desktopTaskBusy} from '../tasks/desktop-lane.js';
+import {shutdownStep} from '../shutdown.js';
 
 /**
  * The clone swarm: background sub-agents working in parallel.
@@ -190,6 +192,19 @@ export class SwarmManager {
   private taskTimers = new Map<string, NodeJS.Timeout>();
   private taskErrors = new Map<string, string>();
   private counter = 0;
+  private closing = false;
+  private stopping = new Set<Promise<unknown>>();
+  private extraRoster: () => Array<{name:string;progress:string}> = () => [];
+  private reservedCapacity: () => number = () => 0;
+
+  setExtraRoster(read: () => Array<{name:string;progress:string}>): void {this.extraRoster=read;}
+  setReservedCapacity(read:()=>number):void {this.reservedCapacity=read;}
+  wake(): void {this.scheduleAll();}
+  async close(): Promise<void> {
+    this.closing=true;
+    for(const mission of this.missions.values()) if(mission.status==='running') this.cancelMission(mission.id);
+    await Promise.allSettled([...this.stopping]);
+  }
 
   count(): number {
     return this.clones.size;
@@ -199,14 +214,16 @@ export class SwarmManager {
   }
 
   send(name: string, message: string): boolean {
-    const brain = this.brains.get(name);
+    const matches = [...this.clones.values()].filter(clone => clone.id === name || clone.name === name);
+    const brain = matches.length === 1 ? this.brains.get(matches[0].id) : undefined;
     if (!brain) return false;
     brain.send(`[Message from Main]: ${message}`);
     return true;
   }
 
   updateProgress(name: string, progress: string, deps: Pick<SwarmDeps, "broadcast"> = {}): boolean {
-    const clone = [...this.clones.values()].find((item) => item.name === name);
+    const matches = [...this.clones.values()].filter(item => item.id === name || item.name === name);
+    const clone = matches.length === 1 ? matches[0] : undefined;
     if (!clone) return false;
     clone.progress = String(progress).slice(0, 200);
     this.broadcast(deps as SwarmDeps);
@@ -215,6 +232,7 @@ export class SwarmManager {
 
   /** Submit a durable dependency graph of Agent Tasks. */
   submitMission(spec: MissionSpec, deps: SwarmDeps): { ok: boolean; missionId?: string; reason?: string } {
+    if(this.closing) return {ok:false,reason:'Agent scheduler is shutting down'};
     const invalid = validateMission(spec);
     if (invalid) return { ok: false, reason: invalid };
     const now = deps.now ?? Date.now;
@@ -268,17 +286,17 @@ export class SwarmManager {
   }
 
   /** The same view, from a given coordinator — reconciliation must read what it will write. */
-  private persistedMissions(coordinator: TaskCoordinator): MissionState[] {
+  private persistedMissions(coordinator: TaskCoordinator, limit=20): MissionState[] {
     const all = new Map<string, MissionState>();
-    for (const state of coordinator.list()) {
+    for (const state of coordinator.listBindings<MissionState>('mission',limit)) {
       if (!state.taskId.startsWith("mission.")) continue;
-      const saved = state.bindings.mission as MissionState | undefined;
+      const saved = state.value;
       if (saved?.id) all.set(saved.id, saved);
     }
     for (const mission of this.missions.values()) all.set(mission.id, mission);
     return [...all.values()]
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, 20)
+      .slice(0, limit)
       .map((mission) => structuredClone(mission));
   }
 
@@ -321,7 +339,7 @@ export class SwarmManager {
     let missionCount = 0;
     let taskCount = 0;
 
-    for (const saved of this.persistedMissions(coordinator)) {
+    for (const saved of this.persistedMissions(coordinator,Infinity)) {
       if (saved.status !== "running") continue;
       if (this.missions.has(saved.id)) continue;   // this process owns it, timers and all
 
@@ -334,7 +352,7 @@ export class SwarmManager {
       for (const task of Object.values(mission.tasks)) {
         if (resultStatus(task.status)) continue;
         // A recovered task has a live brain in THIS process; leave it be.
-        if (task.actorName && this.brains.has(task.actorName)) continue;
+        if (task.actorId && this.brains.has(task.actorId)) continue;
 
         const startedAt = task.startedAt ?? mission.createdAt;
         const overBudget = !!task.startedAt && now - startedAt > task.budget.timeoutMs;
@@ -444,11 +462,9 @@ export class SwarmManager {
     const timer = task.taskId ? this.taskTimers.get(task.taskId) : undefined;
     if (timer) clearTimeout(timer);
     if (task.taskId) this.taskTimers.delete(task.taskId);
-    const brain = task.actorName ? this.brains.get(task.actorName) : undefined;
+    const brain = task.actorId ? this.brains.get(task.actorId) : undefined;
     brain?.interrupt?.();
-    void brain?.stop?.().catch(() => {});
-    if (task.actorId) this.clones.delete(task.actorId);
-    if (task.actorName) this.brains.delete(task.actorName);
+    this.cleanupMissionTask(task);
   }
 
   /**
@@ -458,7 +474,7 @@ export class SwarmManager {
   spawn(goal: string, deps: SwarmDeps): { ok: boolean; name?: string; reason?: string } {
     const g = (goal ?? "").trim();
     if (!g) return { ok: false, reason: "empty goal" };
-    if (this.clones.size >= MAX_CONCURRENT_CLONES) {
+    if (this.clones.size + this.reservedCapacity() >= MAX_CONCURRENT_CLONES) {
       return { ok: false, reason: `already running ${this.clones.size} clones (max ${MAX_CONCURRENT_CLONES})` };
     }
     const missionId = `clone-${randomUUID()}`;
@@ -470,14 +486,16 @@ export class SwarmManager {
 
   /** Recreate a clone whose last process died with a running checkpoint. */
   recover(checkpoint: RecoveryCheckpoint, deps: SwarmDeps): boolean {
-    if (checkpoint.actor.kind !== "clone" || this.clones.size >= MAX_CONCURRENT_CLONES) return false;
-    if (this.brains.has(checkpoint.actor.name)) return false;
+    if (this.closing || checkpoint.actor.parentTaskId?.startsWith('supervised.') || checkpoint.actor.kind !== "clone" || this.clones.size + this.reservedCapacity() >= MAX_CONCURRENT_CLONES) return false;
+    if (this.brains.has(checkpoint.actor.id)) return false;
     if (checkpoint.actor.parentTaskId?.startsWith("mission.")) {
       return this.recoverMissionTask(checkpoint, deps);
     }
     const match = checkpoint.actor.name.match(/^Echo Clone (\d+)$/i);
     if (match) this.counter = Math.max(this.counter, Number(match[1]));
-    const brain = deps.makeBrain(checkpoint.actor);
+    let brain: CloneBrain;
+    try { brain = deps.makeBrain(checkpoint.actor); }
+    catch (error) { console.error('[swarm] clone recovery initialization failed', error); return false; }
     this.launch({
       id: checkpoint.actor.id,
       name: checkpoint.actor.name,
@@ -488,7 +506,7 @@ export class SwarmManager {
     }, brain, deps);
     if (!brain.recoverFromCheckpoint?.(checkpoint)) {
       this.clones.delete(checkpoint.actor.id);
-      this.brains.delete(checkpoint.actor.name);
+      this.brains.delete(checkpoint.actor.id);
       this.broadcast(deps);
       return false;
     }
@@ -510,7 +528,19 @@ export class SwarmManager {
     const task = Object.values(mission.tasks).find((item) => item.taskId === checkpoint.taskId);
     if (!task || task.status !== "working") return false;
     task.recoveryAttempts = Math.max(task.recoveryAttempts ?? 0, checkpoint.recoveryAttempts + 1);
-    const brain = deps.makeBrain(checkpoint.actor, task);
+    let brain: CloneBrain;
+    try { brain = deps.makeBrain(checkpoint.actor, task); }
+    catch (error) {
+      if (task.taskId && task.actorId) {
+        coordinator.submitResult(task.taskId, task.actorId, {status: 'failed', summary: String(error instanceof Error ? error.message : error), artifacts: [], verificationRefs: [], blockers: ['recovery:initialization']});
+        task.result = coordinator.get(task.taskId)?.result;
+      }
+      task.status = 'failed';
+      this.persistMission(mission, coordinator);
+      this.broadcast(deps);
+      this.scheduleAll();
+      return false;
+    }
     this.attachMissionBrain(mission, task, checkpoint.actor, brain, deps, checkpoint.createdAt, `recovering attempt ${checkpoint.recoveryAttempts + 1}`);
     if (!brain.recoverFromCheckpoint?.(checkpoint)) {
       if (task.taskId && task.actorId && !coordinator.get(task.taskId)?.result) {
@@ -537,7 +567,7 @@ export class SwarmManager {
 
   private launch(clone: SwarmClone, brain: CloneBrain, deps: SwarmDeps): void {
     this.clones.set(clone.id, clone);
-    this.brains.set(clone.name, brain);
+    this.brains.set(clone.id, brain);
     brain.on("text", (t) => console.log(`[${clone.name}] ${t ?? ""}`));
     brain.on("error", () => this.finish(clone.id, "failed", deps));
     brain.on("turnEnd", () => this.finish(clone.id, "done", deps));
@@ -547,7 +577,7 @@ export class SwarmManager {
   private schedule(missionId: string): void {
     const mission = this.missions.get(missionId);
     const deps = this.missionDeps.get(missionId);
-    if (!mission || !deps || mission.status !== "running") return;
+    if (this.closing || !mission || !deps || mission.status !== "running") return;
 
     // A dependency that did not complete blocks everything downstream. This is
     // explicit state, not a pending task that silently never becomes ready.
@@ -575,12 +605,16 @@ export class SwarmManager {
     }
 
     for (const task of Object.values(mission.tasks)) {
-      if (task.status !== "pending" || this.clones.size >= MAX_CONCURRENT_CLONES) continue;
+      if (task.status !== "pending" || this.clones.size + this.reservedCapacity() >= MAX_CONCURRENT_CLONES) continue;
       const ready = (task.dependsOn ?? []).every((id) => mission.tasks[id]?.status === "completed");
       if (!ready) continue;
       if (task.lane === "gui" && this.guiLaneBusy()) continue;
       this.startMissionTask(mission, task, deps);
+      if (resultStatus(task.status)) changed = true;
     }
+
+    // Initialization failures must propagate to waiting dependants now.
+    if (changed) { this.schedule(missionId); return; }
 
     const tasks = Object.values(mission.tasks);
     if (tasks.every((task) => resultStatus(task.status))) this.finishMission(mission, deps);
@@ -592,7 +626,7 @@ export class SwarmManager {
   }
 
   private guiLaneBusy(): boolean {
-    return [...this.clones.values()].some((clone) => clone.status === "working" && clone.lane === "gui");
+    return desktopTaskBusy() || [...this.clones.values()].some((clone) => clone.status === "working" && clone.lane === "gui");
   }
 
   private startMissionTask(mission: MissionState, task: MissionTaskState, deps: SwarmDeps): void {
@@ -603,9 +637,7 @@ export class SwarmManager {
     this.counter = Math.max(this.counter + 1, next);
     const taskId = `${mission.taskId}.${safePart(task.id, "task")}`;
     const actorId = `${safePart(mission.id, "mission")}.${safePart(task.id, "task")}`;
-    // A fleet id ("research") displays as its member's proper name ("Research");
-    // anything else is used verbatim, so a caller that already has a display
-    // name in mind (an ad-hoc profile string) is not renamed underneath it.
+    // Names are presentation only. Brain ownership and routing use actorId.
     const fleetMember = task.profile ? getFleetMember(task.profile) : null;
     const actorName = fleetMember?.name || task.profile?.trim() || `Echo Agent ${this.counter}`;
     const identity: AgentIdentity = { id: actorId, name: actorName, kind: "clone", parentTaskId: mission.taskId };
@@ -622,16 +654,27 @@ export class SwarmManager {
     task.startedAt = now();
     task.status = "working";
     mission.updatedAt = now();
-    const brain = deps.makeBrain(identity, task);
+    let brain: CloneBrain;
+    try { brain = deps.makeBrain(identity, task); }
+    catch (error) {
+      coordinator.submitResult(taskId, actorId, {status: "failed", summary: String(error instanceof Error ? error.message : error), artifacts: [], verificationRefs: [], blockers: ["agent:initialization"]});
+      task.result = coordinator.get(taskId)?.result;
+      task.status = "failed";
+      this.persistMission(mission, coordinator);
+      this.broadcast(deps);
+      return;
+    }
     this.attachMissionBrain(mission, task, identity, brain, deps, task.startedAt, "working");
     this.persistMission(mission, coordinator);
     this.broadcast(deps);
-    brain.send(this.missionPrompt(mission, task, actorName), undefined, {
-      taskId,
-      parentTaskId: mission.taskId,
-      scope: mission.scope,
-      modality: "text",
-    });
+    try {
+      brain.send(this.missionPrompt(mission, task, actorName), undefined, {
+        taskId, parentTaskId: mission.taskId, scope: mission.scope, modality: "text",
+      });
+    } catch (error) {
+      this.taskErrors.set(taskId, String(error instanceof Error ? error.message : error));
+      this.finishMissionTask(mission.id, task.id);
+    }
   }
 
   private attachMissionBrain(
@@ -660,7 +703,7 @@ export class SwarmManager {
       agentTaskId: task.id,
       lane: task.lane,
     });
-    this.brains.set(actorName, brain);
+    this.brains.set(actorId, brain);
     brain.on("text", (text) => {
       const clone = this.clones.get(actorId);
       if (clone && text) clone.progress = String(text).slice(0, 200);
@@ -730,9 +773,8 @@ export class SwarmManager {
     const deps = this.missionDeps.get(missionId);
     const task = mission?.tasks[taskId];
     if (!mission || !deps || !task || task.status !== "working" || !task.taskId || !task.actorId) return;
-    const brain = task.actorName ? this.brains.get(task.actorName) : undefined;
+    const brain = task.actorId ? this.brains.get(task.actorId) : undefined;
     brain?.interrupt?.();
-    void brain?.stop?.().catch(() => {});
     const coordinator = deps.coordinator ?? taskCoordinator;
     coordinator.submitResult(task.taskId, task.actorId, {
       status: "failed",
@@ -752,7 +794,11 @@ export class SwarmManager {
       this.taskErrors.delete(task.taskId);
     }
     if (task.actorId) this.clones.delete(task.actorId);
-    if (task.actorName) this.brains.delete(task.actorName);
+    if (task.actorId) {
+      const brain = this.brains.get(task.actorId);
+      this.brains.delete(task.actorId);
+      if(brain) this.stopOwnedBrain(brain);
+    }
   }
 
   private finishMission(mission: MissionState, deps: SwarmDeps): void {
@@ -810,14 +856,22 @@ export class SwarmManager {
     // Drop it from the roster; the summary it saved via `remember` is its
     // lasting output, so the brain object itself is no longer needed.
     this.clones.delete(id);
-    this.brains.delete(c.name);
+    const brain = this.brains.get(c.id);
+    this.brains.delete(c.id);
+    if(brain) this.stopOwnedBrain(brain);
     this.broadcast(deps);
     this.scheduleAll();
   }
 
   private broadcast(deps: SwarmDeps): void {
-    const state = this.list().map((c) => ({ name: c.name, progress: c.progress || c.status }));
+    const state = [...this.list().map((c) => ({ name: c.name, progress: c.progress || c.status })),...this.extraRoster()];
     (deps.broadcast ?? ((s) => sendToOverlay("clones", s)))(state);
+  }
+  private stopOwnedBrain(brain: CloneBrain): void {
+    let stopping: Promise<void> | undefined;
+    try {stopping=brain.stop?.();} catch(error) {console.error('[swarm] agent cleanup failed',error);}
+    const stop=shutdownStep('background agent',()=>stopping,5000);
+    this.stopping.add(stop);void stop.finally(()=>this.stopping.delete(stop));
   }
 }
 

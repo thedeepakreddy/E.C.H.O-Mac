@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { WAKE_MIN_RMS } from "./wake/template.js";
 import { tmpdir } from "node:os";
 import { readdir, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -253,6 +254,9 @@ export class VoiceListener extends EventEmitter {
   private vad: Vad | null = null;
   private lastWakeAt = -Infinity;
   private verifying = false;
+  /** Consecutive captures too quiet for the wake spotter to attempt a match. */
+  private quietCaptures = 0;
+  private warnedQuiet = false;
   private frameTap: ((frame: Int16Array, at: number, capture: CaptureMeta | null) => void) | null = null;
 
   /** Current level above which a frame counts as speech (RMS path). */
@@ -868,6 +872,29 @@ export class VoiceListener extends EventEmitter {
 
   // ---- end of utterance ------------------------------------------------------
 
+  /**
+   * A capture that no wake word could ever have started.
+   *
+   * The spotter needs WAKE_MIN_RMS before it will run its matcher, so an input
+   * level under that makes the name impossible while leaving every other route
+   * in working — which reads as "Echo ignores me" and points at nothing. Said
+   * once per session, and only when an acoustic detector is actually loaded.
+   */
+  private noteCaptureLevel(peak: number): void {
+    if (this.warnedQuiet || !this.wake) return;
+    if (peak >= WAKE_MIN_RMS) {
+      this.quietCaptures = 0;
+      return;
+    }
+    if (++this.quietCaptures < 3) return;
+    this.warnedQuiet = true;
+    this.emit(
+      "unavailable",
+      `Your microphone is very quiet — speech is peaking around ${peak}, and the wake word needs ${WAKE_MIN_RMS}. ` +
+      `Clicking the core still works, but saying "Echo" cannot. Raise the level in System Settings \u2192 Sound \u2192 Input.`
+    );
+  }
+
   private async finishCapture() {
     const frames = this.captured;
     const peak = Math.round(this.peakRms);
@@ -875,6 +902,7 @@ export class VoiceListener extends EventEmitter {
     const sawSpeech = this.sawSpeech;
     const meta = this.meta();
     this.resetCapture();
+    this.noteCaptureLevel(peak);
 
     if (!sawSpeech || frames.length < 6) {
       // Report why the audio was dropped. Discarding silently is what made this

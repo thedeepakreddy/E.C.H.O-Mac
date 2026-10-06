@@ -397,6 +397,14 @@ export const FEEDS: FeedDef[] = [
     id: "cyber", path: "/api/cyber-threats", label: "cyber threats",
     aliases: ["cyber", "cve", "vulnerabilities", "threats", "hacking"],
   },
+  {
+    // `cameras` was a map LAYER and not a feed, so asking to see one had
+    // nowhere to go: the layer put 37,650 markers on the globe and Echo,
+    // having no way to READ them, answered "there are no cameras". The data
+    // was there the whole time — /api/cctv, and /api/stats even counts it.
+    id: "cameras", path: "/api/cctv", label: "live cameras",
+    aliases: ["camera", "cctv", "webcam", "webcams", "cams", "live camera", "street cameras", "traffic cameras"],
+  },
 ];
 
 /** Match a spoken feed name ("quakes", "what's on fire") to a feed. */
@@ -557,6 +565,84 @@ function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): nu
 }
 
 /** Keep only the items with finite lat/lng inside the filter's radius. */
+/**
+ * Country names as people say them, folded onto whatever the feed calls them.
+ *
+ * The CCTV feed mixes ISO codes and full names in one field — "US", "Israel",
+ * "AZ", "Albania" — so neither side can be trusted to be in a fixed form.
+ * Normalising BOTH sides through here makes the comparison symmetric: the
+ * spoken "United States" and the record's "US" both become `us`, and
+ * "Germany" and "DE" both become `de`, without a table of every country.
+ */
+const COUNTRY_SYNONYMS: Record<string, string> = {
+  usa: "us", unitedstates: "us", unitedstatesofamerica: "us", america: "us", states: "us",
+  uk: "gb", unitedkingdom: "gb", britain: "gb", greatbritain: "gb", england: "gb",
+  uae: "ae", unitedarabemirates: "ae",
+  southkorea: "kr", korea: "kr", republicofkorea: "kr",
+  russia: "ru", russianfederation: "ru",
+  netherlands: "nl", holland: "nl",
+  czechia: "cz", czechrepublic: "cz",
+  germany: "de", deutschland: "de",
+};
+
+function normalizeCountry(value: string): string {
+  const key = value.toLowerCase().replace(/^the\s+/, "").replace(/[^a-z]/g, "");
+  return COUNTRY_SYNONYMS[key] ?? key;
+}
+
+/**
+ * Items in a named country, or null when the place is not one.
+ *
+ * A radius is the right tool for "near Tokyo" and the wrong one for "the US":
+ * the default 350 km circle on a geocoded centroid of a 4,500 km-wide country
+ * returns almost nothing, which reads as "there are no cameras". Returning
+ * null rather than an empty list is what lets the caller fall back to radius
+ * for places that genuinely are points.
+ */
+/**
+ * A camera and the best url to actually look at it through.
+ *
+ * `rank` is "how likely is a browser to show a picture when `open_url` opens
+ * this", lowest first — an embed plays on its own, a JPEG or MJPEG renders as
+ * an image, an mp4 plays, and a bare HLS playlist DOWNLOADS A FILE. HLS is
+ * therefore last, not first, which is where the feed's own ordering put it
+ * for the United States.
+ */
+interface Watchable { cam: any; url: string; rank: number }
+
+const STREAM_RANK: Record<string, number> = {
+  iframe: 0,   // a YouTube embed — plays by itself
+  mp4: 1,
+  mjpeg: 2,
+  jpg: 3,      // a still that the browser refreshes
+  hls: 8,      // .m3u8: a browser downloads this rather than playing it
+};
+
+function watchable(cam: any): Watchable | null {
+  const type = String(cam?.stream_type ?? "").toLowerCase();
+  const urls = ["stream_url", "external_url", "feed_url"]
+    .map((f) => cam?.[f])
+    .filter((v): v is string => typeof v === "string" && /^https?:\/\//i.test(v));
+  if (!urls.length) return null;
+
+  // An `external_url` is usually the operator's own viewer page, which plays
+  // where the raw stream will not. Prefer it over a playlist.
+  const playlist = (u: string) => /\.m3u8(\?|$)/i.test(u);
+  const best = urls.find((u) => !playlist(u)) ?? urls[0];
+  // Rank on the url that will actually be opened, not on the record's label:
+  // a camera tagged `hls` whose viewer page is being used is not an hls
+  // problem any more.
+  const rank = playlist(best) ? STREAM_RANK.hls : (STREAM_RANK[type] ?? 4);
+  return { cam, url: best, rank };
+}
+
+function matchCountry<T extends { country?: unknown }>(items: T[], place: string): T[] | null {
+  const want = normalizeCountry(place);
+  if (want.length < 2) return null;
+  const hit = items.filter((i) => normalizeCountry(String(i?.country ?? "")) === want);
+  return hit.length ? hit : null;
+}
+
 function withinRadius<T extends { lat?: unknown; lng?: unknown }>(items: T[], filter: LocationFilter): T[] {
   return items.filter((item) => {
     const lat = Number(item?.lat);
@@ -569,6 +655,17 @@ function withinRadius<T extends { lat?: unknown; lng?: unknown }>(items: T[], fi
 export interface FeedSummary {
   /** One or two sentences, written to be spoken. */
   speech: string;
+  /**
+   * A url the answer is really about, for the model to act on.
+   *
+   * Cameras need this and nothing else does yet. Without it the summary said
+   * "the first is Shibuya Crossing" and stopped — the model had a name and no
+   * address, so it went looking for the camera on the 3D globe instead and
+   * spent seventy seconds clicking a map that cannot be driven from here.
+   * Every camera record already carries a working stream url; handing it over
+   * turns "show me a camera" into one `open_url`.
+   */
+  open?: string;
   /** The same reading, for the HUD's data pane. */
   html: string;
 }
@@ -717,6 +814,64 @@ export function summarize(feedId: string, data: any, filter?: LocationFilter): F
         html: `<ul>${list(
           ranked.slice(0, 6).map((n) => `[${n?.risk_score ?? 0}] ${esc(n?.title)} <em>${esc(n?.source)}</em>`)
         )}</ul>`,
+      };
+    }
+
+    case "cameras": {
+      const all = arrayAt(data, "cameras");
+      if (!all.length) {
+        return { speech: failed ? `No camera data — ${failed}.` : "No cameras on the feed.", html: "<p>No cameras.</p>" };
+      }
+      // A country, not a point. `withinRadius` is right for an earthquake but
+      // wrong for "the US" — a 350km circle on a geocoded centroid misses
+      // 23,000 of the 23,204 American cameras. These records carry `country`,
+      // so when the place names one, use it; otherwise fall back to radius,
+      // which is what "cameras near Tokyo" wants.
+      // Country first, and note it needs NO coordinates — just the word. That
+      // matters because the geocoder is a network call that fails: in one run
+      // `/api/geosearch` stopped answering, "the US" produced no filter at all,
+      // and the answer offered a camera in Tel Aviv. The `country` field was
+      // sitting in every record the whole time.
+      const byCountry = filter?.label ? matchCountry(all, filter.label) : null;
+      const located = filter && Number.isFinite(filter.lat) && Number.isFinite(filter.lng);
+      const cams = byCountry ?? (located ? withinRadius(all, filter!) : all);
+      // "12,125 cameras NEAR the United States" is wrong in a way that makes
+      // Echo sound like it did not understand the question. A whole country
+      // is somewhere you are IN.
+      // Global fallback must not claim a place it did not actually filter by.
+      const at = byCountry && filter ? ` in ${filter.label}` : (located ? scope : "");
+      if ((byCountry || located) && !cams.length) {
+        return { speech: `No cameras${at}${globalNote(all.length)}`, html: "<p>No cameras near that place.</p>" };
+      }
+      // Watchable, not just counted — and "watchable" turns out to be a real
+      // judgement, not just "has a url".
+      //
+      // First attempt read `stream_url` only and took the first hit. Of 18,868
+      // US cameras just 1,706 have that field (12,777 carry `feed_url`, 4,383
+      // `external_url`), so it saw a tenth of them — and the first of those is
+      // an Indiana DOT HLS preroll, which answered **503** in a live session
+      // and would not have played anyway: a bare .m3u8 handed to a browser
+      // downloads a playlist instead of showing a picture.
+      //
+      // So rank by what a browser can actually display when `open_url` opens
+      // it, and leave HLS last rather than first.
+      const live = cams.map(watchable).filter((x): x is Watchable => !!x);
+      live.sort((a, b) => a.rank - b.rank);
+      const pick = live.slice(0, 5);
+      const where = (c: any) => [c?.city, c?.country].filter(Boolean).join(", ");
+      const first = pick[0]?.cam;
+      const firstUrl = pick[0]?.url;
+      return {
+        speech: first
+          ? `${cams.length} camera${cams.length === 1 ? "" : "s"}${at}. ` +
+            `The first is "${String(first.name ?? "one").slice(0, 60)}"${where(first) ? ` in ${where(first)}` : ""}. ` +
+            `Say the word and I'll open it.`
+          : `${cams.length} camera${cams.length === 1 ? "" : "s"}${at}, but none of them are streaming right now.`,
+        html: `<ul>${list(pick.map((p) =>
+          `<a href="${esc(p.url)}" target="_blank" rel="noreferrer">${esc(String(p.cam.name ?? "camera"))}</a>` +
+          `${where(p.cam) ? ` — ${esc(where(p.cam))}` : ""}`
+        ))}</ul>`,
+        open: firstUrl,
       };
     }
 

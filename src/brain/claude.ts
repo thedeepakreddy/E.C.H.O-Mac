@@ -1,5 +1,7 @@
+import {toolGranted} from '../safety/tool-permissions.js';
+import { hasExternalToolGrants } from '../safety/tool-permissions.js';
 import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { Brain, LOOP_CAPS, buildSystemPrompt, VOICE_TURN_CONTRACT, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
+import { Brain, LOOP_CAPS, buildSystemPrompt, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
 import {
   currentLoop, normalizeClaudeFinish, claudeTerminalToExit, classifyProviderError,
 } from "../agent-replay/loop-log.js";
@@ -11,12 +13,15 @@ import { capture } from "../safety/snapshot.js";
 import { confirmations } from "../safety/confirm.js";
 import { observeAction } from "../frontier/observe.js";
 import { runGated, decide, DENIAL_MESSAGE } from "../safety/gate.js";
+import { modelToolResult } from "../memory/tool-context.js";
 import { LOCAL_TOOL_NAMES } from "./localtools.js";
 import { ROUTER_ALWAYS_INCLUDE } from "./tool-router.js";
 import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
 import type { JarvisConfig } from "../config.js";
 import { loadMcpConfig } from "./mcp.js";
 import { ProviderMemoryContext } from "../memory/provider-context.js";
+import { contextSettings, contextWindow } from "../memory/conversation.js";
+import { z } from "zod";
 
 type SDKUserMessage = {
   type: "user";
@@ -100,13 +105,13 @@ export class ClaudeBrain extends Brain {
   private input = new Pushable<SDKUserMessage>();
   private q: any = null;
   private started = false;
-  /** Project whose memories are loaded when the session starts. */
-  projectHint: string | undefined;
   private memory = new ProviderMemoryContext("claude");
   private sessionGeneration = 0;
 
   constructor(private cfg: JarvisConfig, private readonly limits: BrainExecutionLimits = {}) {
     super();
+    this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
+    this.memory.configure(cfg.context);
   }
 
   private buildMcpServer() {
@@ -144,7 +149,7 @@ export class ClaudeBrain extends Brain {
     const pruning = this.cfg.agi?.toolPruning?.enabled === true;
     const core = new Set([...LOCAL_TOOL_NAMES, ...ROUTER_ALWAYS_INCLUDE]);
 
-    const sdkTools = (allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS).map((t) =>
+    const sdkTools = (allowed ? TOOLS.filter((t) => toolGranted(allowed,t.name)) : TOOLS).map((t) =>
       tool(
         t.name,
         t.description,
@@ -159,6 +164,7 @@ export class ClaudeBrain extends Brain {
           // path to the handler that goes around the check.
           const out = await runGated(t, args ?? {}, {
             workingDir: this.cfg.control.workingDir,
+            allowedTools: this.limits.allowedTools,
             emit: (e, p) => this.emitEvent(e as any, p),
           });
           if (this.memory.takeInvalidation()) {
@@ -169,12 +175,13 @@ export class ClaudeBrain extends Brain {
             setTimeout(() => this.send("Continue from sanitized task state; forgotten evidence must be re-observed.", undefined, opts), 0);
           }
           const content: any[] = [];
-          if (out.text) content.push({ type: "text", text: out.text });
+          content.push({ type: "text", text: JSON.stringify(modelToolResult(out)) });
           if (out.image)
             content.push({ type: "image", data: out.image.data, mimeType: out.image.mimeType });
           if (!content.length) content.push({ type: "text", text: "done" });
-          content.push({ type: "text", text: JSON.stringify({ status: out.status, data: out.data, error: out.error, verification: out.verification, callId: out.callId }) });
-          content.push({ type: "text", text: this.memory.packet() });
+          // The SDK keeps the conversation already supplied on send(). Avoid
+          // re-appending the entire shared archive after every tool call.
+          content.push({ type: "text", text: this.memory.packet(this.memory.inputBudget(this.cfg.claude.model) - 4096, false, this.cfg.claude.model) });
           return { content, isError: out.status === "failed" || out.status === "timeout" || out.status === "uncertain" };
         },
         // `searchHint` is what tool search matches a deferred tool on, so it
@@ -205,7 +212,7 @@ export class ClaudeBrain extends Brain {
     // a packaged build finds mcp.json instead of silently running without it,
     // and it drops a malformed entry rather than throwing startup away. The SDK
     // owns the connection for these — Echo only hands over the specs.
-    const externalMcpServers = loadMcpConfig();
+    const externalMcpServers = hasExternalToolGrants(this.limits.allowedTools) ? loadMcpConfig() : {};
     const external = Object.keys(externalMcpServers);
     if (external.length) console.log(`[claude] MCP servers configured: ${external.join(", ")}`);
 
@@ -223,6 +230,7 @@ export class ClaudeBrain extends Brain {
       prompt: this.input,
       options: {
         model: this.cfg.claude.model,
+        settings: { autoCompactEnabled: true, autoCompactWindow: contextWindow(contextSettings(this.cfg.context), "claude", this.cfg.claude.model) },
         systemPrompt,
         mcpServers: { jarvis: mcpServer, ...externalMcpServers },
         // allowedTools is deliberately NOT set. A bare tool name there is an
@@ -268,7 +276,7 @@ export class ClaudeBrain extends Brain {
     input: Record<string, unknown>,
     _options: { signal: AbortSignal }
   ): Promise<{ behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }> {
-    if (this.limits.allowedTools && !this.limits.allowedTools.has(bareToolName(toolName))) {
+    if (this.limits.allowedTools && !toolGranted(this.limits.allowedTools,toolName.replace(/^mcp__jarvis__/, ""))) {
       // The one choke point every SDK tool call passes through — including its
       // own native Bash/Write/Edit, which never appear in Echo's own TOOLS and
       // so could not be filtered out of the MCP server above. This is what
@@ -277,6 +285,7 @@ export class ClaudeBrain extends Brain {
     }
     const decision = await decide(toolName, input, {
       workingDir: this.cfg.control.workingDir,
+      allowedTools: this.limits.allowedTools,
       emit: (e, p) => this.emitEvent(e as any, p),
     });
     if (!decision.allowed) {
@@ -444,8 +453,13 @@ export class ClaudeBrain extends Brain {
     // state contributes nothing at all.
     noteActivity();
     const style = styleFor(assess());
-    const spoken = opts?.modality === "voice" ? `${userText}\n\n${VOICE_TURN_CONTRACT}` : userText;
-    const content = `${style ? `${spoken}\n\n[context: ${style}]` : spoken}\n\n${this.memory.packet()}`;
+    const contract = turnContract(opts);
+    const spoken = contract ? `${userText}\n\n${contract}` : userText;
+    const current = style ? `${spoken}\n\n[context: ${style}]` : spoken;
+    const tools = this.limits.allowedTools ? TOOLS.filter(tool => toolGranted(this.limits.allowedTools,tool.name)) : TOOLS;
+    const history = [{ role: "user", content: current }];
+    const used = this.memory.prepareHistory(history, tools.map(tool => ({ name: tool.name, description: tool.description, parameters: z.toJSONSchema(z.object(tool.schema), { io: "input" }) })), buildSystemPrompt(this.projectHint, undefined, false), "ollama", this.cfg.claude.model);
+    const content = `${current}\n\n${this.memory.packet(used, true, this.cfg.claude.model)}`;
 
     this.input.push({
       type: "user",

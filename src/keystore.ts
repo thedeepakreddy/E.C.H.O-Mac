@@ -34,6 +34,10 @@ export interface KeyField {
 }
 
 export const KEY_FIELDS: KeyField[] = [
+  {env: 'NVIDIA_API_KEY', label: 'NVIDIA / Kimi', help: 'Hosted Kimi brain with Echo tools and supervised tasks.',
+    url: 'https://build.nvidia.com/moonshotai/kimi-k3', optional: true, looksValid: value => value.startsWith('nvapi-')},
+  {env:'ECHO_RELAY_SECRET',label:'Echo phone app',help:'Connects Echo to your phone app on Render. Paste the same value as RELAY_SECRET in Render.',url:'https://dashboard.render.com',optional:true,looksValid:value => value.length >= 32},
+  {env:'VERCEL_TOKEN',label:'Vercel',help:'Deploy project previews. Enter privately here; do not include this token in voice or coding prompts.',url:'https://vercel.com/account/settings/tokens',optional:true},
   {
     env: "ANTHROPIC_API_KEY",
     label: "Claude",
@@ -62,6 +66,14 @@ export const KEY_FIELDS: KeyField[] = [
     help: "A dedicated wake-word engine. Without it the name is detected from speech, which works fine.",
     url: "https://console.picovoice.ai",
     optional: true,
+  },
+  {
+    env: "OPENROUTER_API_KEY",
+    label: "OpenRouter",
+    help: "One key in front of several hundred models — Claude, GPT, Llama, DeepSeek and the rest. Pick which with openrouter.model.",
+    url: "https://openrouter.ai/keys",
+    optional: true,
+    looksValid: (v) => v.startsWith("sk-or-"),
   },
   {
     env: "OPENAI_API_KEY",

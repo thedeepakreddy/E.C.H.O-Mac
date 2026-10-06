@@ -6,7 +6,9 @@ import { taskCoordinator } from "../../memory/task-state.js";
 import { owningTaskId } from "../../frontier/task-handoff.js";
 import * as vision from "../vision.js";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import {listSessions} from '../../coding/session.js';
+import {inspectProjectCompletion} from '../../coding/diagnostics.js';
 import * as research from "../../frontier/research.js";
 import { homedir } from "node:os";
 import { sendToOverlay } from "../../overlay.js";
@@ -14,8 +16,39 @@ import { exec, spawn } from "node:child_process";
 import { race } from "../../frontier/parallel.js";
 import { inspectRun, loadEvents, renderInspectionHtml } from "../../agent-replay/index.js";
 import { appRoot, memoryScope } from "./shared.js";
+import { currentAgentRunContext } from "../../agent-replay/context.js";
 
 export const AGENT_TOOLS: ToolDef[] = [
+  {
+    name: 'update_task_plan',
+    description: 'Save or update the steps of a long task. Resume saved progress instead of starting over. Completed steps must cite verified evidence returned by tools in this task. This does not perform the work.',
+    schema: {steps: z.array(z.object({id: z.string().min(1), description: z.string().min(1).max(500), status: z.enum(['pending', 'running', 'completed', 'blocked']), dependsOn: z.array(z.string()).optional(), verificationRefs: z.array(z.string()).optional()})).max(30)},
+    readOnly: true,
+    handler: async a => {
+      const invocation = currentInvocation();
+      if (!invocation) return {status: 'failed', text: 'No active task owns this plan.'};
+      try { const task = taskCoordinator.updatePlan(invocation, a.steps); return {status: 'success', text: JSON.stringify(task.steps)}; }
+      catch (error: any) {return {status: 'failed', text: error.message};}
+    },
+  },
+  {
+    name: 'discover_tools',
+    description: 'Find and load connected tools for a task or service. If the required external tool is absent, search here with the task, service or exact tool name; its schema becomes available on the next model request.',
+    schema: {query: z.string().min(1)}, readOnly: true,
+    handler: async a => {
+      const catalog = currentAgentRunContext()?.toolCatalog;
+      return catalog ? await catalog.discover(a.query) as any : {text: 'This provider exposes tools through its own tool search or current tool list.'};
+    },
+  },
+  {
+    name: 'refresh_observations',
+    description: 'Request fresh observations when the user asks for an update or after waiting for a changing resource. Successful reads are otherwise reused briefly within this task.',
+    schema: {}, readOnly: true,
+    handler: async () => {
+      const run = currentAgentRunContext(); if (run) run.observationEpoch = (run.observationEpoch ?? 0) + 1;
+      return {text: 'The next observation will be fetched fresh.'};
+    },
+  },
   {
     name: "inspect_agent_replay",
     description: "Show Echo's recorded run timeline and a clear answer to why it ended. Use when a run stopped, failed, was interrupted, or the user asks to inspect the latest agent replay.",
@@ -108,7 +141,7 @@ export const AGENT_TOOLS: ToolDef[] = [
       const taskId = owningTaskId();
       const state = taskId ? taskCoordinator.get(taskId) : undefined;
       if (!state) return { text: "There is no active task state to report." };
-      const calls = Object.values(state.calls);
+      const calls = Object.values(state.calls).filter(call => call.callId !== currentInvocation()?.callId);
       const unresolved = calls.filter((c) => ["running", "timeout", "uncertain", "partial"].includes(c.status));
       const failed = calls.filter((c) => c.status === "failed" || c.status === "denied");
       const line = (c: typeof calls[number]) => `  • ${c.tool} (${c.status})${c.result?.error ? ` — ${c.result.error.category}: ${c.result.error.message}` : ""}`;
@@ -117,13 +150,28 @@ export const AGENT_TOOLS: ToolDef[] = [
         `Goal: ${state.goal || "(not recorded)"}`,
         `Calls: ${calls.length} (${calls.filter((c) => c.status === "success").length} succeeded, ${failed.length} failed or denied, ${unresolved.length} unresolved).`,
         failed.length ? `Failed:\n${failed.map(line).join("\n")}` : "",
-        unresolved.length ? `Still uncertain — an external effect may have happened; look before retrying:\n${unresolved.map(line).join("\n")}` : "",
+        unresolved.length ? `Still unresolved — inspect actions before retrying; successful reads do not need another fetch:\n${unresolved.map(line).join("\n")}` : "",
         state.verificationRefs.length ? `Verified evidence: ${state.verificationRefs.join(", ")}` : "Nothing has been verified yet.",
         state.artifacts.length ? `Artifacts: ${JSON.stringify(state.artifacts).slice(0, 800)}` : "",
         state.blockers.length ? `Blockers: ${JSON.stringify(state.blockers).slice(0, 800)}` : "",
         state.childTaskIds.length ? `Child tasks: ${state.childTaskIds.join(", ")}` : "",
+        Object.keys(state.steps).length ? `Plan: ${JSON.stringify(state.steps)}` : "",
       ];
       return { text: parts.filter(Boolean).join("\n"), status: "success", verification: "unverified", data: { taskId: state.taskId, revision: state.revision } };
+    },
+  },
+  {
+    name: "read_tool_result",
+    description: "Read the original saved result of a tool call in this task. Use callId from an excerpt; paginate with offset and limit. This retrieves evidence without repeating the external tool.",
+    schema: {callId: z.string(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(100).max(12000).default(6000)},
+    readOnly: true,
+    handler: async a => {
+      const taskId = owningTaskId();
+      const result = taskId ? taskCoordinator.readCallResult(taskId, a.callId) : undefined;
+      if (!result) return {status: 'failed', text: 'No saved result with this callId exists in the current task.'};
+      const original = result.data !== undefined ? JSON.stringify({text: result.text, data: result.data}) : result.text || JSON.stringify(result);
+      const offset = a.offset ?? 0, limit = Math.min(a.limit ?? 6000, 6000);
+      return {text: original.slice(offset, offset + limit), data: {verbatimPage: true, totalChars: original.length, nextOffset: offset + limit < original.length ? offset + limit : null}, status: 'success'};
     },
   },
   {
@@ -142,6 +190,7 @@ export const AGENT_TOOLS: ToolDef[] = [
         .min(1)
         .describe("Every condition that must hold for the task to be genuinely complete."),
       summary: z.string().optional().describe("One sentence on what was accomplished, recorded with the outcome."),
+      scope: z.enum(['artifact','project']).default('project').describe('Use artifact for a single intermediate file/milestone. That does not verify an application. Use project for final app completion; it requires current project checks and acceptance evidence.'),
     },
     readOnly: true,
     handler: async (a) => {
@@ -161,6 +210,8 @@ export const AGENT_TOOLS: ToolDef[] = [
             if (check.kind === "file_exists") results.push({ check: label, ok: there, detail: there ? `exists, ${statSync(target).size} bytes` : "not found" });
             else if (check.kind === "file_absent") results.push({ check: label, ok: !there, detail: there ? "still exists" : "absent" });
             else {
+              if(!check.text?.trim()) {results.push({check:label,ok:false,detail:'file_contains requires nonempty expected text'});continue;}
+              if(there && statSync(target).size>4*1024*1024) {results.push({check:label,ok:false,detail:'File exceeds the 4 MB verification read limit; use a bounded project check'});continue;}
               const found = there && readFileSync(target, "utf8").includes(check.text ?? "");
               results.push({ check: label, ok: found, detail: !there ? "not found" : found ? "contains the text" : "file exists but the text is not in it" });
             }
@@ -173,6 +224,16 @@ export const AGENT_TOOLS: ToolDef[] = [
         } catch (error: any) {
           results.push({ check: label, ok: false, detail: `could not check: ${error?.message ?? error}` });
         }
+      }
+      const projects = a.scope==='artifact'?[]:listSessions().filter(project=>
+        (taskId && project.taskId===taskId) || a.checks.some((check:any)=>{
+          if(!check.path)return false;
+          const target=resolve(check.path.startsWith('~/')?join(homedir(),check.path.slice(2)):check.path);
+          return target===project.root || target.startsWith(project.root+sep);
+        }));
+      for(const project of projects){
+        try {const completion=await inspectProjectCompletion(project.id);results.push({check:`project readiness ${project.name}`,ok:completion.ready,detail:completion.ready?'Current checks and acceptance evidence present.':completion.blockers.join(' ')+' File existence alone does not verify an application.'});}
+        catch(error:any){results.push({check:`project readiness ${project.name}`,ok:false,detail:error.message});}
       }
       const passed = results.filter((r) => r.ok);
       const verified = passed.length === results.length;
@@ -198,13 +259,13 @@ export const AGENT_TOOLS: ToolDef[] = [
       const report = results.map((r) => `${r.ok ? "✓" : "✗"} ${r.check} — ${r.detail}`).join("\n");
       return {
         text: verified
-          ? `Verified — every postcondition holds:\n${report}`
+          ? `${a.scope==='artifact'?'Artifact conditions verified. Application completion remains unverified.':'Verified — every postcondition holds:'}\n${report}`
           : `NOT verified. Do not report this task as done; fix what failed and check again:\n${report}`,
         status: verified ? "success" : "failed",
         verification: verified ? "verified" : "contradicted",
         verificationRefs: refs,
         ...(verified ? {} : { error: { category: "verification_failed", message: `${results.length - passed.length} of ${results.length} postconditions did not hold`, retryable: true } }),
-        data: { results, summary: a.summary },
+        data: { results, summary: a.summary, scope:a.scope??'project', projectCompletionVerified:a.scope!=='artifact'&&projects.length>0&&verified },
       };
     },
   },
@@ -367,7 +428,8 @@ export const AGENT_TOOLS: ToolDef[] = [
         return { text: "Message sent to Main." };
       }
       const { swarm } = await import("../../frontier/swarm.js");
-      if (swarm.send(a.recipient, a.message)) {
+      const {supervisor}=await import('../../tasks/runtime.js');
+      if (swarm.send(a.recipient, a.message) || supervisor.send(a.recipient,a.message)) {
         return { text: `Message sent to ${a.recipient}.` };
       }
       return { text: `Recipient '${a.recipient}' not found.` };
@@ -387,13 +449,14 @@ export const AGENT_TOOLS: ToolDef[] = [
       const { join } = await import("node:path");
       const { tmpdir } = await import("node:os");
       const worktreePath = join(tmpdir(), `echo-worktree-${randomUUID()}`);
+      const {execFile} = await import('node:child_process');
       
-      return new Promise<{ text: string }>((resolve) => {
-        exec(`git worktree add -b "${a.branchName.replace(/"/g, '')}" "${worktreePath}"`, { cwd: a.repoPath }, (err, stdout, stderr) => {
+      return new Promise<any>((resolve) => {
+        execFile('git', ['worktree', 'add', '-b', a.branchName, worktreePath], { cwd: a.repoPath }, (err, stdout, stderr) => {
           if (err) {
-            resolve({ text: `Failed to create worktree: ${stderr}` });
+            resolve({ text: `Failed to create worktree: ${stderr}`, status: "failed" });
           } else {
-            resolve({ text: `Worktree created at ${worktreePath}. You can now cd into it and work safely.` });
+            resolve({ text: `Worktree created at ${worktreePath}. Original uncommitted changes were not copied.`, status: "success", verification: "unverified", data: {path: worktreePath} });
           }
         });
       });

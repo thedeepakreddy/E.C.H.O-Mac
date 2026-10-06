@@ -58,7 +58,29 @@ export function installPreviewBridge(ipcMain, { onClose } = {}) {
       learning: { enabled: true, captureScreens: false, maxStepsPerTurn: 100 },
       configPath: "/Users/preview/.jarvis/config.json",
     },
-    models: [{ id: "gemini", label: "Gemini", model: "gemini-3.7-flash", active: true, available: true }],
+    models: [
+      { id: "gemini", label: "Gemini", model: "gemini-3.7-flash", active: true, available: true },
+      // ECHO_PANEL_CHATGPT=signed-in previews the connected state of the sign-in row.
+      process.env.ECHO_PANEL_CHATGPT === "signed-in"
+        ? { id: "openai", label: "ChatGPT", model: "gpt-plan-1", active: false, available: true,
+            account: { billing: "chatgpt", chatgpt: { status: "connected", planUsage: true, email: "you@example.com" } } }
+        : { id: "openai", label: "ChatGPT", model: "gpt-4o", active: false, available: false, reason: "sign in with ChatGPT or set OPENAI_API_KEY",
+            account: { billing: "none", chatgpt: { status: "disconnected", planUsage: false } } },
+      // ECHO_PANEL_OPENROUTER=signed-in previews the picker with a key present.
+      {
+        id: "openrouter", label: "OpenRouter", model: "nvidia/nemotron-3-super-120b-a12b:free",
+        active: false, available: true,
+        catalogue: {
+          signedIn: process.env.ECHO_PANEL_OPENROUTER === "signed-in",
+          models: [
+            { id: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron Ultra 550B", contextLength: 1000000 },
+            { id: "dots-studio/dots-3-note-preview:free", label: "Dots 3 Note", contextLength: 512000 },
+            { id: "nvidia/nemotron-3-super-120b-a12b:free", label: "Nemotron Super 120B", contextLength: 262144 },
+            { id: "cohere/north-mini-code:free", label: "North Mini Code", contextLength: 256000 },
+          ],
+        },
+      },
+    ],
     connections: [{ name: "workspace", status: "active", tools: 12, lastActivityAt: now - 8_000 }],
     analytics: { commands: 1, toolCalls: 17, errors: 0, completedTasks: 0, uptimeSeconds: 3200 },
   };

@@ -15,7 +15,11 @@ import type { Provider } from "./index.js";
  * alone and goes to the brain as a normal command.
  */
 
-export const PROVIDERS: Provider[] = ["claude", "gemini", "ollama", "openai"];
+export const PROVIDERS: Provider[] = ["claude", "gemini", "ollama", "openai", "openrouter", "nvidia"];
+
+export function isProvider(value: unknown): value is Provider {
+  return typeof value === 'string' && PROVIDERS.includes(value as Provider);
+}
 
 /** How each brain is named out loud. */
 export const PROVIDER_LABELS: Record<Provider, string> = {
@@ -23,6 +27,8 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   gemini: "Gemini",
   ollama: "the local model",
   openai: "ChatGPT",
+  openrouter: "OpenRouter",
+  nvidia: 'NVIDIA / Kimi',
 };
 
 /**
@@ -49,6 +55,15 @@ const ALIASES: Record<string, Provider> = {
   gpt: "openai",
   gpt4: "openai",
   gpt4o: "openai",
+  // OpenRouter fronts several hundred models, so the brand is the only safe
+  // handle here — "claude" or "gpt" through OpenRouter would collide with the
+  // direct providers above, and the direct one is what someone saying those
+  // words almost always means.
+  openrouter: "openrouter",
+  router: "openrouter",
+  nvidia: 'nvidia',
+  kimi: 'nvidia',
+  moonshot: 'nvidia',
 };
 
 /**
@@ -105,7 +120,9 @@ export function unavailableReason(
   provider: Provider,
   env: NodeJS.ProcessEnv,
   geminiKeyEnv = "GEMINI_API_KEY",
-  openaiKeyEnv = "OPENAI_API_KEY"
+  openaiKeyEnv = "OPENAI_API_KEY",
+  openrouterKeyEnv = "OPENROUTER_API_KEY",
+  nvidiaKeyEnv = 'NVIDIA_API_KEY'
 ): string | null {
   if (provider === "gemini" && !env[geminiKeyEnv]?.trim()) {
     return `${geminiKeyEnv} isn't set`;
@@ -113,5 +130,7 @@ export function unavailableReason(
   if (provider === "openai" && !env[openaiKeyEnv]?.trim()) {
     return `${openaiKeyEnv} isn't set`;
   }
+  if (provider === 'openrouter' && !env[openrouterKeyEnv]?.trim()) return `${openrouterKeyEnv} isn't set`;
+  if (provider === 'nvidia' && !env[nvidiaKeyEnv]?.trim()) return `${nvidiaKeyEnv} isn't set`;
   return null;
 }

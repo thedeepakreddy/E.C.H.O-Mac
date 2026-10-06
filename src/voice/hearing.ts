@@ -131,10 +131,30 @@ export function withTone(text: string, tone?: string): string {
  * always has the ordinary transcription to fall back on and a spoken command
  * must never be lost to this.
  */
+interface HearingOptions {
+  timeoutMs?: number;
+  /** Offline test seam for the same transcription request. */
+  generate?: (request: any) => Promise<any>;
+}
+
 export async function listen(
   turn: AudioTurn,
   cfg: JarvisConfig,
-  hint?: string
+  hint?: string,
+  options: HearingOptions = {}
+): Promise<Heard | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<null>(resolve => {
+    timer = setTimeout(() => { controller.abort(); resolve(null); }, options.timeoutMs ?? 3000);
+  });
+  try { return await Promise.race([listenWithinBudget(turn, cfg, hint, options, controller.signal), deadline]); }
+  finally { clearTimeout(timer!); controller.abort(); }
+}
+
+async function listenWithinBudget(
+  turn: AudioTurn, cfg: JarvisConfig, hint: string | undefined,
+  options: HearingOptions, signal: AbortSignal
 ): Promise<Heard | null> {
   const key = process.env[cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"]?.trim();
   if (!key) return null;
@@ -142,8 +162,10 @@ export async function listen(
   let audio: string;
   let ai: any;
   try {
-    const { GoogleGenAI } = await import("@google/genai");
-    ai = new GoogleGenAI({ apiKey: key });
+    if (!options.generate) {
+      const { GoogleGenAI } = await import("@google/genai");
+      ai = new GoogleGenAI({ apiKey: key });
+    }
     audio = readFileSync(turn.path).toString("base64");
   } catch (err: any) {
     console.error(`[jarvis] hearing pass could not read the capture: ${err?.message ?? err}`);
@@ -161,13 +183,14 @@ export async function listen(
   ];
 
   for (const model of hearingModels(cfg)) {
+    if (signal.aborted) return null;
     try {
-      const res = await ai.models.generateContent({
+      const res = await (options.generate ?? ai.models.generateContent.bind(ai.models))({
         model,
         contents,
         // No tools and no temperature: this is a transcription, not a turn of
         // the agent loop, and it sits in front of every spoken command.
-        config: { temperature: 0 },
+        config: { temperature: 0, responseMimeType: "application/json", abortSignal: signal },
       });
       const text = (res as any)?.candidates?.[0]?.content?.parts
         ?.map((p: any) => p?.text ?? "")
@@ -180,6 +203,7 @@ export async function listen(
       // audio, so stop rather than spending a second request on it.
       return null;
     } catch (err: any) {
+      if (signal.aborted) return null;
       const message = String(err?.message ?? err);
       if (!isExhausted(message)) {
         console.error(`[jarvis] hearing pass failed: ${message.slice(0, 200)}`);

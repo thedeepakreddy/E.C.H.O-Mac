@@ -3,6 +3,7 @@ import { ClaudeBrain } from "./claude.js";
 import { GeminiBrain } from "./gemini.js";
 import { OllamaBrain } from "./ollama.js";
 import { OpenAIBrain } from "./openai.js";
+import { resolveOpenAIAuth, openAIUnavailableReason } from "./openai-auth.js";
 import { RecordingBrain, type RecordingBrainOptions } from "../agent-replay/runtime.js";
 import { configuredReplayDirectory, configuredReplayProvider } from "../agent-replay/runtime.js";
 import { RecordedPlaybackBrain } from "../agent-replay/playback-brain.js";
@@ -11,7 +12,8 @@ import type { JarvisConfig } from "../config.js";
 
 export { Brain } from "./types.js";
 
-export type Provider = "claude" | "gemini" | "ollama" | "openai";
+/** Derived from the config union so a new brain cannot be added to only one of them. */
+export type Provider = JarvisConfig["brain"];
 
 export { LOOP_CAPS } from "./types.js";
 
@@ -56,9 +58,12 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
   }
 
   if (requestedProvider === "openai") {
-    const key = process.env[cfg.openai.apiKeyEnv];
-    if (key || replayDir) {
-      selected = new OpenAIBrain(cfg, key ?? "replay-no-network", options.limits);
+    // Your ChatGPT plan when you have signed in with ChatGPT, otherwise an API
+    // key — see openai-auth.ts, the one place that decides.
+    const auth = resolveOpenAIAuth(cfg);
+    if (auth || replayDir) {
+      selected = new OpenAIBrain(cfg, auth, options.limits);
+      if (auth) console.log(`[brain] openai: paying with ${auth.via === "chatgpt" ? "your ChatGPT plan" : "the API key"}`);
       provider = "openai";
       return {
         brain: new RecordingBrain(selected, provider, { ...LOOP_CAPS.openai, maxIterations: options.limits?.maxIterations ?? LOOP_CAPS.openai.maxIterations, model: cfg.openai.model }, options),
@@ -66,7 +71,41 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
       };
     }
     console.warn(
-      `[brain] config selects openai but ${cfg.openai.apiKeyEnv} is not set — falling back to Claude.`
+      `[brain] config selects openai but it can't run (${openAIUnavailableReason(cfg)}) — falling back to Claude.`
+    );
+  }
+
+  if (requestedProvider === "openrouter") {
+    // The SAME Responses loop as OpenAI, pointed elsewhere. Verified that
+    // OpenRouter implements it: /api/v1/responses answers 401 where an
+    // invented route answers 404.
+    const key = process.env[cfg.openrouter?.apiKeyEnv ?? "OPENROUTER_API_KEY"]?.trim();
+    if (key || replayDir) {
+      const base = (cfg.openrouter?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+      selected = new OpenAIBrain(
+        // The loop reads `cfg.openai.model`, so hand it the OpenRouter one
+        // rather than teaching every call site which brain it is serving.
+        { ...cfg, openai: { ...cfg.openai, model: cfg.openrouter?.model ?? "openai/gpt-4o-mini" } },
+        key ? { via: "apiKey", key } : null,
+        options.limits,
+        {
+          url: `${base}/responses`,
+          label: "openrouter",
+          // OpenRouter asks third-party apps to identify themselves; it is
+          // what their dashboard attributes usage to.
+          headers: { "HTTP-Referer": "https://osirisai.live", "X-Title": "Echo" },
+          maxOutputTokens: cfg.openrouter?.maxOutputTokens ?? 4096,
+        }
+      );
+      provider = "openrouter";
+      console.log(`[brain] openrouter: ${cfg.openrouter?.model} via ${base}`);
+      return {
+        brain: new RecordingBrain(selected, provider, { ...LOOP_CAPS.openai, maxIterations: options.limits?.maxIterations ?? LOOP_CAPS.openai.maxIterations, model: cfg.openrouter?.model }, options),
+        provider,
+      };
+    }
+    console.warn(
+      `[brain] config selects openrouter but ${cfg.openrouter?.apiKeyEnv ?? "OPENROUTER_API_KEY"} is not set — falling back to Claude.`
     );
   }
 
@@ -77,6 +116,22 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
       brain: new RecordingBrain(selected, provider, { ...LOOP_CAPS.ollama, maxIterations: options.limits?.maxIterations ?? LOOP_CAPS.ollama.maxIterations, model: cfg.ollama?.model }, options),
       provider,
     };
+  }
+
+  if (requestedProvider === 'nvidia') {
+    const key = process.env[cfg.nvidia.apiKeyEnv]?.trim();
+    if (!key && !replayDir) throw new Error(`${cfg.nvidia.apiKeyEnv} isn't set; add the NVIDIA key in Echo's API Keys page.`);
+    const base = cfg.nvidia.baseUrl.replace(/\/+$/, '');
+    selected = new OpenAIBrain({...cfg, openai: {...cfg.openai, model: cfg.nvidia.model}},
+      key ? {via: 'apiKey', key} : null, options.limits, {
+        url: `${base}/chat/completions`, label: 'nvidia', protocol: 'chat-completions',
+        maxOutputTokens: cfg.nvidia.maxOutputTokens, reasoningEffort: cfg.nvidia.reasoningEffort,
+        firstResponseTimeoutMs: 45000, streamSilenceMs: 30000,
+        requestTimeoutMs: 110000,
+      });
+    provider = 'nvidia';
+    return {brain: new RecordingBrain(selected, provider, {...LOOP_CAPS.openai,
+      maxIterations: options.limits?.maxIterations ?? LOOP_CAPS.openai.maxIterations, model: cfg.nvidia.model}, options), provider};
   }
 
   selected = new ClaudeBrain(cfg, options.limits);

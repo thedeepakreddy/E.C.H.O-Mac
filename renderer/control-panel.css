@@ -78,7 +78,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .activity-pane { min-width: 0; min-height: 0; overflow: hidden; padding-right: 14px;
   display: flex; flex-direction: column; gap: 12px;
   background: linear-gradient(to right, rgba(1, 8, 14, .93) 55%, rgba(1, 8, 14, .55) 100%); }
-.activity-list { flex: 1; min-height: 0; padding-top: 10px; overflow: hidden; }
+.activity-list { flex: 1; min-height: 0; padding-top: 10px; overflow: auto; scrollbar-width: thin; }
 
 /* Live synaptic field, tucked under the activity feed: a rounded window onto
    the same neural core the Neural Map opens full size. */
@@ -305,9 +305,9 @@ body[data-render-mode="idle"] .neural-card-stage { opacity: .82; }
 .mission-final-result > p { margin: 10px 13px 0; color: #bdd1d7; font-size: 9px; line-height: 1.45; }
 .mission-final-result > .mission-result-grid { margin: 10px 13px 13px; }
 
-.routing-view { display: grid; grid-template-columns: 250px minmax(400px, 1fr) 280px; gap: 18px; padding: 19px 26px 14px 28px; }
+.routing-view { display: grid; grid-template-columns: minmax(160px, 250px) minmax(0, 1fr) minmax(180px, 280px); gap: 18px; padding: 19px 26px 14px 28px; }
 .model-activity { padding-right: 17px; border-right: 1px solid var(--line); }
-.route-workspace { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
+.route-workspace { display: block; overflow-y: auto; overflow-x: hidden; padding-right: 8px; scrollbar-width: thin; scrollbar-color: #27535b transparent; }
 .subheading { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #b4c8ce; font-size: 12px; }
 .subheading small { color: #61777e; font-size: 8px; }
 .model-list { display: grid; gap: 8px; }
@@ -322,13 +322,25 @@ body[data-render-mode="idle"] .neural-card-stage { opacity: .82; }
 .availability { display: flex; align-items: center; gap: 5px; color: var(--green); font-size: 7px; }
 .availability::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .availability.unavailable { color: var(--red); }
+.model-card.has-account { grid-template-rows: auto auto; }
+.model-account { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 8px; border-top: 1px solid #1b3940; color: #8fa3aa; font-size: 8px; min-width: 0; }
+.model-account span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-card .account-button { flex: none; min-width: 0; }
+/* OpenRouter's model picker. Same column span and type scale as the account
+   row above it, so the card reads as one block rather than a bolted-on form. */
+.model-picker { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 7px; color: #8fa3aa; font-size: 8px; min-width: 0; }
+.model-picker span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker select { flex: none; max-width: 58%; height: 26px; padding: 0 8px; border: 1px solid #27535b; border-radius: 13px; background: rgba(5, 16, 20, .72); color: var(--cyan); font-size: 8px; cursor: pointer; }
+.model-picker select:focus { outline: none; border-color: var(--cyan); }
+.model-note { grid-column: 1 / -1; margin: 6px 0 0; color: #8a6a4a; font-size: 8px; }
+.model-card .account-button.primary { background: var(--cyan); color: #031216; }
 .model-card button { min-width: 77px; height: 30px; padding: 0 10px; border: 1px solid var(--cyan); border-radius: 17px; background: transparent; color: var(--cyan); font-size: 8px; cursor: pointer; }
 .model-card.active button { background: var(--cyan); color: #06252b; }
 .model-card button:disabled { opacity: .45; cursor: not-allowed; }
 .connections-heading { margin-top: 8px; border-top: 1px solid var(--line); }
 .refresh-button { display: flex; align-items: center; gap: 5px; padding: 4px 0; border: 0; background: transparent; color: #6c8e96; font-size: 8px; cursor: pointer; }
 .refresh-button:hover { color: var(--cyan); }.refresh-button svg { width: 13px; height: 13px; }
-.connection-list { min-height: 0; overflow: auto; display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(54px, auto); gap: 7px; scrollbar-width: thin; scrollbar-color: #27535b transparent; }
+.connection-list { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-auto-rows: minmax(54px, auto); gap: 7px; }
 .connection-card { min-width: 0; padding: 9px 10px; border: 1px solid #193239; background: rgba(5, 16, 20, .58); }
 .connection-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .connection-card strong { min-width: 0; color: #bdcfd5; font-size: 9px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -337,7 +349,8 @@ body[data-render-mode="idle"] .neural-card-stage { opacity: .82; }
 .connection-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #62777d; }
 .connection-status.active { color: var(--cyan); }.connection-status.active::before { background: var(--cyan); }
 .connection-status.error { color: var(--red); }.connection-status.error::before { background: var(--red); }
-.route-detail { display: flex; flex-direction: column; gap: 14px; padding-left: 18px; border-left: 1px solid var(--line); overflow: hidden; }
+.route-detail { display: flex; flex-direction: column; gap: 14px; padding-left: 18px; border-left: 1px solid var(--line); overflow-y: auto; scrollbar-width: thin; }
+.route-detail > *, .settings-detail > * { flex-shrink: 0; }
 .route-orbit { position: relative; height: 115px; flex: 0 0 auto; display: grid; place-items: center; border-bottom: 1px solid var(--line); }
 .route-orbit::before, .route-orbit::after { content: ""; position: absolute; width: 82px; height: 82px; border: 1px solid #1c4e56; border-radius: 50%; }
 .route-orbit::after { width: 55px; height: 55px; }
@@ -421,7 +434,7 @@ body[data-render-mode="idle"] .neural-card-stage { opacity: .82; }
 .feedback.show { opacity: 1; }.feedback.error { color: #ff9a9a; border-color: #603037; }
 
 .power-dialog { width: min(470px, calc(100vw - 40px)); padding: 0; border: 1px solid #76433e; border-radius: 2px; background: #071115; color: #cfe2e8; box-shadow: 0 22px 80px rgba(0, 0, 0, .72); }
-.power-dialog::backdrop { background: rgba(0, 4, 6, .76); backdrop-filter: blur(4px); }
+.power-dialog::backdrop { background: rgba(0, 4, 6, .76); backdrop-filter: none; }
 .power-dialog form { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 16px; padding: 22px; }
 .power-dialog-icon { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid #88483f; color: #ff9c90; background: rgba(117, 41, 32, .16); }
 .power-dialog-icon svg { width: 23px; height: 23px; }
@@ -431,7 +444,7 @@ body[data-render-mode="idle"] .neural-card-stage { opacity: .82; }
 .danger-button { min-height: 36px; padding: 0 15px; border: 1px solid #a45349; background: #381714; color: #ffc0b8; font-size: 12px; cursor: pointer; }
 
 .api-keys-dialog { width: min(560px, calc(100vw - 40px)); max-height: min(640px, calc(100vh - 60px)); padding: 0; border: 1px solid var(--line-strong); border-radius: 2px; background: #071115; color: #cfe2e8; box-shadow: 0 22px 80px rgba(0, 0, 0, .72); }
-.api-keys-dialog::backdrop { background: rgba(0, 4, 6, .76); backdrop-filter: blur(4px); }
+.api-keys-dialog::backdrop { background: rgba(0, 4, 6, .76); backdrop-filter: none; }
 .api-keys-dialog form { display: flex; flex-direction: column; max-height: min(640px, calc(100vh - 60px)); padding: 22px; gap: 14px; }
 .api-keys-header { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 16px; flex: none; }
 .api-keys-header .power-dialog-icon { border-color: #2e6972; color: var(--cyan-soft); background: rgba(9, 38, 44, .5); }
@@ -477,15 +490,18 @@ body[data-render-mode="idle"] .route-orbit i { animation: none !important; }
   .neural-card-stage { height: 112px; border-radius: 15px; }
   .activity-entry { min-height: 50px; }.activity-icon { width: 36px; height: 36px; }.panel-core { width: min(34vw, 300px); }.analytics-strip article { padding: 6px 5px 7px; }.analytics-strip strong { font-size: 14px; }
   .context-pane { padding-left: 14px; }.weather-reading { grid-template-columns: 61px minmax(0,1fr); }.weather-reading > strong { font-size: 29px; }.context-section { padding-top: 8px; padding-bottom: 8px; }.summary-list { gap: 4px; margin-top: 6px; }
-  .operations-view { grid-template-columns: 135px minmax(420px, 1fr); gap: 14px; padding: 15px 21px 10px; }.routing-view { grid-template-columns: 220px minmax(370px, 1fr) 255px; gap: 14px; padding: 15px 21px 10px; }
-  .settings-view { grid-template-columns: 135px minmax(480px, 1fr) 235px; gap: 14px; padding: 15px 21px 10px; }
+  .operations-view { grid-template-columns: 135px minmax(0, 1fr); gap: 14px; padding: 15px 21px 10px; }.routing-view { grid-template-columns: minmax(150px, 200px) minmax(0, 1fr) minmax(170px, 230px); gap: 14px; padding: 15px 21px 10px; }
+  .settings-view { grid-template-columns: 135px minmax(0, 1fr) 235px; gap: 14px; padding: 15px 21px 10px; }
   .workspace-heading { min-height: 49px; }.route-orbit { height: 96px; }.runtime-note { display: none; }
   .command-deck { grid-template-columns: 150px minmax(350px, 600px) 130px; padding: 9px 21px 13px; }.command-form { height: 50px; }
 }
 
 @media (max-width: 900px) {
   .operations-view { grid-template-columns: 56px minmax(390px, 1fr); gap: 10px; padding-inline: 12px; }
-  .settings-view { grid-template-columns: 56px minmax(470px, 1fr) 210px; gap: 10px; padding-inline: 12px; }
+  .settings-view { grid-template-columns: 56px minmax(0, 1fr) 210px; gap: 10px; padding-inline: 12px; }
+  .routing-view { grid-template-columns: minmax(0, 1fr) 210px; gap: 10px; padding-inline: 12px; }
+  .model-activity { display: none; }
+  .settings-grid { grid-template-columns: 1fr; }
   .section-nav { padding-right: 7px; }
   .section-nav button { justify-content: center; padding-inline: 4px; }
   .section-nav button > span:last-child, .session-readout { display: none; }
@@ -508,6 +524,8 @@ body[data-render-mode="idle"] .route-orbit i { animation: none !important; }
   .control-ring svg { width: 15px; height: 15px; }
   .operations-view { grid-template-columns: minmax(0, 1fr); padding: 9px; }
   .settings-view { grid-template-columns: minmax(0, 1fr); padding: 9px; }
+  .routing-view { grid-template-columns: minmax(0, 1fr); padding: 9px; }
+  .route-detail { display: none; }
   .settings-detail { display: none; }
   .settings-grid { grid-template-columns: 1fr; }
   .settings-grid > .setting-row:nth-child(odd) { border-right: 0; }
@@ -636,7 +654,7 @@ body[data-render-mode="idle"] .route-orbit i { animation: none !important; }
 /* ==== Fleet editor dialog (ported from Aira's agent-editor) =============== */
 
 .fleet-dialog { width: min(640px, calc(100vw - 40px)); max-height: min(680px, calc(100vh - 60px)); padding: 0; border: 1px solid var(--line-strong); border-radius: 2px; background: #071115; color: #cfe2e8; box-shadow: 0 22px 80px rgba(0, 0, 0, .72); }
-.fleet-dialog::backdrop { background: rgba(0, 4, 6, .76); backdrop-filter: blur(4px); }
+.fleet-dialog::backdrop { background: rgba(0, 4, 6, .76); backdrop-filter: none; }
 .fleet-head { display: flex; align-items: flex-start; justify-content: space-between; padding: 20px 22px 14px; border-bottom: 1px solid rgba(23, 40, 46, .78); }
 .fleet-eyebrow { display: block; margin-bottom: 4px; color: var(--cyan-soft); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .fleet-head h2 { margin: 0; font-size: 17px; font-weight: 500; }
@@ -685,9 +703,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
    that make glass read as a rounded body rather than a tinted rectangle.
 
    Tints come from the humanoid's own palette: the cyan of its rim light, the
-   ember of its visor. Blur cost: only the overview's bubbles sit over the
-   animated core and re-sample per frame; elsewhere the backdrop is the static
-   shell image, so the blur is effectively free.
+   ember of its visor. Static gradients and highlights preserve the glass appearance without
+   repeatedly blurring the animated canvas or the desktop underneath.
    ========================================================================== */
 :root {
   --bub: rgba(12, 33, 43, .30);
@@ -711,8 +728,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
   border: 1px solid var(--bub-edge);
   border-radius: var(--r-bubble);
   box-shadow: var(--bub-drop), var(--bub-inner);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .activity-pane { padding: 16px 17px; }
 .context-pane { padding: 16px 18px; border-left: 1px solid var(--bub-edge); }
@@ -732,8 +749,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
 }
 .analytics-strip {
   left: 4%; right: 4%; bottom: 10px;
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   box-shadow: var(--bub-drop), var(--bub-inner);
 }
 .analytics-strip article + article { border-left: 1px solid rgba(160, 238, 255, .10); }
@@ -789,8 +806,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
   background: var(--bub-spec), var(--bub-quiet);
   border-color: var(--bub-edge);
   box-shadow: inset 0 1px 0 rgba(236, 252, 255, .22), inset 0 -1px 0 rgba(130, 224, 255, .12);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .quick-control:hover .control-ring {
   background: var(--bub-spec), var(--bub-lit);
@@ -810,8 +827,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
 .field-control select, .weather-search input {
   background: var(--bub-spec), var(--bub-quiet);
   border: 1px solid var(--bub-edge);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .weather-search { grid-template-columns: 1fr 40px; gap: 6px; height: 27px; opacity: 1; }
 .weather-search input { border-right: 1px solid var(--bub-edge); }
@@ -821,8 +838,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
 .command-deck {
   background: var(--bub-spec), var(--bub);
   border-top: 1px solid var(--bub-edge);
-  -webkit-backdrop-filter: blur(24px) saturate(175%);
-  backdrop-filter: blur(24px) saturate(175%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .command-form {
   background: var(--bub-spec), var(--bub-quiet);
@@ -836,8 +853,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
   border: 1px solid var(--bub-edge);
   border-radius: 34px;
   box-shadow: 0 34px 78px rgba(0, 6, 10, .62), var(--bub-inner);
-  -webkit-backdrop-filter: blur(34px) saturate(180%);
-  backdrop-filter: blur(34px) saturate(180%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 /* ---- seams inside a bubble are glass, not ruled lines ---- */
@@ -853,8 +870,8 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
   border: 1px solid var(--bub-edge);
   border-radius: var(--r-bubble);
   box-shadow: var(--bub-drop), var(--bub-inner);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .board-agent-card.working, .board-agent-card.selected { border-color: var(--bub-edge-lit); }
 .board-agent-card.selected { box-shadow: var(--bub-drop), var(--bub-inner), 0 0 26px rgba(56, 190, 232, .18); }
@@ -896,6 +913,6 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
   border: 1px solid var(--bub-edge);
   border-radius: var(--r-pill);
   box-shadow: var(--bub-drop), inset 0 1px 0 rgba(236, 252, 255, .22);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }

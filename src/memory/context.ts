@@ -58,7 +58,9 @@ export function deriveProject(app: string, title: string): string {
     .filter((s) => !isFileName(s))
     .filter((s) => !NOISE.has(s.toLowerCase()))
     // A bare shell invocation like "-zsh".
-    .filter((s) => !/^-?(zsh|bash|fish|sh)$/i.test(s));
+    .filter((s) => !/^-?(zsh|bash|fish|sh)$/i.test(s))
+    // Terminal's window size ("Echo Mac — -zsh — 80×24").
+    .filter((s) => !/^\d+\s*[×x]\s*\d+$/i.test(s));
 
   if (!segments.length) return app || GLOBAL;
 

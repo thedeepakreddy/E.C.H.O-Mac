@@ -75,6 +75,38 @@ console.log("\n  an unknown source is refused, not thrown");
   ok(/satellites/.test(out.text), "listing what it does have", out.text?.slice(0, 60));
 }
 
+// ── the wrong tool winning ────────────────────────────────────────────────
+//
+// Reported live: "show me a live camera feed from the US". Echo called THIS
+// tool with source `news`, GDELT searched for ARTICLES about cameras, and
+// answered "no recent coverage of live camera feed from the US" — which the
+// user heard as Echo saying there is no camera coverage. Osiris had ~37,000
+// live cameras the whole time.
+//
+// Nothing was broken. Two similar-sounding tools, and the wrong one won. A
+// sharper description is the primary fix; this is the guarantee behind it.
+console.log("\n  a camera question is sent to the tool that has cameras");
+{
+  const def: any = TOOL_MAP.get("open_intel");
+  for (const q of ["live camera feed from the US", "cctv in Tokyo", "show me a webcam"]) {
+    const out = await def.handler({ source: "news", query: q });
+    ok(out.status === "failed", `"${q}" is not answered as news`, JSON.stringify(out).slice(0, 70));
+    ok(/osiris_intel/.test(out.text) && /cameras/.test(out.text),
+      "and it names the tool and feed that can answer", out.text?.slice(0, 80));
+  }
+  // `nearby` legitimately finds physical things at a place, so a speed camera
+  // there is a real question — it must not be hijacked.
+  const near: any = TOOL_MAP.get("open_intel");
+  const out = await near.handler({ source: "nearby", query: "speed camera near 17.385,78.4867" });
+  ok(out.status !== "failed" || !/osiris_intel/.test(out.text ?? ""),
+    "but `nearby` is left alone — a camera ON THE GROUND is its job",
+    String(out.text).slice(0, 70));
+
+  // And an ordinary news question still works.
+  const news = await def.handler({ source: "news", query: "India" });
+  ok(!/osiris_intel/.test(news.text ?? ""), "an ordinary news query is untouched", String(news.text).slice(0, 60));
+}
+
 console.log("\n  the cache actually caches");
 {
   clearIntelCache();

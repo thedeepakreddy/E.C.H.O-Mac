@@ -86,8 +86,13 @@ console.log("\n  the gate judges names it has never seen");
 
 console.log("\n  and a real call returns real data");
 {
-  const tool = live.tools.find((t) => /_GET_|_LIST_/.test(t.name));
-  ok(!!tool, "found a read-only tool to call");
+  // A read whose schema demands nothing, so the call exercises auth and
+  // transport rather than this test's ability to guess a message id. Picking
+  // the first `_GET_` by name found GMAIL_GET_ATTACHMENT once Gmail was
+  // connected, which needs three arguments and fails on all of them.
+  const noArgs = (t: { inputSchema: any }) => !(t.inputSchema?.required ?? []).length;
+  const tool = live.tools.find((t) => /_GET_|_LIST_/.test(t.name) && noArgs(t));
+  ok(!!tool, "found a read-only tool that needs no arguments");
   if (tool) {
     const def: ToolDef = {
       name: tool.name,

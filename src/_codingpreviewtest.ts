@@ -1,0 +1,8 @@
+import {mkdtemp,writeFile,symlink,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import assert from 'node:assert/strict';
+const root=await mkdtemp(join(tmpdir(),'echo-preview-'));process.env.ECHO_DATA_ROOT=join(root,'data');process.env.ECHO_MEMORY_ROOT=join(root,'memory');
+const {openProject}=await import('./coding/session.js');const {startProjectPreview,stopProjectPreview,localPreviewURL}=await import('./coding/preview.js');const {stopAllCodingProcesses}=await import('./coding/processes.js');
+try{const project=await openProject({path:join(root,'site'),create:true});await writeFile(join(project.root,'index.html'),'<h1>Acceptance fixture</h1>');await writeFile(join(project.root,'.env'),'SECRET');await writeFile(join(root,'outside.txt'),'OUTSIDE');await symlink(join(root,'outside.txt'),join(project.root,'escape.txt'));
+ assert.throws(()=>localPreviewURL('https://example.com'),/loopback/);assert.throws(()=>localPreviewURL('http://localhost.evil.com:123'),/loopback/);
+ const preview=await startProjectPreview(project.id,0);assert.match(await (await fetch(preview.url)).text(),/Acceptance fixture/);assert.equal((await fetch(new URL('.env',preview.url))).status,403);assert.equal((await fetch(new URL('escape.txt',preview.url))).status,403);assert.equal((await startProjectPreview(project.id,2)).reused,true);
+ await stopProjectPreview(project.id);await assert.rejects(fetch(preview.url));console.log('PASS static HTTP readiness, reuse, hidden-file/symlink refusal, and owned server cleanup');
+}finally{await stopAllCodingProcesses();await rm(root,{recursive:true,force:true});}

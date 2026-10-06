@@ -251,7 +251,7 @@ const satellites: IntelSource = {
         };
         const pass = nextPass(sat, rec, obs, now);
         passLine = pass
-          ? `next visible from ${place.name} at ${pass.when}, ${pass.peakEl}° up`
+          ? `next pass above 10° from ${place.name} at ${pass.when}, ${pass.peakEl}° up`
           : `no pass above 10° over ${place.name} in the next 24 hours`;
       }
 
@@ -615,7 +615,7 @@ const exploited: IntelSource = {
     const hits = byDate.filter((v) =>
       `${v.cveID} ${v.vendorProject} ${v.product} ${v.vulnerabilityName}`.toLowerCase().includes(q)
     );
-    if (!hits.length) return { speak: `Nothing matching ${arg} is in the exploited list. That's good news.` };
+    if (!hits.length) return { speak: `Nothing matching ${arg} is in the CISA known-exploited-vulnerability catalogue. Absence from KEV does not establish that it is safe or unexploited.` };
     const top = hits.slice(0, 3);
     const ransom = hits.filter((v) => v.knownRansomwareCampaignUse === "Known").length;
     return {

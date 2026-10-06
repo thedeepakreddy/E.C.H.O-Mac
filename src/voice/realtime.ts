@@ -1,8 +1,21 @@
+import { modelToolResult } from '../memory/tool-context.js';
 import { EventEmitter } from "node:events";
 import type { JarvisConfig } from "../config.js";
 import { TOOL_MAP, TOOLS, type ToolDef } from "../tools/registry.js";
 import { toFunctionDeclaration } from "../brain/gemini.js";
 import { runGated } from "../safety/gate.js";
+import { connectMcpServers, loadMcpConfig, mcpToolDef, jsonSchemaToGoogleForRealtime, type McpConnection, type McpToolHandle } from "../brain/mcp.js";
+import { conversationId, contextSettings, contextTokens, contextWindow, conversations, seedConversationFromRecordings } from "../memory/conversation.js";
+import { ProviderMemoryContext } from "../memory/provider-context.js";
+import { memoryService } from "../memory/service.js";
+import { taskCoordinator } from "../memory/task-state.js";
+import { Recorder } from "../agent-replay/recorder.js";
+import { captureAllowed } from "../memory/capture-policy.js";
+import { ephemeralRecorder, loopLogRoot } from "../agent-replay/runtime.js";
+import { LoopLog } from "../agent-replay/loop-log.js";
+import { runInAgentContext, type AgentRunContext } from "../agent-replay/context.js";
+import type { MemoryScope } from "../memory/types.js";
+import { randomUUID } from "node:crypto";
 
 /**
  * Speech-to-speech voice, on the model itself.
@@ -85,6 +98,7 @@ use, never the pure literary form.
 `.trim();
 
 export interface RealtimeOptions {
+  scope?: MemoryScope;
   /** Restrict the session to these tools (the fleet's allowedTools contract). */
   allowedTools?: Set<string>;
   /**
@@ -99,11 +113,32 @@ export interface RealtimeOptions {
 }
 
 export class RealtimeVoiceSession extends EventEmitter {
+  readonly conversationId: string;
+  private memory = new ProviderMemoryContext("gemini-live");
+  private toolContext?: AgentRunContext;
+  private heardText = "";
+  private saidText = "";
+  private recordedUser = false;
+  private syncedMessageId?: string;
   private session: any = null;
   private closed = false;
   private opening: Promise<void> | null = null;
   /** Tool calls currently running, so close() can stop waiting on them. */
   private inflight = 0;
+  /**
+   * Outside tools (Composio and the like), resolved before the session opens.
+   *
+   * This path had none, and the gap was invisible: the four text brains all
+   * reach Composio, so Echo could read your mail — until the turn happened to
+   * be spoken in Telugu, which routes to Gemini Live, where the same request
+   * answered that it had no such tool. Same assistant, same account, different
+   * answer depending on the language it was asked in.
+   *
+   * They have to be attached BEFORE `open()`, because a Live session fixes its
+   * tool list in the setup message and there is no way to add one later.
+   */
+  private mcpTools = new Map<string, McpToolHandle>();
+  private mcpConnection: McpConnection | null = null;
 
   constructor(
     private readonly cfg: JarvisConfig,
@@ -111,6 +146,66 @@ export class RealtimeVoiceSession extends EventEmitter {
     private readonly opts: RealtimeOptions = {}
   ) {
     super();
+    this.conversationId = conversationId("echo", opts.scope);
+    if (ProviderMemoryContext.enabled && !memoryService.isSuppressed(opts.scope ?? {})) seedConversationFromRecordings(this.conversationId, "echo", opts.scope);
+    this.memory.configure(cfg.context);
+    this.memory.begin("", { conversationId: this.conversationId, scope: opts.scope });
+  }
+
+  /** Bring externally produced text turns into an already-open voice session. */
+  syncContext(): void {
+    const last = conversations.read(this.conversationId).at(-1)?.id;
+    if (!this.session || !last || last === this.syncedMessageId || this.inflight || this.heardText) return;
+    const used = contextTokens(this.opts.instruction ?? "") + contextTokens(this.declarations());
+    const packet = this.memory.packet(used);
+    if (packet) this.session.sendClientContent({ turns: [{ role: "user", parts: [{ text: packet }] }], turnComplete: false });
+    this.syncedMessageId = last;
+  }
+
+  private ensureTask(): AgentRunContext {
+    if (this.toolContext) return this.toolContext;
+    const task = taskCoordinator.create({ ownerActorId: "echo", goal: this.heardText || "Realtime voice turn", scope: this.opts.scope });
+    const runId = `Echo-voice--${randomUUID()}`;
+    const root = loopLogRoot();
+    const payloadRecording = !!root && process.env.ECHO_FULL_LOG !== '0' && captureAllowed() && !memoryService.isSuppressed(this.opts.scope ?? {}, task.taskId);
+    let recorder = ephemeralRecorder(runId);
+    if (payloadRecording && root) {
+      try { recorder = new Recorder(root, runId); }
+      catch (error) { console.error('[realtime] run recording unavailable:', error); }
+    }
+    const context: AgentRunContext = { identity: { id: "echo", name: "Echo", kind: "main" }, taskId: task.taskId,
+      conversationId: this.conversationId, recorder, loop: new LoopLog(recorder, "gemini-live", this.cfg.voice.realtime?.model ?? DEFAULT_MODEL), payloadRecording: payloadRecording && !!recorder.dir, scope: this.opts.scope, provider: "gemini-live" };
+    this.toolContext = context;
+    context.loop.runStart({actor: context.identity, taskId: task.taskId, transport: 'gemini-live'});
+    if (context.payloadRecording) recorder.emit({type: 'session.tools', toolsRef: recorder.blob(this.declarations())});
+    this.memory.begin(this.heardText, { taskId: task.taskId, conversationId: this.conversationId, scope: this.opts.scope });
+    return context;
+  }
+
+  private recordTurn(cancelled = false): void {
+    if (!this.heardText && !this.saidText && !this.toolContext) return;
+    const context = this.ensureTask();
+    const taskId = context.taskId;
+    if (context.payloadRecording && captureAllowed()) {
+      context.recorder.emit({type: 'agent.input', bodyRef: context.recorder.blob(this.heardText)});
+      context.recorder.emit({type: 'agent.text', textRef: context.recorder.blob(this.saidText), interrupted: cancelled});
+    }
+    context.loop.exit(cancelled ? 'abort_signal' : 'completed');
+    if (ProviderMemoryContext.enabled && !memoryService.isSuppressed(this.opts.scope ?? {}, taskId)) {
+      const base = { actorId: "echo", provider: "gemini-live", projectId: this.opts.scope?.projectId, taskId };
+      if (this.heardText && !this.recordedUser) conversations.append(this.conversationId, { ...base, role: "user", text: this.heardText });
+      if (this.saidText) conversations.append(this.conversationId, { ...base, role: "assistant", text: this.saidText + (cancelled ? "\n[Reply interrupted; delivery may be partial.]" : "") });
+    }
+    if (taskId) {
+      const task = taskCoordinator.get(taskId);
+      if (task && !task.result) {
+        if (cancelled) taskCoordinator.cancel(taskId);
+        else taskCoordinator.finish(taskId, { status: "completed", summary: this.saidText, verificationRefs: Object.keys(task.calls).length ? task.verificationRefs : [`voice-response:${taskId}`] });
+      }
+    }
+    this.heardText = ""; this.saidText = ""; this.recordedUser = false; this.toolContext = undefined;
+    this.syncedMessageId = conversations.read(this.conversationId).at(-1)?.id;
+    this.memory.begin("", { conversationId: this.conversationId, scope: this.opts.scope });
   }
 
   get active(): boolean {
@@ -121,7 +216,43 @@ export class RealtimeVoiceSession extends EventEmitter {
   private declarations(): any[] {
     const allowed = this.opts.allowedTools;
     const tools = allowed ? TOOLS.filter((t) => allowed.has(t.name)) : TOOLS;
-    return tools.map(toFunctionDeclaration);
+    const own = tools.map(toFunctionDeclaration);
+    const outside = [...this.mcpTools.values()].map((t) => {
+      const schema = jsonSchemaToGoogleForRealtime(t.inputSchema);
+      return {
+        name: t.name,
+        description: t.description,
+        parameters: { type: "OBJECT", properties: schema.properties ?? {}, required: schema.required ?? [] },
+      };
+    });
+    return [...own, ...outside];
+  }
+
+  /**
+   * Connect the configured MCP servers and keep their tools for `declarations`.
+   *
+   * Failure here is not fatal and must not be: losing Gmail is worth far less
+   * than losing the voice, so a server that is down costs its own tools and
+   * the session opens anyway.
+   */
+  private async attachMcp(): Promise<void> {
+    if (this.cfg.voice.realtime?.outsideTools === false) return;
+    if (!Object.keys(loadMcpConfig()).length) return;
+    try {
+      this.mcpConnection = await connectMcpServers();
+      const allowed = this.opts.allowedTools;
+      for (const t of this.mcpConnection.tools) {
+        if (allowed && !allowed.has(t.name)) continue;
+        this.mcpTools.set(t.name, t);
+      }
+      const failed = this.mcpConnection.servers.filter((x) => !x.ok);
+      if (failed.length) console.error(`[realtime] MCP servers unavailable: ${failed.map((x) => x.name).join(", ")}`);
+      // Logged because it is paid on every session and is otherwise invisible:
+      // the tool list goes in the setup message and never changes after.
+      if (this.mcpTools.size) console.log(`[realtime] ${this.mcpTools.size} outside tool(s) attached to the spoken session`);
+    } catch (err: any) {
+      console.error("[realtime] MCP unavailable, continuing without it:", err?.message ?? err);
+    }
   }
 
   async connect(): Promise<void> {
@@ -131,18 +262,26 @@ export class RealtimeVoiceSession extends EventEmitter {
   }
 
   private async open(): Promise<void> {
+    // Before the transport: a Live session's tool list is fixed in its setup
+    // message, so anything not known by now cannot be called for the whole
+    // conversation.
+    await this.attachMcp();
     if (this.opts.transport) {
       this.session = await this.opts.transport({
         onmessage: (m: any) => this.onMessage(m),
         onopen: () => this.emit("open"),
         onerror: (e: any) => this.emit("error", String(e?.message ?? e)),
-        onclose: (e: any) => { this.closed = true; this.emit("closed", e?.reason ?? ""); },
+        onclose: (e: any) => { this.recordTurn(true); this.memory.close(); this.closed = true; this.emit("closed", e?.reason ?? ""); },
       });
       return;
     }
     const { GoogleGenAI, Modality } = await import("@google/genai");
     const ai = new GoogleGenAI({ apiKey: this.apiKey });
     const model = this.cfg.voice.realtime?.model || DEFAULT_MODEL;
+    const settings = contextSettings(this.cfg.context);
+    const window = contextWindow(settings, "gemini-live", model);
+    const used = contextTokens(this.opts.instruction ?? "") + contextTokens(this.declarations());
+    if (used + 256 >= this.memory.inputBudget(model)) throw new Error("Voice instructions and tools exceed the configured context budget.");
 
     this.session = await ai.live.connect({
       model,
@@ -154,7 +293,8 @@ export class RealtimeVoiceSession extends EventEmitter {
         // way through the model.
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        systemInstruction: this.opts.instruction,
+        systemInstruction: `${this.opts.instruction ?? ""}\n\n${this.memory.packet(used, true, model)}`,
+        contextWindowCompression: { triggerTokens: String(Math.floor(window * settings.compactAt)), slidingWindow: { targetTokens: String(Math.floor(window * 0.5)) } },
         // Unset means Google's default voice. Named here so Echo does not
         // silently sound like whatever the provider ships this month.
         ...(this.cfg.voice.realtime?.voice || this.cfg.voice.realtime?.language
@@ -176,6 +316,8 @@ export class RealtimeVoiceSession extends EventEmitter {
         onmessage: (m: any) => this.onMessage(m),
         onerror: (e: any) => this.emit("error", String(e?.message ?? e)),
         onclose: (e: any) => {
+          this.recordTurn(true);
+          this.memory.close();
           this.closed = true;
           this.emit("closed", e?.reason ?? "");
         },
@@ -185,8 +327,8 @@ export class RealtimeVoiceSession extends EventEmitter {
 
   private onMessage(m: any): void {
     const sc = m.serverContent;
-    if (sc?.inputTranscription?.text) this.emit("heard", sc.inputTranscription.text);
-    if (sc?.outputTranscription?.text) this.emit("said", sc.outputTranscription.text);
+    if (sc?.inputTranscription?.text) { this.heardText += sc.inputTranscription.text; this.emit("heard", sc.inputTranscription.text); }
+    if (sc?.outputTranscription?.text) { this.saidText += sc.outputTranscription.text; this.emit("said", sc.outputTranscription.text); }
 
     for (const p of sc?.modelTurn?.parts ?? []) {
       const b64 = p.inlineData?.data;
@@ -196,8 +338,8 @@ export class RealtimeVoiceSession extends EventEmitter {
     // The server detected the user talking over the reply. Echo's own barge-in
     // machinery is for the pipeline; here the model has already stopped, so all
     // that is left is to drop whatever audio is still queued for the speaker.
-    if (sc?.interrupted) this.emit("interrupted");
-    if (sc?.turnComplete) this.emit("turnComplete");
+    if (sc?.interrupted) { this.recordTurn(true); this.emit("interrupted"); }
+    if (sc?.turnComplete) { this.recordTurn(); this.emit("turnComplete"); }
 
     const calls = m.toolCall?.functionCalls;
     if (calls?.length) void this.runTools(calls);
@@ -213,9 +355,14 @@ export class RealtimeVoiceSession extends EventEmitter {
    */
   private async runTools(calls: Array<{ id?: string; name: string; args?: Record<string, unknown> }>): Promise<void> {
     const responses: any[] = [];
+    const context = this.ensureTask();
+    if (context.payloadRecording && captureAllowed()) context.recorder.emit({type: 'session.toolrequest', callsRef: context.recorder.blob(calls)});
     for (const call of calls) {
       this.inflight++;
-      const def: ToolDef | undefined = TOOL_MAP.get(call.name);
+      // One shared adapter, so an outside tool is gated here exactly as it
+      // would be on any of the text brains.
+      const handle = this.mcpTools.get(call.name);
+      const def: ToolDef | undefined = handle ? mcpToolDef(handle) : TOOL_MAP.get(call.name);
       try {
         if (!def) {
           responses.push({ id: call.id, name: call.name, response: { error: `unknown tool ${call.name}`, status: "failed" } });
@@ -226,21 +373,15 @@ export class RealtimeVoiceSession extends EventEmitter {
           continue;
         }
         this.emit("tool", call.name);
-        const out = await runGated(def, call.args ?? {}, {
+        const context = this.ensureTask();
+        const out = await runInAgentContext(context, () => runGated(def, call.args ?? {}, {
           workingDir: this.opts.workingDir ?? this.cfg.control.workingDir,
           emit: (e, p) => this.emit("gate", e, p),
-        });
+        }));
         responses.push({
           id: call.id,
           name: call.name,
-          response: {
-            result: out.text ?? "done",
-            status: out.status,
-            data: out.data,
-            error: out.error,
-            verification: out.verification,
-            callId: out.callId,
-          },
+          response: modelToolResult(out),
         });
       } catch (err: any) {
         responses.push({ id: call.id, name: call.name, response: { error: String(err?.message ?? err), status: "failed" } });
@@ -251,6 +392,7 @@ export class RealtimeVoiceSession extends EventEmitter {
     // The session can be closed while a slow tool (or a confirmation the user
     // never answered) was still running. Sending then would throw.
     if (!this.session || this.closed) return;
+    if (context.payloadRecording && captureAllowed()) context.recorder.emit({type: 'session.toolresponse', responsesRef: context.recorder.blob(responses)});
     try {
       this.session.sendToolResponse({ functionResponses: responses });
     } catch (err: any) {
@@ -279,6 +421,8 @@ export class RealtimeVoiceSession extends EventEmitter {
 
   /** Send a typed message into the same session, so text and voice share one context. */
   sendText(text: string): void {
+    this.syncContext();
+    this.heardText += text;
     if (!this.active) return;
     try {
       this.session.sendClientContent({ turns: [{ role: "user", parts: [{ text }] }], turnComplete: true });
@@ -288,6 +432,8 @@ export class RealtimeVoiceSession extends EventEmitter {
   }
 
   close(): void {
+    this.recordTurn(true);
+    this.memory.close();
     this.closed = true;
     const s = this.session;
     this.session = null;

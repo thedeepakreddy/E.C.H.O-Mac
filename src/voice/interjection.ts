@@ -139,6 +139,59 @@ export function stripEchoWords(heard: string, echoSaid: string): string {
  * Expects text that has already been through `stripEchoWords`, so "nothing
  * left" genuinely means nothing was said.
  */
+/**
+ * How much of what was heard has to be Echo's own vocabulary before the whole
+ * capture is written off as self-audio.
+ *
+ * `stripEchoWords` is exact: three words in a row, verbatim. That is the right
+ * bar for DELETING words, because a wrong deletion corrupts a real command.
+ * But whisper does not transcribe Echo verbatim — it heard "First one's a
+ * traffic cam" for a reply that said "first one is a traffic cam" — so runs
+ * break and fragments survive the subtraction.
+ *
+ * This is the coarser second look, applied to the whole capture rather than to
+ * individual words: if most of what was heard is vocabulary Echo just used,
+ * the microphone heard Echo. Two thirds, because a real interruption during a
+ * reply is usually SHORT ("no, the other one") and shares little with it,
+ * while a leaked sentence shares nearly everything.
+ */
+const ECHO_OVERLAP = 0.66;
+
+/**
+ * Did the microphone just hear Echo?
+ *
+ * Ordered after `stripEchoWords` and separate from it on purpose: that one
+ * decides which WORDS to remove, this one decides whether the whole capture
+ * was ever the user's. A recorded session where this was missing had Echo
+ * answering its own sentences six turns in a row.
+ */
+export function isEchoItself(heard: string, echoSaid: string): boolean {
+  const echoWords = (text: string) => words(text.toLowerCase()
+    .replace(/\byou['’]re\b/g, 'you are').replace(/\bit['’]s\b/g, 'it is')
+    .replace(/\bi['’]m\b/g, 'i am').replace(/\bwe['’]re\b/g, 'we are')
+    .replace(/\bopen\s+router\b/g, 'openrouter').replace(/\binto\b/g, 'in to'));
+  const said = new Set(echoWords(echoSaid));
+  if (said.size < 3) return false;
+  const h = echoWords(heard);
+  if (h.length < 3) return false; // too short to judge; the strip rule owns it
+  const shared = h.filter((w) => said.has(w)).length;
+  return shared / h.length >= ECHO_OVERLAP;
+}
+/** Conservative post-playback guard: a long, almost verbatim ordered copy.
+ * Short questions and explicit corrections must still reach the assistant. */
+export function isPlaybackTranscript(heard:string,echoSaid:string):boolean {
+ if(/^(?:no|yes|please|hey|echo|stop|cancel|actually|instead)\b/i.test(heard.trim()))return false;
+ const normalize=(text:string)=>words(text.replace(/\bi['’]ll\b/gi,'i will').replace(/\bi['’]m\b/gi,'i am').replace(/\bwe['’]re\b/gi,'we are').replace(/initialis/gi,'initializ'));
+ const h=normalize(heard),mine=normalize(echoSaid).slice(-1200);if(h.length<8||h.length>180)return false;
+ for(let start=0;start<mine.length;start++){
+  if(mine[start]!==h[0])continue;
+  let matched=0;
+  for(let n=start;n<Math.min(mine.length,start+h.length+3);n++)if(mine[n]===h[matched])matched++;
+  if(matched/h.length>=0.9)return true;
+ }
+ return false;
+}
+
 export function classifyInterjection(text: string): InterjectionVerdict {
   const w = words(text);
   if (!w.length) return "noise";

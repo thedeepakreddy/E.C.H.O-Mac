@@ -238,6 +238,8 @@
                   <option value="gemini">Gemini</option>
                   <option value="ollama">Ollama</option>
                   <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="nvidia">NVIDIA / Kimi</option>
                 </select>
               </label>
               <label class="setting-row switch-row" for="settings-start-listening">
@@ -260,7 +262,9 @@
               <div class="settings-grid compact-fields">
                 <label class="field-control" for="settings-stt-provider"><span>Speech recognition</span><select id="settings-stt-provider"><option value="whisper">Whisper</option><option value="apple">Apple Speech</option><option value="sarvam">Sarvam</option></select></label>
                 <label class="field-control" for="settings-stt-language"><span>Recognition language</span><input id="settings-stt-language" type="text" inputmode="text" maxlength="12" placeholder="en or auto" /></label>
-                <label class="field-control" for="settings-tts-engine"><span>Speech engine</span><select id="settings-tts-engine"><option value="mac">macOS</option><option value="elevenlabs">ElevenLabs</option><option value="fakeyou">FakeYou</option><option value="local-clone">Local clone</option><option value="sarvam">Sarvam</option><option value="gemini">Gemini</option><option value="piper">Piper (offline)</option></select></label>
+                <label class="field-control" for="settings-tts-engine"><span>Speech engine</span><select id="settings-tts-engine"><option value="mac">macOS</option><option value="elevenlabs">ElevenLabs</option><option value="fakeyou">FakeYou</option><option value="sarvam">Sarvam</option><option value="gemini">Gemini</option><option value="piper">Piper (offline)</option><option value="vibevoice">VibeVoice (server required)</option></select></label>
+                <label class="field-control" for="settings-vibevoice-url"><span>VibeVoice server address</span><input id="settings-vibevoice-url" type="text" maxlength="2048" placeholder="http://127.0.0.1:3000" /></label>
+                <label class="field-control" for="settings-vibevoice-speaker"><span>VibeVoice speaker</span><input id="settings-vibevoice-speaker" type="text" maxlength="80" placeholder="Carter" /></label>
                 <label class="field-control" for="settings-max-spoken"><span>Max spoken sentences</span><input id="settings-max-spoken" type="number" min="0" max="50" step="1" /></label>
                 <label class="field-control" for="settings-conversation-window"><span>Conversation window (seconds)</span><input id="settings-conversation-window" type="number" min="2" max="60" step="1" /></label>
               </div>

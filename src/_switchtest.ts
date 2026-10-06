@@ -26,6 +26,9 @@ console.log("  the name on its own is the whole command");
   heard("claude", "claude");
   heard("gemini", "gemini");
   heard("ollama", "ollama");
+  heard('switch to kimi', 'nvidia');
+  heard('use nvidia', 'nvidia');
+  heard('is kimi better than claude', null);
   heard("llama", "ollama");
   heard("local", "ollama");
   heard("Gemini.", "gemini");
@@ -90,6 +93,8 @@ console.log("  a brain that cannot start says so before anything is torn down");
   ok(unavailableReason("gemini", { GEMINI_API_KEY: "abc" }, "GEMINI_API_KEY") === null, "with a key it is fine");
   ok(unavailableReason("claude", {}) === null, "Claude needs nothing from the environment here");
   ok(unavailableReason("ollama", {}) === null, "and neither does the local model");
+  ok(unavailableReason('nvidia', {}) === "NVIDIA_API_KEY isn't set", 'NVIDIA requires its own key');
+  ok(unavailableReason('nvidia', {NVIDIA_API_KEY: 'fixture'}) === null, 'NVIDIA key enables availability');
   ok(/GEMINI_API_KEY/.test(unavailableReason("gemini", {}, "GEMINI_API_KEY")!),
      "the reason names the variable, so the fix is obvious");
 }

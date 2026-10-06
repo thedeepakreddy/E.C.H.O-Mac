@@ -19,6 +19,7 @@
  */
 
 export const REDACTED = "[redacted]";
+export const NVIDIA_KEY_SHAPE = /\bnvapi-[A-Za-z0-9_-]{16,}\b/g;
 
 /**
  * A value that follows a secret label with an explicit `:` or `=` — the
@@ -41,6 +42,7 @@ const PROSE_AFTER_LABEL =
 
 /** Known credential shapes, redacted wherever they appear. */
 const SHAPES: RegExp[] = [
+  NVIDIA_KEY_SHAPE,
   /\bsk-[a-z]*-?[A-Za-z0-9_-]{16,}\b/gi, // OpenAI / Anthropic keys
   /\bAIza[0-9A-Za-z_\-]{20,}\b/g, // Google API key
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, // GitHub tokens

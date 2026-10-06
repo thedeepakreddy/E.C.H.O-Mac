@@ -1,18 +1,27 @@
-import { existsSync, appendFileSync } from "node:fs";
-import { execSync } from "node:child_process";
-import { loadConfig } from "../config.js";
+import { existsSync, appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { activeConfig } from "../config.js";
+import { getAppPath } from "../utils/appPath.js";
+import { dataRoot } from "../memory/paths.js";
+
+/** Where each health check is appended — the user's data folder, never the app. */
+export const healthRecordPath = () => join(dataRoot(), "health_record.txt");
 
 function checkBinary(name: string): string | null {
-  const binPath = `native/${name}`;
+  // Resolved against the app, not the process's working directory: in an
+  // installed app that is "/", so every binary was reported missing.
+  const binPath = join(getAppPath(), "native", name);
   if (!existsSync(binPath)) {
-    return `Missing native binary: ${binPath}. It might have failed to compile or was deleted.`;
+    return `Missing native binary: native/${name}. It might have failed to compile or was deleted.`;
   }
   return null;
 }
 
 export async function check_health(): Promise<{ text: string }> {
   const issues: string[] = [];
-  const config = loadConfig(process.cwd());
+  // The live config, not one re-read from the working directory — that read
+  // the defaults in an installed app and checked a brain the user isn't using.
+  const config = activeConfig(getAppPath());
 
   // Check native binaries
   const binaries = ["axhelper", "facetracker", "visionhelper", "sonar", "textextract"];
@@ -21,14 +30,17 @@ export async function check_health(): Promise<{ text: string }> {
     if (err) issues.push(err);
   }
 
-  // Check Ollama if active
+  // Check Ollama if active. Asked over HTTP and a child process, never with
+  // execSync: this runs in Electron's main process, where a blocking call
+  // freezes the HUD and the microphone until it returns.
   if (config.brain === "ollama") {
+    const host = (config.ollama?.host ?? "http://localhost:11434").replace(/\/$/, "");
+    const model = config.ollama?.model || "llama3.2:3b";
     try {
-      execSync("curl -s http://localhost:11434/api/tags", { stdio: "pipe" });
-      
-      const model = config.ollama?.model || "llama3.2:3b";
-      const ollamaList = execSync("ollama list").toString();
-      if (!ollamaList.includes(model)) {
+      const res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(3000) });
+      const body: any = await res.json();
+      const names: string[] = (body?.models ?? []).map((m: any) => String(m?.name ?? ""));
+      if (!names.some((n) => n === model || n === `${model}:latest`)) {
         issues.push(`Configured Ollama model '${model}' is not installed. Needs: ollama pull ${model}`);
       }
     } catch {
@@ -63,11 +75,16 @@ export async function check_health(): Promise<{ text: string }> {
     logEntry += "\n";
   }
   
-  appendFileSync("health_record.txt", logEntry);
+  try {
+    mkdirSync(dataRoot(), { recursive: true });
+    appendFileSync(healthRecordPath(), logEntry);
+  } catch (err: any) {
+    console.error("[health] could not write the health record:", err?.message ?? err);
+  }
 
   if (issues.length === 0) {
-    return { text: "Health check complete. All features are running well with no errors or inconsistencies found. A clean record has been saved to health_record.txt." };
+    return { text: "Health check complete. All features are running well with no errors or inconsistencies found. A clean record has been saved to health_record.txt in my data folder." };
   } else {
-    return { text: `Health check complete. I found ${issues.length} problem(s):\n${issues.map(i => "- " + i).join("\n")}\n\nI have recorded these in health_record.txt. Let me know if you would like me to fix these issues.` };
+    return { text: `Health check complete. I found ${issues.length} problem(s):\n${issues.map(i => "- " + i).join("\n")}\n\nI have recorded these in health_record.txt in my data folder. Let me know if you would like me to fix these issues.` };
   }
 }

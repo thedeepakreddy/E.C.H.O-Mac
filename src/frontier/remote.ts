@@ -1,12 +1,22 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAppPath } from "../utils/appPath.js";
+import { readVitals } from "./remote-vitals.js";
+import { screenFrame } from "./remote-frame.js";
+import { RelayAgent, CLIENT_IP_HEADER } from "./relay-agent.js";
+import { ChatLog } from "./remote-chat.js";
+import { PasskeyStore } from "./passkeys.js";
+import { appendFileSync, statSync, writeFileSync } from "node:fs";
+import { dataRoot } from "../memory/paths.js";
 import {
   SessionStore, sessionFrom, verifyPassword, hasPassword, getStableToken,
 } from "./remoteauth.js";
 import {
   Signalling, ConfirmRelay, normaliseCommand, type Sdp, type IceCandidate,
 } from "./remotesignal.js";
-import { moveMouse, getMousePosition, click } from "../tools/computer-actions.js";
+import { moveMouseBy, clickHere, hotkey, scroll, typeText } from "../tools/computer-actions.js";
 
 /**
  * Watching a long job from your phone.
@@ -26,10 +36,11 @@ import { moveMouse, getMousePosition, click } from "../tools/computer-actions.js
  *     information a scanner should not get for free.
  *   - The token is new every time it starts. A link you showed someone once
  *     does not work tomorrow.
- *   - It can show you things and STOP things. It cannot start anything, type
- *     anything, or approve anything. Approving a destructive action should
- *     take a deliberate act at the machine itself, not a tap on a phone that
- *     might be in someone else's hand.
+ *   - Control sits behind a password session on top of the link: commands,
+ *     voice, the trackpad and keyboard, approvals, and a short allowlist of
+ *     settings (brain, three voice switches, stopping a task). API keys,
+ *     settings files, agents and quitting Echo are never reachable from here —
+ *     a signed-in phone can still end up in someone else's hand.
  *   - It expires on its own, so forgetting to turn it off is not a permanent
  *     hole in the network.
  */
@@ -96,7 +107,23 @@ export type Route =
   | "voice"
   | "mouse"
   | "log"
+  | "asset"
+  | "status"
+  | "action"
+  | "keys"
+  | "signout-all"
+  | "close"
+  | "frame"
+  | "ping"
+  | "chat"
+  | "chat-voice"
+  | "passkey-options"
+  | "passkey-register"
+  | "passkey-login"
   | "unknown";
+
+/** Files the phone page may load from renderer/remote. Anything else is not a route. */
+export const ASSET_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*\.(?:css|js|png)$/;
 
 export function routeOf(url: string | undefined): Route {
   const path = (url ?? "/").split("?")[0].replace(/\/+$/, "") || "/";
@@ -114,6 +141,19 @@ export function routeOf(url: string | undefined): Route {
   if (path === "/voice") return "voice"; // phone POSTs raw wav audio
   if (path === "/mouse") return "mouse"; // phone POSTs mouse events
   if (path === "/log") return "log"; // phone POSTs client logs
+  if (path === "/status") return "status"; // phone GETs everything its pages show
+  if (path === "/action") return "action"; // phone POSTs one allow-listed control
+  if (path === "/keys") return "keys"; // phone POSTs text or a key chord for the Mac
+  if (path === "/signout-all") return "signout-all";
+  if (path === "/close") return "close";
+  if (path === "/frame") return "frame"; // phone GETs a still of the screen
+  if (path === "/chat") return "chat"; // phone GETs the conversation, POSTs a message
+  if (path === "/chat/voice") return "chat-voice"; // phone POSTs a voice note (wav)
+  if (path === "/passkey/options") return "passkey-options";
+  if (path === "/passkey/register") return "passkey-register";
+  if (path === "/passkey/login") return "passkey-login";
+  if (path === "/ping") return "ping"; // a cheap "are you there?" behind the link token
+  if (path.startsWith("/app/") && ASSET_NAME.test(path.slice(5))) return "asset";
   return "unknown";
 }
 
@@ -160,8 +200,61 @@ export function preferredHost(): { host: string; kind: HostKind } | null {
 const items: FeedItem[] = [];
 let running = false;
 let startedAt = 0;
+/** When the link closes on its own; 0 when it is always on. */
+let expiresAt = 0;
 let token = "";
 let server: any = null;
+/** The loopback listener the relay agent replays phone requests against. */
+let loopServer: any = null;
+let relay: RelayAgent | null = null;
+/** The phone app's permanent address while Echo is connected to it, else null. */
+let relayBase: string | null = null;
+/** Where the phone app is served from: its origin and passkey relying-party id. */
+let appSite: { origin: string; rpId: string } | null = null;
+/** Files live with the link token and password, so tests can point them elsewhere. */
+const remoteDir = () => process.env.JARVIS_REMOTE_DIR || dataRoot();
+let chatLog: ChatLog | null = null;
+let passkeys: PasskeyStore | null = null;
+function chat(): ChatLog { return (chatLog ??= new ChatLog(join(remoteDir(), "remote-chat.json"))); }
+function keys(): PasskeyStore { return (passkeys ??= new PasskeyStore(join(remoteDir(), "remote-passkeys.json"))); }
+
+/** What to do with a chat message from the phone app. Set by the process that owns the brain. */
+let chatHandler: ((text: string, via: "typed" | "voice") => void) | null = null;
+export function setChatHandler(fn: (text: string, via: "typed" | "voice") => void) {
+  chatHandler = fn;
+}
+/** Echo's answer in the chat, from the turn the phone app started. */
+export function chatReply(text: string): void {
+  if (text.trim()) chat().add("echo", text.trim());
+}
+/** Echo stopped without answering (stopped, failed): clear "typing…". */
+export function chatIdle(): void {
+  chatLog?.setTyping(false);
+}
+
+/** Told the full link (with token) when the phone app connects, and null when it drops. */
+let publicUrlListener: ((url: string | null) => void) | null = null;
+export function setPublicUrlListener(fn: (url: string | null) => void) {
+  publicUrlListener = fn;
+}
+
+/** Is the phone app's relay set up, and its full link while Echo is connected to it. */
+export function publicLinkState(): { enabled: boolean; url: string | null } {
+  return { enabled: !!relay, url: running && relayBase ? `${relayBase}/?t=${token}` : null };
+}
+
+/**
+ * The remote's own log, because Echo's console often lives in a terminal
+ * nobody is reading. Small and rolling: cleared once it passes 256 KB.
+ */
+export function remoteLog(line: string): void {
+  try {
+    const file = join(dataRoot(), "remote.log");
+    try { if (statSync(file).size > 256 * 1024) writeFileSync(file, ""); } catch { /* not yet written */ }
+    appendFileSync(file, `${new Date().toISOString()} ${line}\n`, { mode: 0o600 });
+  } catch { /* a log must never break the remote */ }
+}
+
 let expiry: NodeJS.Timeout | null = null;
 let onStop: (() => void) | null = null;
 const badAttempts = new Map<string, number>();
@@ -177,6 +270,85 @@ const confirmRelay = new ConfirmRelay();
 let commandHandler: ((text: string, via: "typed" | "voice") => void) | null = null;
 export function setCommandHandler(fn: (text: string, via: "typed" | "voice") => void) {
   commandHandler = fn;
+}
+
+/**
+ * What the phone's pages show: Echo's state, brain, tasks, projects, voice
+ * settings and the log after `logsAfter`. Set by the process that owns the
+ * brain; this module adds the Mac's vitals and the link's own lifetime.
+ */
+export type StatusProvider = (logsAfter: number) => Record<string, unknown> | Promise<Record<string, unknown>>;
+let statusProvider: StatusProvider | null = null;
+export function setStatusProvider(fn: StatusProvider) {
+  statusProvider = fn;
+}
+
+/**
+ * The controls the phone may use beyond talking and stopping. Deliberately a
+ * short list: brain, three voice switches, and stopping one task. API keys,
+ * settings files, agents and quitting Echo stay at the Mac — a phone can be
+ * picked up by someone else while it is still signed in.
+ */
+export type RemoteAction =
+  | { type: "switch-model"; provider: string }
+  | { type: "set-voice"; key: "ttsEnabled" | "wakeWord" | "bargeIn"; value: boolean }
+  | { type: "stop-mission"; missionId: string }
+  | { type: "open-neural" }
+  /** Only after a fresh Face ID confirmation, checked in the route. */
+  | { type: "power-off" };
+export type ActionHandler = (action: RemoteAction) => Promise<{ ok: boolean; message?: string }>;
+let actionHandler: ActionHandler | null = null;
+export function setActionHandler(fn: ActionHandler) {
+  actionHandler = fn;
+}
+
+/** Validate a phone's action against the allowlist; anything else is null. */
+export function parseRemoteAction(body: any): RemoteAction | null {
+  const type = body?.type;
+  if (type === "switch-model" && typeof body.provider === "string" && /^[a-z]{2,20}$/.test(body.provider)) {
+    return { type, provider: body.provider };
+  }
+  if (type === "set-voice" && ["ttsEnabled", "wakeWord", "bargeIn"].includes(body.key) && typeof body.value === "boolean") {
+    return { type, key: body.key, value: body.value };
+  }
+  if (type === "stop-mission" && typeof body.missionId === "string" && /^[\w.:-]{1,200}$/.test(body.missionId)) {
+    return { type, missionId: body.missionId };
+  }
+  if (type === "open-neural") return { type };
+  if (type === "power-off" && body.assertion && typeof body.assertion === "object") return { type };
+  return null;
+}
+
+/** The key chords the phone's keyboard page offers, and nothing else. */
+export const REMOTE_KEYS: Record<string, [string[], string]> = {
+  "esc": [[], "esc"], "tab": [[], "tab"], "return": [[], "return"], "space": [[], "space"],
+  "delete": [[], "delete"], "arrow-up": [[], "arrow-up"], "arrow-down": [[], "arrow-down"],
+  "arrow-left": [[], "arrow-left"], "arrow-right": [[], "arrow-right"],
+  "cmd+tab": [["cmd"], "tab"], "cmd+c": [["cmd"], "c"], "cmd+v": [["cmd"], "v"], "cmd+z": [["cmd"], "z"],
+};
+/** Longest text the phone may type in one go. */
+export const MAX_TYPED = 500;
+
+/**
+ * Trackpad drags arrive many times a second. Each move is a process spawn, so
+ * deltas pile up here and one worker applies them — a burst becomes one move
+ * instead of a queue of stale ones replaying after the finger has stopped.
+ */
+let pendingMove = { dx: 0, dy: 0 };
+let moving = false;
+function queueMove(dx: number, dy: number): void {
+  pendingMove.dx += dx;
+  pendingMove.dy += dy;
+  if (moving) return;
+  moving = true;
+  void (async () => {
+    while (pendingMove.dx || pendingMove.dy) {
+      const { dx: x, dy: y } = pendingMove;
+      pendingMove = { dx: 0, dy: 0 };
+      await moveMouseBy(x, y).catch(() => {});
+    }
+    moving = false;
+  })();
 }
 
 /** The Mac side (main process) reaches the WebRTC mailbox and the confirm relay through these. */
@@ -211,6 +383,8 @@ export function isRunning(): boolean {
 /** The address to open on the phone, or null when not running. */
 export function remoteUrl(port: number): string | null {
   if (!running) return null;
+  // The phone app reaches the phone from any network, so it wins when connected.
+  if (relayBase) return `${relayBase}/?t=${token}`;
   const pref = preferredHost();
   return pref ? `http://${pref.host}:${port}/?t=${token}` : null;
 }
@@ -244,458 +418,33 @@ export function resetAttempts(): void {
   badAttempts.clear();
 }
 
+/** Where the phone app's files live: renderer/remote, beside the other windows. */
+export function remoteAssetDir(): string {
+  return join(getAppPath(), "renderer", "remote");
+}
+
 /**
- * The whole phone app, in one self-contained page.
+ * The phone app's page, with the link token baked in.
  *
- * Login first, then a live view of the Mac's screen over WebRTC, a push-to-talk
- * mic, a box to send commands, the action feed, and — because the phone has
- * full control — Approve / Deny buttons for anything irreversible Jarvis is
- * about to do. No external anything: the WebRTC uses only host candidates,
- * which is all that is needed over Tailscale or a shared LAN.
+ * Login first — the live reactor and a password — then five pages: Core,
+ * Screen, Work, Feed and System. The markup, stylesheet, script and reactor
+ * art are files in renderer/remote, served under /app/ behind the same link
+ * token as the page; nothing is loaded from anywhere else. The token goes into
+ * every URL so the phone never has to retype it. It is hex, so it cannot break
+ * out of the attributes it is written into.
  */
 export function renderPage(tok: string): string {
-  const T = JSON.stringify(tok);
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Echo</title>
-<style>
-  :root {
-    color-scheme: dark;
-    --bg: #000000;
-    --surface: rgba(28, 28, 30, 0.7);
-    --surface-solid: #1c1c1e;
-    --text: #ffffff;
-    --text-dim: #98989d;
-    --accent: #0a84ff;
-    --danger: #ff453a;
-    --border: rgba(255, 255, 255, 0.15);
-    --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; width: 100%; overflow: hidden; touch-action: pan-y; margin: 0; }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font: 15px/1.4 var(--font);
-    display: flex; flex-direction: column;
-    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
-  }
-  
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes fadein { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-
-  button {
-    font-family: var(--font); font-size: 15px; font-weight: 600;
-    border-radius: 14px; border: none;
-    background: var(--accent); color: #fff;
-    padding: 14px 20px; cursor: pointer;
-    transition: transform 0.15s, opacity 0.15s;
-  }
-  button:active { transform: scale(0.96); opacity: 0.8; }
-  .danger { background: var(--danger); }
-  .secondary { background: var(--surface-solid); border: 1px solid var(--border); color: var(--text); }
-  
-  #login { 
-    display: flex; flex-direction: column; justify-content: space-between; 
-    height: 100%; padding: 40px 24px; animation: fadein 0.6s ease-out; 
-  }
-  .login-top { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  .login-top .mark { width: 80px; height: 80px; margin-bottom: 24px; position: relative; }
-  .login-top .mark svg { width: 100%; height: 100%; }
-  .login-top .mark .ring { animation: spin 8s linear infinite; transform-origin: 50% 50%; }
-  .login-top h2 { font-size: 34px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.02em; }
-  .login-top p { font-size: 16px; color: var(--text-dim); margin: 0; }
-  .login-bottom { width: 100%; max-width: 400px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
-  #login input {
-    width: 100%; padding: 18px; font-size: 17px; font-family: var(--font);
-    border-radius: 14px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); text-align: center;
-    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  }
-  #login input:focus { outline: none; border-color: var(--accent); }
-  #err { color: var(--danger); text-align: center; font-size: 13px; height: 16px; }
-
-  #app { display: none; flex-direction: column; height: 100%; animation: fadein 0.5s ease-out; }
-  header {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 12px 20px; border-bottom: 1px solid var(--border);
-    background: rgba(0,0,0,0.6); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    z-index: 10;
-  }
-  .header-left { display: flex; align-items: center; gap: 10px; }
-  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
-  header button { padding: 8px 16px; font-size: 13px; border-radius: 20px; }
-
-  #stage {
-    position: relative; background: #000; aspect-ratio: 16/10;
-    margin: 16px; border-radius: 16px; overflow: hidden;
-    border: 1px solid var(--border);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    flex-shrink: 0;
-  }
-  #screen { width: 100%; height: 100%; object-fit: contain; }
-  #novid { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); }
-
-  #mouse-pad {
-    display: flex; align-items: center; justify-content: space-between;
-    margin: 0 16px 16px; padding: 20px;
-    background: var(--surface); border-radius: 20px; border: 1px solid var(--border);
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    flex-shrink: 0;
-  }
-  .dpad {
-    display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 6px;
-  }
-  .dbtn {
-    background: var(--surface-solid); border: 1px solid var(--border); border-radius: 12px;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--text); font-size: 20px; cursor: pointer; transition: 0.1s;
-    user-select: none; -webkit-user-select: none;
-  }
-  .dbtn:active { background: var(--accent); transform: scale(0.92); }
-  .dbtn.up { grid-column: 2; grid-row: 1; }
-  .dbtn.left { grid-column: 1; grid-row: 2; }
-  .dbtn.down { grid-column: 2; grid-row: 3; }
-  .dbtn.right { grid-column: 3; grid-row: 2; }
-  
-  .click-pad {
-    display: flex; flex-direction: column; gap: 12px; align-items: stretch; flex: 1; margin-left: 24px;
-  }
-  .click-btn {
-    background: var(--surface-solid); border: 1px solid var(--border); border-radius: 14px;
-    padding: 14px; font-weight: 500; text-align: center; color: var(--text);
-    user-select: none; -webkit-user-select: none;
-  }
-  .click-btn:active { background: var(--accent); transform: scale(0.96); }
-
-  #feed-wrap { flex: 1; overflow-y: auto; padding: 0 16px; position: relative; }
-  ol { list-style: none; margin: 0; padding: 0 0 20px; }
-  li {
-    padding: 12px 16px; margin-bottom: 8px; border-radius: 14px;
-    background: rgba(255,255,255,0.05); border: 1px solid transparent;
-    display: flex; flex-direction: column; gap: 4px;
-  }
-  li.user { background: rgba(10, 132, 255, 0.1); border-color: rgba(10, 132, 255, 0.2); }
-  li.stop { border-color: rgba(255, 69, 58, 0.3); }
-  li span { color: var(--text-dim); font-size: 14px; }
-  li.user span { color: var(--text); }
-  time { color: var(--text-dim); font-size: 11px; align-self: flex-end; }
-  #empty { text-align: center; color: var(--text-dim); font-size: 13px; margin-top: 40px; }
-
-  #cmdform {
-    padding: 12px 16px 24px;
-    background: rgba(28, 28, 30, 0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border-top: 1px solid var(--border);
-    display: flex; gap: 10px; flex-shrink: 0;
-  }
-  #cmd {
-    flex: 1; padding: 14px 18px; font-size: 15px; font-family: var(--font);
-    border-radius: 20px; border: 1px solid var(--border);
-    background: #000; color: var(--text);
-  }
-  #cmd:focus { outline: none; border-color: var(--accent); }
-  #cmdform button { flex: none; border-radius: 20px; padding: 14px 22px; }
-
-  #confirm {
-    display: none; position: absolute; bottom: 90px; left: 16px; right: 16px; z-index: 20;
-    padding: 20px; border-radius: 16px; background: rgba(44, 44, 46, 0.95);
-    backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
-    border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-  }
-  #confirm p { margin: 0 0 16px; font-weight: 500; font-size: 15px; }
-  .row { display: flex; gap: 12px; }
-  .row button { flex: 1; }
-</style>
-</head>
-<body>
-
-<div id="login">
-  <div class="login-top">
-    <div class="mark">
-      <svg viewBox="0 0 60 60" fill="none">
-        <circle cx="30" cy="30" r="28" style="stroke:rgba(255,255,255,0.15)" stroke-width="1.5"/>
-        <g class="ring"><circle cx="30" cy="30" r="22" style="stroke:var(--accent)" stroke-width="2" stroke-dasharray="1.5 8" opacity="0.8"/></g>
-        <circle cx="30" cy="30" r="13" style="stroke:var(--accent)" stroke-width="1.5" opacity="0.6"/>
-        <circle cx="30" cy="30" r="4.5" style="fill:var(--text)"/>
-      </svg>
-    </div>
-    <h2>Echo</h2>
-    <p>Remote Access</p>
-  </div>
-  <div class="login-bottom">
-    <div id="err"></div>
-    <input id="pw" type="password" placeholder="Enter Password" autocomplete="current-password" enterkeyhint="go">
-    <button id="signin">Log In</button>
-  </div>
-</div>
-
-<div id="app">
-  <header>
-    <div class="header-left">
-      <span id="dot"></span>
-      <h1>Echo</h1>
-    </div>
-    <button id="talk" class="secondary">Hold to Talk</button>
-  </header>
-
-  <div id="stage">
-    <video id="screen" autoplay playsinline muted></video>
-    <div id="novid">Connecting to screen...</div>
-  </div>
-  <audio id="macaudio" autoplay></audio>
-
-  <div id="mouse-pad">
-    <div class="dpad">
-      <div class="dbtn up" onmousedown="m('up')" ontouchstart="event.preventDefault(); m('up')">↑</div>
-      <div class="dbtn left" onmousedown="m('left')" ontouchstart="event.preventDefault(); m('left')">←</div>
-      <div class="dbtn down" onmousedown="m('down')" ontouchstart="event.preventDefault(); m('down')">↓</div>
-      <div class="dbtn right" onmousedown="m('right')" ontouchstart="event.preventDefault(); m('right')">→</div>
-    </div>
-    <div class="click-pad">
-      <div class="click-btn" onmousedown="m('click')" ontouchstart="event.preventDefault(); m('click')">Left Click</div>
-      <div class="click-btn" onmousedown="m('rclick')" ontouchstart="event.preventDefault(); m('rclick')">Right Click</div>
-      <button id="stop" class="danger" style="margin-top: 4px;">Stop</button>
-    </div>
-  </div>
-
-  <div id="confirm">
-    <p id="ctext"></p>
-    <div class="row">
-      <button id="deny" class="secondary">Deny</button>
-      <button id="approve">Approve</button>
-    </div>
-  </div>
-
-  <div id="feed-wrap">
-    <ol id="feed"></ol>
-    <div id="empty">No activity yet.</div>
-  </div>
-
-  <form id="cmdform">
-    <input id="cmd" placeholder="Message Echo..." enterkeyhint="send">
-    <button type="submit">Send</button>
-  </form>
-</div>
-
-<script>
-(function(){
-  var T = ${T};
-  var sess = localStorage.getItem('js_sess') || '';
-  var q = function(id){ return document.getElementById(id); };
-  var u = function(path){ return path + (path.indexOf('?')<0?'?':'&') + 't=' + T + (sess ? '&s=' + sess : ''); };
-  var time = function(ms){ return new Date(ms).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); };
-  window.onerror = function(msg, url, line, col, error) {
-    fetch(u('/log'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ msg: msg, line: line, col: col }) }).catch(function(){});
-  };
-
-  window.m = function(action) {
-    fetch(u('/mouse'), { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({action:action}) }).catch(function(){});
-  };
-
-  q('signin').onclick = signin;
-  q('pw').addEventListener('keydown', function(e){ if(e.key==='Enter') signin(); });
-  function signin(){
-    var pw = q('pw').value;
-    q('err').textContent = '';
-    fetch(u('/login'), { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({password:pw}) })
-      .then(function(r){ if(r.ok) return r.json(); throw r.status; })
-      .then(function(d){
-        sess = d.s || '';
-        localStorage.setItem('js_sess', sess);
-        q('login').style.display='none';
-        q('app').style.display='flex';
-        start();
-      })
-      .catch(function(s){ q('err').textContent = s===401 ? 'Wrong password.' : 'Could not sign in.'; });
-  }
-
-  var feed, empty, next=0, pc=null, micTrack=null, connected=false;
-  function start(){
-    feed = q('feed'); empty = q('empty');
-    q('stop').onclick = function(e){ e.preventDefault(); fetch(u('/stop'), {method:'POST'}).catch(function(){}); };
-    q('cmdform').onsubmit = function(e){ e.preventDefault(); sendCommand(); };
-    setupTalk();
-    connectRTC();
-    pollEvents();
-    setInterval(pollEvents, 1500);
-    pollConfirm();
-    setInterval(pollConfirm, 1200);
-    fetch(u('/log'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ msg: 'Phone UI started successfully', line: 0, col: 0 }) }).catch(function(){});
-  }
-
-  function sendCommand(){
-    var box = q('cmd');
-    var text = box.value.trim();
-    if(!text) return;
-    box.value='';
-    fetch(u('/command'), { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:text, via:'typed'}) }).catch(function(){});
-  }
-
-  function setupTalk(){
-    var btn = q('talk');
-    if (!btn) return;
-    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    var recognition = SR ? new SR() : null;
-    var finalTranscript = '';
-    if (recognition) {
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.onresult = function(event) {
-        finalTranscript = '';
-        for (var i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
-        }
-      };
-      recognition.onend = function() {
-        if (finalTranscript.trim()) {
-          var text = finalTranscript.trim();
-          fetch(u('/command'), { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:text, via:'voice'}) }).catch(function(){});
-        }
-        finalTranscript = '';
-      };
-    }
-    var audioCtx = null, mediaStream = null, scriptNode = null, pcmData = [];
-    var press = function(on){
-      if (recognition) {
-        if (on) { finalTranscript = ''; try { recognition.start(); } catch(e){} }
-        else { try { recognition.stop(); } catch(e){} }
-      } else {
-        if(on) {
-          navigator.mediaDevices.getUserMedia({ audio:true, video:false }).then(function(stream){
-            mediaStream = stream;
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-            var source = audioCtx.createMediaStreamSource(stream);
-            scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
-            scriptNode.onaudioprocess = function(e){ pcmData.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
-            source.connect(scriptNode);
-            scriptNode.connect(audioCtx.destination);
-          }).catch(function(){});
-        } else if (scriptNode) {
-          scriptNode.disconnect();
-          mediaStream.getTracks().forEach(function(t){ t.stop(); });
-          var length = 0;
-          for (var p=0; p<pcmData.length; p++) length += pcmData[p].length;
-          var wavBuffer = new Int16Array(length);
-          var offset = 0;
-          for (var p=0; p<pcmData.length; p++) {
-            for (var i = 0; i < pcmData[p].length; i++) {
-              var s = Math.max(-1, Math.min(1, pcmData[p][i]));
-              wavBuffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-          }
-          pcmData = [];
-          var buffer = new ArrayBuffer(44 + wavBuffer.length * 2);
-          var view = new DataView(buffer);
-          var ws = function(v, o, s) { for (var i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-          ws(view, 0, 'RIFF'); view.setUint32(4, 36 + wavBuffer.length * 2, true); ws(view, 8, 'WAVE');
-          ws(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-          view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-          ws(view, 36, 'data'); view.setUint32(40, wavBuffer.length * 2, true);
-          var dataOffset = 44;
-          for (var i = 0; i < wavBuffer.length; i++, dataOffset+=2) view.setInt16(dataOffset, wavBuffer[i], true);
-          fetch(u('/voice'), { method: "POST", body: buffer }).catch(function(){});
-          scriptNode = null;
-        }
-      }
-      btn.style.opacity = on ? '0.6' : '1';
-      btn.textContent = on ? (recognition ? 'Listening…' : 'Recording…') : 'Hold to Talk';
-    };
-    btn.addEventListener('touchstart', function(e){ e.preventDefault(); press(true); }, {passive:false});
-    btn.addEventListener('touchend', function(e){ e.preventDefault(); press(false); }, {passive:false});
-    btn.addEventListener('mousedown', function(){ press(true); });
-    btn.addEventListener('mouseup', function(){ press(false); });
-    btn.addEventListener('mouseleave', function(){ press(false); });
-  }
-
-  function connectRTC(){
-    pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-    pc.ontrack = function(ev){
-      var stream = ev.streams[0];
-      if(ev.track.kind === 'video'){ q('screen').srcObject = stream; q('novid').style.display='none'; }
-      else { q('macaudio').srcObject = stream; }
-    };
-    pc.onicecandidate = function(ev){
-      if(ev.candidate){ fetch(u('/rtc/ice'), {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({candidate:ev.candidate})}).catch(function(){}); }
-    };
-    pc.onconnectionstatechange = function(){
-      connected = pc.connectionState === 'connected';
-      if(pc.connectionState === 'failed'){ setTimeout(connectRTC, 2000); }
-    };
-    pc.addTransceiver('audio', {direction:'recvonly'});
-    pc.addTransceiver('video', {direction:'recvonly'});
-    negotiate();
-  }
-
-  function negotiate(){
-    pc.createOffer().then(function(offer){ return pc.setLocalDescription(offer); }).then(function(){
-      return fetch(u('/rtc/offer'), {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({sdp:{type:pc.localDescription.type, sdp:pc.localDescription.sdp}})});
-    }).then(function(){ pollAnswer(); }).catch(function(){});
-  }
-
-  var answered = false;
-  function pollAnswer(){
-    fetch(u('/rtc/answer')).then(function(r){ return r.json(); }).then(function(d){
-      if(d.answer && !answered){ answered = true; pc.setRemoteDescription(d.answer); }
-      if(d.ice && d.ice.length){ d.ice.forEach(function(c){ pc.addIceCandidate(c).catch(function(){}); }); }
-      if(!connected) setTimeout(pollAnswer, 1000);
-    }).catch(function(){ if(!connected) setTimeout(pollAnswer, 1000); });
-  }
-
-  function pollEvents(){
-    fetch(u('/events?since='+next)).then(function(r){
-      if(r.status === 401) { localStorage.removeItem('js_sess'); location.reload(); }
-      return r.json();
-    }).then(function(d){
-      if(!d || !d.items) return;
-      next = d.nextIndex;
-      d.items.forEach(function(it){
-        var li = document.createElement('li');
-        var isUser = String(it.line || '').indexOf('You (phone)') === 0;
-        li.className = (it.kind === 'stop' ? 'stop' : (it.kind === 'go' ? 'go' : (isUser ? 'user' : '')));
-        // Scaffold with a fixed literal, then set the text with textContent so a
-        // filename or a message on screen can never inject markup into the phone.
-        li.innerHTML = '<time></time><span></span>';
-        li.querySelector('time').textContent = time(it.at);
-        li.querySelector('span').textContent = it.line;
-        feed.appendChild(li);
-        empty.style.display='none';
-        q('feed-wrap').scrollTop = feed.scrollHeight;
-      });
-    }).catch(function(){});
-  }
-
-  function pollConfirm(){
-    // Poll /pending for the question to SHOW; POST the answer to /confirm.
-    // (These are two different routes: earlier the client polled /confirm, which
-    // only accepts POST, so prompts never appeared and Approve never registered.)
-    fetch(u('/pending')).then(function(r){ return r.json(); }).then(function(d){
-      var box = q('confirm');
-      var c = d && d.pending;
-      if (!c || !c.id) { box.style.display='none'; return; }
-      box.style.display='block';
-      q('ctext').textContent = c.prompt;
-      var act = function(approved){ fetch(u('/confirm'), {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({id:c.id, approved:approved})}).then(function(){ box.style.display='none'; }).catch(function(){}); };
-      q('approve').onclick = function(){ act(true); };
-      q('deny').onclick = function(){ act(false); };
-    }).catch(function(){});
-  }
-
-  function escape(t){ return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  
-  if (sess) {
-    q('login').style.display = 'none';
-    q('app').style.display = 'flex';
-    start();
-  }
-})();
-</script>
-</body>
-</html>`;
+  if (!/^[0-9a-f]+$/.test(tok)) throw new Error("Invalid link token.");
+  const file = join(remoteAssetDir(), "index.html");
+  if (!existsSync(file)) return "<!doctype html><title>Echo</title><p>The phone app files are missing from this install.</p>";
+  return readFileSync(file, "utf8").replaceAll("__T__", tok);
 }
+
+const ASSET_TYPES: Record<string, string> = {
+  css: "text/css; charset=utf-8",
+  js: "text/javascript; charset=utf-8",
+  png: "image/png",
+};
 
 // ---- the server -----------------------------------------------------------
 
@@ -748,12 +497,15 @@ export async function startRemote(opts: {
   port?: number;
   ttlMs?: number;
   onStop?: () => void;
+  /** The phone app's relay (echo-remote on Render): reachable from any network. */
+  relay?: { url: string; secret: string };
 } = {}): Promise<StartResult> {
   if (running) {
     return { ok: true, url: remoteUrl(currentPort) ?? undefined, message: "The remote is already running." };
   }
   const pref = preferredHost();
-  if (!pref) {
+  const useRelay = !!(opts.relay?.url && opts.relay.secret);
+  if (!pref && !useRelay) {
     return { ok: false, message: "I can't find a network address — is this machine on Wi-Fi or Tailscale?" };
   }
   // Full control from a phone with no password is a door with no lock. Refuse.
@@ -777,10 +529,20 @@ export async function startRemote(opts: {
   signalling.reset();
   confirmRelay.cancel();
 
-  server = http.createServer((req: any, res: any) => {
-    const ip = req.socket?.remoteAddress ?? "?";
+  const handle = (req: any, res: any) => {
+    // Through the phone app every request is replayed by the relay agent on
+    // the loopback, and the phone's real address rides in a header. That
+    // header is believed only on the loopback listener: on the LAN listener
+    // anyone could send it to dodge the lockout.
+    const forwarded = /127\.0\.0\.1$/.test(req.socket?.localAddress ?? "") ? req.headers?.[CLIENT_IP_HEADER] : undefined;
+    const viaApp = typeof forwarded === "string" && forwarded.length > 0;
+    const ip = viaApp ? forwarded : req.socket?.remoteAddress ?? "?";
     const route = routeOf(req.url);
-    console.log(`[jarvis] HTTP ${req.method} ${req.url} -> route=${route}`);
+    // The path only: the query carries the link token and the session, which
+    // do not belong in a log. Polls are left out, or they would bury the rest.
+    if (!["status", "confirm-poll", "events", "rtc-answer", "frame", "asset", "mouse"].includes(route)) {
+      console.log(`[jarvis] HTTP ${req.method} ${(req.url ?? "").split("?")[0]} -> route=${route}${viaApp ? " (phone app)" : ""}`);
+    }
 
     // Never let a page on another site drive this, and never let it be framed.
     const secure = {
@@ -789,7 +551,7 @@ export async function startRemote(opts: {
       "cache-control": "no-store",
       "connection": "close",
       "content-security-policy":
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self'",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self'",
     };
 
     // Anything without the right LINK TOKEN is indistinguishable from a path
@@ -813,6 +575,25 @@ export async function startRemote(opts: {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...secure });
       return res.end(renderPage(token));
     }
+    if (route === "asset") {
+      // The login screen needs its stylesheet, script and reactor before any
+      // password, so assets sit behind the link token only. ASSET_NAME already
+      // refused anything with a slash or a dot-dot in it.
+      const name = (req.url ?? "").split("?")[0].slice("/app/".length);
+      const file = join(remoteAssetDir(), name);
+      if (req.method !== "GET" || !existsSync(file)) return deny();
+      res.writeHead(200, {
+        "content-type": ASSET_TYPES[name.split(".").pop()!] ?? "application/octet-stream",
+        ...secure,
+        "cache-control": "private, max-age=3600",
+      });
+      return res.end(readFileSync(file));
+    }
+    if (route === "ping") {
+      // Token-gated like everything else, so it reveals nothing without the link.
+      res.writeHead(204, secure);
+      return res.end();
+    }
     if (route === "login") {
       if (req.method !== "POST") return deny();
       return readJsonBody(req, (body) => {
@@ -822,12 +603,48 @@ export async function startRemote(opts: {
           noteBadAttempt(ip);
           return json({ ok: false }, 401);
         }
-        const s = sessions.issue(ip);
-        badAttempts.delete(ip); // a correct password clears this address's strikes
-        record("A phone signed in", "go");
-        return json({ ok: true, s }, 200, {
-          "set-cookie": `js=${s}; Path=/; HttpOnly; SameSite=Strict`,
-        });
+        return signIn("password");
+      });
+    }
+    // Bound to the address on a LAN, where it stays put. Not through the phone
+    // app: a phone on mobile data changes address between cell towers, and
+    // https already keeps the session from being sniffed.
+    function signIn(how: string) {
+      const s = sessions.issue(viaApp ? "?" : ip);
+      badAttempts.delete(ip); // a correct sign-in clears this address's strikes
+      record(how === "faceid" ? "A phone signed in with Face ID" : "A phone signed in", "go");
+      return json({ ok: true, s }, 200, {
+        "set-cookie": `js=${s}; Path=/; HttpOnly; SameSite=Strict${viaApp ? "; Secure" : ""}`,
+      });
+    }
+    // ---- Face ID (passkeys): only through the phone app, which is https ----
+    if (route === "passkey-options" || route === "passkey-login" || route === "passkey-register") {
+      if (!appSite) return json({ error: "Face ID works in the Echo app, not on this link." }, 400);
+      const site = appSite;
+      const signedIn = sessions.valid(sessionFrom(req.headers?.cookie, req.url), ip);
+      if (route === "passkey-options") {
+        const purpose = new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("purpose");
+        if (purpose !== "login" && purpose !== "register" && purpose !== "confirm") return json({ error: "purpose?" }, 400);
+        // Registering a new Face ID, or confirming an action, needs you signed in already.
+        if (purpose !== "login" && !signedIn) return json({ error: "unauthorized" }, 401);
+        if (purpose !== "register" && keys().count === 0) return json({ error: "Face ID isn't set up yet. Sign in with your password, then turn it on in Settings." }, 409);
+        return json(keys().options(purpose, site.rpId));
+      }
+      if (req.method !== "POST") return deny();
+      return readJsonBody(req, (body) => {
+        try {
+          if (route === "passkey-register") {
+            if (!signedIn) return json({ error: "unauthorized" }, 401);
+            keys().register(body?.credential, site.origin, site.rpId, String(body?.name ?? "iPhone"));
+            record("Face ID turned on for a phone", "go");
+            return json({ ok: true, count: keys().count });
+          }
+          keys().verify(body?.credential, site.origin, site.rpId, "login");
+          return signIn("faceid");
+        } catch (e: any) {
+          if (route === "passkey-login") noteBadAttempt(ip);
+          return json({ ok: false, error: String(e?.message ?? e) }, 401);
+        }
       });
     }
 
@@ -863,32 +680,148 @@ export async function startRemote(opts: {
     if (route === "mouse") {
       if (req.method !== "POST") return deny();
       return readJsonBody(req, async (body) => {
-
         try {
           const action = body?.action;
-          if (action === "click") {
-            const pos = await getMousePosition();
-            const [x, y] = pos.split(",").map(Number);
-            await click(x, y, "left");
-          } else if (action === "rclick") {
-            const pos = await getMousePosition();
-            const [x, y] = pos.split(",").map(Number);
-            await click(x, y, "right");
-          } else {
-            const pos = await getMousePosition();
-            let [x, y] = pos.split(",").map(Number);
-            const delta = 40;
-            if (action === "up") y -= delta;
-            else if (action === "down") y += delta;
-            else if (action === "left") x -= delta;
-            else if (action === "right") x += delta;
-            await moveMouse(x, y);
-          }
+          const step = (n: unknown) => Math.max(-400, Math.min(400, Number(n) || 0));
+          if (action === "move") queueMove(step(body.dx), step(body.dy));
+          else if (action === "click") await clickHere("left");
+          else if (action === "rclick") await clickHere("right");
+          else if (action === "dclick") await clickHere("double");
+          else if (action === "scroll-up" || action === "scroll-down") await scroll(action === "scroll-up" ? "up" : "down", 3);
+          // The arrow pad of the old page, kept so a stale tab keeps working.
+          else if (action === "up") queueMove(0, -40);
+          else if (action === "down") queueMove(0, 40);
+          else if (action === "left") queueMove(-40, 0);
+          else if (action === "right") queueMove(40, 0);
+          else return json({ ok: false }, 400);
           return json({ ok: true });
-        } catch (e) {
+        } catch {
           return json({ ok: false }, 500);
         }
       });
+    }
+    if (route === "keys") {
+      if (req.method !== "POST") return deny();
+      return readJsonBody(req, async (body) => {
+        try {
+          if (typeof body?.text === "string") {
+            const text = body.text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+            if (!text || text.length > MAX_TYPED) return json({ ok: false, reason: `Type 1–${MAX_TYPED} characters.` }, 400);
+            await typeText(text);
+            record(`Typed ${text.length} characters on the Mac from your phone`, "go");
+            return json({ ok: true });
+          }
+          const chord = REMOTE_KEYS[String(body?.key ?? "")];
+          if (!chord) return json({ ok: false }, 400);
+          await hotkey(chord[0], chord[1]);
+          return json({ ok: true });
+        } catch {
+          return json({ ok: false }, 500);
+        }
+      });
+    }
+    if (route === "status") {
+      const after = Number(new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("logs") ?? "0");
+      void (async () => {
+        try {
+          const [core, vitals] = await Promise.all([
+            Promise.resolve(statusProvider?.(Number.isFinite(after) ? after : 0) ?? {}),
+            readVitals(),
+          ]);
+          json({ ...core, vitals, remote: { startedAt, expiresAt: expiresAt || null, host: preferredHost()?.kind ?? null },
+            faceId: { available: !!appSite, registered: appSite ? keys().count : 0 } });
+        } catch (e: any) {
+          json({ error: String(e?.message ?? e) }, 500);
+        }
+      })();
+      return;
+    }
+    if (route === "action") {
+      if (req.method !== "POST") return deny();
+      return readJsonBody(req, async (body) => {
+        const action = parseRemoteAction(body);
+        if (!action || !actionHandler) return json({ ok: false, message: "That control isn't available from the phone." }, 400);
+        // Powering Echo off needs Face ID right now, not just a signed-in phone:
+        // a phone left unlocked on a table should not be able to switch it off.
+        if (action.type === "power-off") {
+          if (!appSite) return json({ ok: false, message: "Power off needs Face ID in the Echo app." }, 403);
+          try { keys().verify(body.assertion, appSite.origin, appSite.rpId, "confirm"); }
+          catch (e: any) { return json({ ok: false, message: String(e?.message ?? e) }, 403); }
+        }
+        try {
+          const result = await actionHandler(action);
+          record(`Phone: ${action.type}${result.message ? ` — ${result.message}` : ""}`, result.ok ? "go" : "stop");
+          return json(result);
+        } catch (e: any) {
+          return json({ ok: false, message: String(e?.message ?? e) }, 500);
+        }
+      });
+    }
+    if (route === "chat") {
+      if (req.method === "GET") {
+        const since = Number(new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("since") ?? "0");
+        return json({ messages: chat().since(Number.isFinite(since) ? since : 0), typing: chat().typing() });
+      }
+      if (req.method !== "POST") return deny();
+      return readJsonBody(req, (body) => {
+        const norm = normaliseCommand(body?.text);
+        if (!norm.ok) return json({ ok: false, reason: norm.reason }, 400);
+        const message = chat().add("you", norm.text);
+        chat().setTyping(true);
+        try { chatHandler?.(norm.text, "typed"); } catch { /* a bad message must not crash the server */ }
+        return json({ ok: true, message });
+      });
+    }
+    if (route === "chat-voice") {
+      if (req.method !== "POST") return deny();
+      const chunks: Buffer[] = [];
+      let size = 0;
+      req.on("data", (c: Buffer) => { size += c.length; if (size <= 12 * 1024 * 1024) chunks.push(c); });
+      req.on("end", async () => {
+        if (size > 12 * 1024 * 1024) return json({ ok: false, error: "That voice note is too long." }, 413);
+        const { tmpdir } = await import("node:os");
+        const { writeFileSync: write, unlinkSync } = await import("node:fs");
+        const wavPath = join(tmpdir(), `remote-chat-${Date.now()}.wav`);
+        try {
+          write(wavPath, Buffer.concat(chunks));
+          const { transcribe } = await import("../voice/stt.js");
+          const { activeConfig } = await import("../config.js");
+          const text = (await transcribe(wavPath, activeConfig(getAppPath()))).trim();
+          if (!text) return json({ ok: false, error: "I couldn't hear anything in that." }, 422);
+          const message = chat().add("you", text, "voice");
+          chat().setTyping(true);
+          try { chatHandler?.(text, "voice"); } catch { /* keep serving */ }
+          return json({ ok: true, message });
+        } catch (e: any) {
+          return json({ ok: false, error: String(e?.message ?? e) }, 500);
+        } finally {
+          try { unlinkSync(wavPath); } catch { /* already gone */ }
+        }
+      });
+      return;
+    }
+    if (route === "frame") {
+      if (req.method !== "GET") return deny();
+      void screenFrame()
+        .then((jpeg) => {
+          res.writeHead(200, { "content-type": "image/jpeg", ...secure });
+          res.end(jpeg);
+        })
+        .catch((e: any) => json({ error: String(e?.message ?? e) }, 503));
+      return;
+    }
+    if (route === "signout-all") {
+      if (req.method !== "POST") return deny();
+      sessions.revokeAll();
+      record("Every phone was signed out", "stop");
+      return json({ ok: true });
+    }
+    if (route === "close") {
+      if (req.method !== "POST") return deny();
+      record("Remote closed from your phone", "stop");
+      json({ ok: true });
+      setTimeout(() => void stopRemote(), 150);
+      return;
     }
     if (route === "command") {
       if (req.method !== "POST") return deny();
@@ -920,8 +853,8 @@ export async function startRemote(opts: {
         writeFileSync(wavPath, wav);
         try {
           const { transcribe } = await import("../voice/stt.js");
-          const { loadConfig } = await import("../config.js");
-          const text = await transcribe(wavPath, loadConfig(getAppPath()));
+          const { activeConfig } = await import("../config.js");
+          const text = await transcribe(wavPath, activeConfig(getAppPath()));
           if (text) {
             record(`You (phone): ${text}`, "go");
             try { commandHandler?.(text, "voice"); } catch {}
@@ -970,12 +903,24 @@ export async function startRemote(opts: {
       });
     }
     return deny();
-  });
+  };
+  // The LAN or Tailscale listener, bound to that one address rather than every
+  // interface, and with the phone app a second one on the loopback for the
+  // relay agent to replay requests against. Nothing listens anywhere else.
+  server = pref ? http.createServer(handle) : null;
+  loopServer = useRelay ? http.createServer(handle) : null;
 
   currentPort = port;
   return new Promise<StartResult>((resolve) => {
-    server.once("error", (err: any) => {
+    const listeners = [server, loopServer].filter(Boolean);
+    let waiting = listeners.length;
+    let failed = false;
+    const fail = (err: any) => {
+      if (failed) return;
+      failed = true;
       running = false;
+      for (const l of listeners) { try { l.close(); } catch { /* not listening */ } }
+      server = loopServer = null;
       resolve({
         ok: false,
         message:
@@ -983,29 +928,43 @@ export async function startRemote(opts: {
             ? `Port ${port} is already in use.`
             : `I couldn't start the remote: ${err?.message ?? err}`,
       });
-    });
-    // Bound to the chosen address (Tailscale or LAN) rather than every
-    // interface, so it is reachable from the phone without also listening
-    // anywhere it need not.
-    server.listen(port, pref.host, () => {
+    };
+    const ready = async () => {
+      if (failed || --waiting > 0) return;
       running = true;
       startedAt = Date.now();
       const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
       // ttl of 0 means "always on" — no auto-close. Otherwise, forgetting to
       // turn it off must not leave a port open indefinitely.
       expiry = ttl > 0 ? setTimeout(() => void stopRemote(), ttl) : null;
+      expiresAt = ttl > 0 ? Date.now() + ttl : 0;
       record("Remote opened", "go");
-      const reach =
-        pref.kind === "tailscale"
-          ? "Open this on your phone from anywhere (both on your Tailscale)"
-          : "Open this on your phone (same Wi-Fi — install Tailscale on both to reach it from anywhere)";
+      if (useRelay) {
+        const site = new URL(opts.relay!.url);
+        appSite = { origin: site.origin, rpId: site.hostname };
+        relay = new RelayAgent(opts.relay!.url, opts.relay!.secret, `http://127.0.0.1:${port}`, (connected) => {
+          relayBase = connected ? relay!.base : null;
+          record(connected ? "Phone app connected" : "Phone app disconnected — reconnecting", connected ? "go" : "stop");
+          try { publicUrlListener?.(connected ? `${relay!.base}/?t=${token}` : null); } catch { /* a listener must not break the agent */ }
+        }, remoteLog);
+        relay.start();
+      }
       const life = ttl > 0 ? "Reopen the remote if it's been closed." : "It stays on, even across restarts.";
+      const reach = useRelay
+        ? `Open your Echo app (${opts.relay!.url.replace(/\/+$/, "")}) on your phone from any network`
+        : pref?.kind === "tailscale"
+          ? "Open this on your phone from anywhere (both on your Tailscale)"
+          : "Open this on your phone (same Wi-Fi)";
+      const lasting = "This link is permanent — save it on your phone and sign in with your password any time.";
       resolve({
         ok: true,
         url: remoteUrl(port) ?? undefined,
-        message: `${reach}: ${remoteUrl(port)}\nThis link is permanent — save it on your phone and sign in with your password any time. ${life}`,
+        message: `${reach}: ${remoteUrl(port)}\n${lasting} ${life}`,
       });
-    });
+    };
+    for (const l of listeners) l.once("error", fail);
+    server?.listen(port, pref!.host, ready);
+    loopServer?.listen(port, "127.0.0.1", ready);
   });
 }
 
@@ -1018,6 +977,7 @@ export async function stopRemote(): Promise<string> {
     clearTimeout(expiry);
     expiry = null;
   }
+  expiresAt = 0;
   // A new token next time, so the old link is dead the moment this closes.
   token = "";
   onStop = null;
@@ -1026,16 +986,22 @@ export async function stopRemote(): Promise<string> {
   sessions.revokeAll();
   signalling.reset();
   confirmRelay.cancel();
-  await new Promise<void>((resolve) => {
+  relay?.stop();
+  relay = null;
+  relayBase = null;
+  appSite = null;
+  chatLog?.setTyping(false);
+  await Promise.all([server, loopServer].filter(Boolean).map((l: any) => new Promise<void>((resolve) => {
     try {
-      server?.close(() => resolve());
+      l.close(() => resolve());
       // close() waits for open connections; the phone polls, so force it.
-      server?.closeAllConnections?.();
+      l.closeAllConnections?.();
     } catch {
       resolve();
     }
-  });
+  })));
   server = null;
+  loopServer = null;
   return "Remote closed. That link won't work again.";
 }
 

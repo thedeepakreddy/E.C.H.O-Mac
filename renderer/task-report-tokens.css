@@ -1,0 +1,36 @@
+/* Proposed tokens from recurring target deltas. Review names in the owning design system. */
+/* Font: Roboto (weights 400, 500). Declared as a token only — this patch loads nothing over the network. Load the family the way this repository already loads fonts: self-host it, or add it to the existing loader. */
+
+:root {
+  --font-roboto: 'Roboto', sans-serif;
+  /* selectors: #report-checklist>div>ul>li:nth-child(2)>span:nth-child(2), #report-checklist>div>ul>li:nth-child(6)>span:nth-child(2), #report-status>div>p, #report-tests>div>h2, #report-tests>div>ul>li>span:nth-child(2) */
+  --ui-text-font-family-roboto: var(--font-roboto);
+  /* selectors: #report-checklist>div>ul>li:nth-child(2)>span:nth-child(2), #report-checklist>div>ul>li:nth-child(6)>span:nth-child(2), #report-status>div>p, #report-tests>div>h2, #report-tests>div>ul>li>span:nth-child(2) */
+  --ui-text-text-align-left: left;
+  /* selectors: #report-checklist, #report-status, #report-tests, .generated-screen */
+  --ui-card-background-linear-gradient-110deg-00151f-001019: linear-gradient(110deg, #00151f, #001019);
+  /* selectors: #report-checklist, #report-status, #report-tests, .generated-screen */
+  --ui-card-border-1px-solid-073342: 1px solid #073342;
+  /* selectors: #report-checklist, #report-status, .generated-screen */
+  --ui-card-border-left-2px-solid-00cbd9: 2px solid #00cbd9;
+  /* selectors: #report-checklist, #report-status, #report-tests, .generated-screen */
+  --ui-card-border-radius-16px: 16px;
+  /* selectors: #report-checklist>div>span, #report-checklist>div>ul>li:nth-child(6)>span:nth-child(1), #report-tests>div>ul>li>span:nth-child(1) */
+  --ui-badge-font-family-roboto: var(--font-roboto);
+  /* selectors: #report-checklist>div>ul>li:nth-child(2)>span:nth-child(2), #report-status>div>p, #report-tests>div>h2, #report-tests>div>ul>li>span:nth-child(2) */
+  --ui-text-font-size-12: 12px;
+  /* selectors: #report-checklist>div>span, #report-checklist>div>ul>li:nth-child(6)>span:nth-child(1), #report-tests>div>ul>li>span:nth-child(1) */
+  --ui-badge-border-radius-16px: 16px;
+  /* selectors: #report-checklist>div>h2, #report-status>div>h2 */
+  --ui-heading-font-family-roboto: var(--font-roboto);
+  /* selectors: #report-checklist>div>h2, #report-status>div>h2 */
+  --ui-heading-font-size-17: 17px;
+  /* selectors: #report-checklist>div>ul>li:nth-child(6)>span:nth-child(1), #report-tests>div>ul>li>span:nth-child(1) */
+  --ui-badge-font-size-13: 13px;
+  /* selectors: #report-checklist>div>span, #report-checklist>div>ul>li:nth-child(6)>span:nth-child(1) */
+  --ui-badge-font-weight-500: 500;
+  /* selectors: #report-checklist>div>h2, #report-status>div>h2 */
+  --ui-heading-text-align-left: left;
+  /* selectors: #report-checklist>div>ul>li:nth-child(6)>span:nth-child(1), #report-tests>div>ul>li>span:nth-child(1) */
+  --ui-badge-text-align-left: left;
+}

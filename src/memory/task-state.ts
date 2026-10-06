@@ -4,10 +4,11 @@ import { randomUUID } from "node:crypto";
 import { scrubSecrets } from "../safety/redact.js";
 import type { ToolResultMetadata, ToolStatus } from "./tool-result.js";
 import { memoryRoot } from "./paths.js";
+import { compactToolResult } from "./tool-context.js";
 
 export interface TaskInvocation {
   readonly taskId: string; readonly actorId: string; readonly stepId: string; readonly callId: string;
-  readonly generation: number; readonly baseRevision: number; readonly resources: readonly string[];
+  readonly generation: number; readonly baseRevision: number; readonly resources: readonly string[]; readonly inputHash?: string;
 }
 export interface TaskObservation {
   id: string; sourceCallId?: string; observedAt: string; resourceId?: string;
@@ -17,6 +18,8 @@ export interface TaskCall {
   callId: string; tool: string; stepId: string; actorId: string; generation: number;
   status: "running" | ToolStatus; startedAt: string; endedAt?: string; resources: string[];
   result?: ToolResultMetadata & { text?: string }; late?: boolean;
+  inputHash?: string;
+  effect?: 'observation' | 'action' | 'internal';
   /** Releasing a resource is not evidence that the interrupted action succeeded. */
   resourceReconciliations?: Record<string, { reconciledAt: string; reason: string }>;
 }
@@ -38,7 +41,7 @@ export interface TaskState {
   schemaVersion: 1; taskId: string; parentTaskId?: string; ownerActorId: string;
   revision: number; generation: number; goal: string; scope: Record<string, any>; privateMode: boolean;
   status: "running" | "waiting" | "verifying" | "completed" | "failed" | "cancelled" | "partial" | "blocked";
-  steps: Record<string, { ownerActorId: string; status: string; dependsOn?: string[]; verificationRefs?: string[] }>;
+  steps: Record<string, { ownerActorId: string; description?: string; status: string; dependsOn?: string[]; verificationRefs?: string[] }>;
   observations: Record<string, TaskObservation>; calls: Record<string, TaskCall>;
   bindings: Record<string, unknown>; decisions: unknown[]; artifacts: unknown[]; blockers: unknown[];
   childTaskIds: string[]; approvalRefs: string[]; verificationRefs: string[]; attemptIds: string[];
@@ -55,10 +58,15 @@ const safeId = (value: string) => { if (!/^[a-zA-Z0-9_.-]+$/.test(value) || valu
 const STABLE_ID_FIELDS = new Set([
   "id", "taskId", "parentTaskId", "ownerActorId", "actorId", "callId", "sourceCallId", "stepId",
   "childTaskIds", "attemptIds",
+  'workerTaskIds','inspectorTaskIds','supervisorTaskId','supervisorOwnerActorId',
 ]);
+const UUID_REFERENCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const OBSERVATION_REFERENCE = new RegExp(`^observation:${UUID_REFERENCE}:${UUID_REFERENCE}$`, 'i');
 const clean = (value: unknown, field = ""): any =>
   typeof value === "string"
-    ? (STABLE_ID_FIELDS.has(field) ? value : scrubSecrets(value))
+    // UUID digit groups can resemble a card number. These generated evidence
+    // references must retain their identity so reuse and verification agree.
+    ? (STABLE_ID_FIELDS.has(field) || (['verificationRefs','observedVerificationRefs'].includes(field) && OBSERVATION_REFERENCE.test(value)) ? value : scrubSecrets(value))
     : Array.isArray(value)
       ? value.map((item) => clean(item, field))
       : value && typeof value === "object"
@@ -75,12 +83,13 @@ export class TaskCoordinator {
   private committed = new Set<string>();
   private deleted = new Set<string>();
   private loadedRoot = "";
+  private privateResults = new Map<string, ToolResultMetadata & {text?: string}>();
   constructor(private readonly configuredRoot?: string) {}
   root(): string { return this.configuredRoot ?? memoryRoot(); }
   private load(): void {
     const root = this.root();
     if (this.loadedRoot === root) return;
-    this.states.clear(); this.leases.clear(); this.committed.clear(); this.deleted.clear(); this.loadedRoot = root;
+    this.states.clear(); this.leases.clear(); this.committed.clear(); this.deleted.clear(); this.privateResults.clear(); this.loadedRoot = root;
     const base = join(root, "tasks");
     if (!existsSync(base)) return;
     for (const taskId of readdirSync(base)) {
@@ -130,6 +139,12 @@ export class TaskCoordinator {
   }
   get(taskId: string): TaskState | null { this.load(); const state = this.states.get(taskId); return state ? copy(state) : null; }
   list(): TaskState[] { this.load(); return [...this.states.values()].map(copy); }
+  /** Project only matching bindings; UI refreshes should not clone historical tool traces. */
+  listBindings<T>(key:string,limit=Infinity):Array<{taskId:string;value:T}> {
+    this.load();return [...this.states.values()].filter(state=>state.bindings[key]!==undefined)
+      .sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)).slice(0,limit)
+      .map(state=>({taskId:state.taskId,value:copy(state.bindings[key]) as T}));
+  }
   private update(taskId: string, type: string, change: (state: TaskState) => void, commitId?: string): TaskState {
     this.load(); const current = this.states.get(taskId); if (!current || this.deleted.has(taskId)) throw new Error("Task not found");
     const next = copy(current); change(next); next.revision++; next.updatedAt = new Date().toISOString(); this.persist(next, type, commitId); return copy(next);
@@ -165,14 +180,65 @@ export class TaskCoordinator {
     this.update(taskId, "task.observation", state => { if (state.observations[observation.id]) throw new Error("Observation is immutable"); state.observations[observation.id] = clean(observation); }); return copy(observation);
   }
   getObservation(taskId: string, id: string): TaskObservation | undefined { const item = this.get(taskId)?.observations[id]; return item && (!item.expiresAt || Date.parse(item.expiresAt) > Date.now()) ? item : undefined; }
-  startCall(invocation: TaskInvocation, tool: string): TaskState {
+  startCall(invocation: TaskInvocation, tool: string, effect?: TaskCall['effect']): TaskState {
     const task = this.assertInvocation(invocation); if (task.calls[invocation.callId]) return task;
-    return this.update(task.taskId, "call.started", next => { next.calls[invocation.callId] = { ...invocation, resources: [...invocation.resources], tool, status: "running", startedAt: new Date().toISOString() }; });
+    return this.update(task.taskId, "call.started", next => { next.calls[invocation.callId] = { ...invocation, resources: [...invocation.resources], tool, effect, status: "running", startedAt: new Date().toISOString() }; });
   }
   endCall(invocation: TaskInvocation, result: ToolResultMetadata & { text?: string }): TaskState | null {
     const task = this.get(invocation.taskId); if (!task) return null;
     const commitId = `${invocation.taskId}:result:${invocation.callId}`; if (this.committed.has(commitId)) return task;
-    return this.update(task.taskId, "call.result", next => { const call = next.calls[invocation.callId]; if (!call) throw new Error("Unknown invocation"); call.result = copy(result); call.status = result.status ?? "uncertain"; call.endedAt = new Date().toISOString(); call.late = invocation.generation !== next.generation; }, commitId);
+    const small = compactToolResult(result);
+    if (JSON.stringify(result) !== JSON.stringify(small)) {
+      if (task.privateMode) this.privateResults.set(`${task.taskId}:${invocation.callId}`, clean(result));
+      else {
+        const dir = join(this.root(), 'tasks', safeId(task.taskId), 'results');
+        mkdirSync(dir, {recursive: true, mode: 0o700});
+        const path = join(dir, `${safeId(invocation.callId)}.json`), temporary = `${path}.tmp`;
+        writeFileSync(temporary, JSON.stringify(clean(result)), {mode: 0o600});
+        const fd = openSync(temporary, 'r'); try {fsyncSync(fd);} finally {closeSync(fd);}
+        renameSync(temporary, path);
+      }
+    }
+    return this.update(task.taskId, "call.result", next => {
+      const call = next.calls[invocation.callId]; if (!call) throw new Error("Unknown invocation");
+      call.result = copy(small); call.status = result.status ?? "uncertain"; call.endedAt = new Date().toISOString(); call.late = invocation.generation !== next.generation;
+      if (!call.late && result.status === 'success' && result.verification === 'verified') {
+        next.verificationRefs = [...new Set([...next.verificationRefs, ...(result.verificationRefs ?? [])])];
+        next.bindings.observedVerificationRefs = [...new Set([...(next.bindings.observedVerificationRefs as string[] ?? []), ...(result.verificationRefs ?? [])])];
+      }
+    }, commitId);
+  }
+  readCallResult(taskId: string, callId: string): (ToolResultMetadata & {text?: string}) | undefined {
+    const task = this.get(taskId); const call = task?.calls[callId]; if (!task || !call) return;
+    const privateResult = this.privateResults.get(`${taskId}:${callId}`); if (privateResult) return copy(privateResult);
+    if (!task.privateMode) {
+      try { return JSON.parse(readFileSync(join(this.root(), 'tasks', safeId(taskId), 'results', `${safeId(callId)}.json`), 'utf8')); } catch {}
+    }
+    return call.result && copy(call.result);
+  }
+  updatePlan(invocation: TaskInvocation, steps: Array<{id: string; description: string; status: 'pending' | 'running' | 'completed' | 'blocked'; dependsOn?: string[]; verificationRefs?: string[]}>): TaskState {
+    const task = this.assertInvocation(invocation);
+    const next = copy(task.steps);
+    const ids = new Set(steps.map(step => step.id));
+    if (ids.size !== steps.length || steps.length > 30) throw new Error('Use unique IDs and at most 30 steps');
+    for (const step of steps) {
+      safeId(step.id);
+      if (next[step.id]?.status === 'completed' && step.status !== 'completed') throw new Error('Completed progress cannot be erased');
+      if (step.status === 'completed' && (!step.verificationRefs?.length || step.verificationRefs.some(ref => !task.verificationRefs.includes(ref)))) throw new Error('Completed steps require evidence from this task');
+      next[step.id] = {...step, ownerActorId: invocation.actorId};
+    }
+    if (Object.keys(next).length > 30) throw new Error('A plan has at most 30 steps');
+    const visit = (id: string, path: Set<string>) => {
+      if (path.has(id)) throw new Error('Plan dependencies contain a cycle');
+      const step = next[id]; if (!step) throw new Error('Unknown dependency');
+      const ancestors = new Set(path).add(id);
+      for (const dependency of step.dependsOn ?? []) {
+        visit(dependency, ancestors);
+        if (['running', 'completed'].includes(step.status) && next[dependency].status !== 'completed') throw new Error('Complete dependencies before starting a step');
+      }
+    };
+    for (const id of Object.keys(next)) visit(id, new Set());
+    return this.update(task.taskId, 'task.plan', state => {state.steps = next;});
   }
   recordAttempt(taskId: string, runId: string): void { this.update(taskId, "task.attempt", state => { if (!state.attemptIds.includes(runId)) state.attemptIds.push(runId); }); }
   /**
@@ -231,7 +297,10 @@ export class TaskCoordinator {
     return this.update(taskId, "task.finished", state => {
       const uncertain = Object.values(state.calls).some(call => ["running", "timeout", "uncertain", "partial"].includes(call.status));
       const evidence = input.verificationRefs ?? state.verificationRefs;
-      state.status = input.status === "completed" && (uncertain || !evidence.length) ? "verifying" : input.status;
+      const actions = Object.values(state.calls).some(call => call.effect !== 'observation' && call.effect !== 'internal');
+      const unfinishedSteps = Object.values(state.steps).some(step => step.status !== 'completed');
+      const proved = evidence.some(ref => !ref.startsWith('observation:'));
+      state.status = input.status === "completed" && (uncertain || unfinishedSteps || !evidence.length || (actions && !proved)) ? "verifying" : input.status;
       state.verificationRefs = [...new Set(evidence)]; state.summary = input.summary;
     });
   }
@@ -241,8 +310,10 @@ export class TaskCoordinator {
     if (!refs.length) throw new Error("Verification requires at least one evidence reference");
     return this.update(taskId, "task.verified", state => {
       state.verificationRefs = [...new Set([...state.verificationRefs, ...refs])];
+      state.bindings.observedVerificationRefs = [...new Set([...(state.bindings.observedVerificationRefs as string[] ?? []), ...refs])];
       const uncertain = Object.values(state.calls).some(call => ["running", "timeout", "uncertain", "partial"].includes(call.status));
-      if (state.status === "verifying" && !uncertain) state.status = "completed";
+      const actions = Object.values(state.calls).some(call => call.effect !== "observation" && call.effect !== "internal");
+      if (state.status === "verifying" && !uncertain && Object.values(state.steps).every(step => step.status === "completed") && (!actions || state.verificationRefs.some(ref => !ref.startsWith("observation:")))) state.status = "completed";
     });
   }
   acquireResources(invocation: TaskInvocation): { ok: boolean; resource?: string; quarantined?: boolean } {
@@ -308,6 +379,8 @@ export class TaskCoordinator {
     // Preserve no content, but retain a durable barrier against stale in-flight writes.
     const dir = join(this.root(), "tasks", safeId(taskId));
     if (!state.privateMode) { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(join(dir,"deleted"), "forgotten\n", { mode: 0o600 }); for (const file of ["events.jsonl", "snapshot.json", ".snapshot.tmp"]) rmSync(join(dir,file), { force: true }); }
+    rmSync(join(dir, 'results'), {recursive: true, force: true});
+    for (const key of this.privateResults.keys()) if (key.startsWith(`${taskId}:`)) this.privateResults.delete(key);
     this.deleted.add(taskId); this.states.delete(taskId); for (const lease of this.leases.values()) if (lease.taskId === taskId) lease.quarantined = true; return true;
   }
 }

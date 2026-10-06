@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Calculator</title>
+    <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; }
+        .calc { display: grid; grid-template-columns: repeat(4, 50px); gap: 10px; }
+        button { padding: 15px; font-size: 18px; }
+        #display { grid-column: span 4; padding: 15px; font-size: 24px; text-align: right; }
+    </style>
+</head>
+<body>
+    <div class="calc">
+        <div id="display" role="status" aria-live="polite">0</div>
+        <button onclick="append('7')">7</button><button onclick="append('8')">8</button><button onclick="append('9')">9</button><button onclick="op('/')">/</button>
+        <button onclick="append('4')">4</button><button onclick="append('5')">5</button><button onclick="append('6')">6</button><button onclick="op('*')">*</button>
+        <button onclick="append('1')">1</button><button onclick="append('2')">2</button><button onclick="append('3')">3</button><button onclick="op('-')">-</button>
+        <button onclick="append('0')">0</button><button onclick="calculate()">=</button><button onclick="clearDisplay()">C</button><button onclick="op('+')">+</button>
+        <button onclick="append('.')" aria-label="Decimal point">.</button>
+    </div>
+    <script>
+        let cur = '', finished = false, failed = false;
+        function render() { document.getElementById('display').innerText = failed ? 'Error' : cur || '0'; }
+        function clearDisplay() { cur = ''; finished = failed = false; render(); }
+        function append(n) {
+            if (!/^[0-9.]$/.test(n)) return;
+            if (finished || failed) clearDisplay();
+            const number = cur.split(/[+*/-]/).pop();
+            if (n === '.' && number.includes('.')) return;
+            if (cur.length >= 100) return;
+            cur += n === '.' && !number ? '0.' : n;
+            render();
+        }
+        function op(o) {
+            if (!/^[+*/-]$/.test(o)) return;
+            if (failed) clearDisplay();
+            finished = false;
+            if (!cur) { if (o === '-') cur = '-'; render(); return; }
+            if (/[+*/-]$/.test(cur)) cur = cur.slice(0, -1);
+            cur += o; render();
+        }
+        // Parse arithmetic with normal multiplication/division precedence.
+        // Only numbers and the four operators are accepted; no code execution.
+        function evaluate(expression) {
+            let pos = 0;
+            function number() {
+                const match = expression.slice(pos).match(/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?/i);
+                if (!match) throw new Error('Incomplete number');
+                pos += match[0].length;
+                return Number(match[0]);
+            }
+            function product() {
+                let value = number();
+                while (expression[pos] === '*' || expression[pos] === '/') {
+                    const operator = expression[pos++], right = number();
+                    if (operator === '/' && right === 0) throw new Error('Division by zero');
+                    value = operator === '*' ? value * right : value / right;
+                }
+                return value;
+            }
+            let value = product();
+            while (expression[pos] === '+' || expression[pos] === '-') {
+                const operator = expression[pos++], right = product();
+                value = operator === '+' ? value + right : value - right;
+            }
+            if (pos !== expression.length || !Number.isFinite(value)) throw new Error('Invalid result');
+            return Number(value.toPrecision(12)).toString();
+        }
+        function calculate() {
+            if (!cur || failed) return;
+            try { cur = evaluate(cur); finished = true; }
+            catch { failed = true; finished = false; }
+            render();
+        }
+        document.addEventListener('keydown', event => {
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            if (/^[0-9.]$/.test(event.key)) append(event.key);
+            else if (/^[+*/-]$/.test(event.key)) op(event.key);
+            else if (event.key === 'Enter' || event.key === '=') calculate();
+            else if (event.key === 'Escape') clearDisplay();
+            else if (event.key === 'Backspace') { if (failed || finished) clearDisplay(); else { cur = cur.slice(0, -1); render(); } }
+            else return;
+            event.preventDefault();
+        });
+    </script>
+</body>
+</html>

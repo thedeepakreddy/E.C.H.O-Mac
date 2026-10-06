@@ -100,7 +100,7 @@ const budget = { timeoutMs: 1000, maxIterations: 5, maxRecoveryAttempts: 0 };
 const identity = { id: "t", name: "T", kind: "clone" } as any;
 make(identity, { profile: "reader", budget } as any);
 ok(built[0].brain === "ollama", `a fast-tier custom agent runs on ollama (got ${built[0].brain})`);
-ok(!!built[0].allowed && built[0].allowed.size === 1 && built[0].allowed.has(grantable[0]), "its tool grants arrive as a hard allowedTools limit");
+ok(!!built[0].allowed && built[0].allowed.size === 2 && built[0].allowed.has(grantable[0]) && built[0].allowed.has('submit_agent_result'), "its grants include only the requested read plus actor-owned Result submission");
 make(identity, { profile: "review", budget } as any);
 ok(built[1].brain === "claude" && built[1].allowed === undefined, "a deep-tier built-in runs on claude with no tool limit");
 make(identity, { budget } as any);

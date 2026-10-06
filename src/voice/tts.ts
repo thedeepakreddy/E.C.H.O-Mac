@@ -51,7 +51,7 @@ export class Tts {
   constructor(
     private voice: string,
     private enabled: boolean,
-    private engine: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" | "gemini" | "piper" = "mac",
+    private engine: "mac" | "fakeyou" | "elevenlabs" | "sarvam" | "gemini" | "piper" | "vibevoice" = "mac",
     private elevenLabsVoiceId?: string,
     private onStateChange?: (speaking: boolean) => void,
     private sarvam: { speaker?: string; pace?: number } = {},
@@ -138,29 +138,6 @@ export class Tts {
       }
     } catch (err) {
       console.error("[fakeyou] fetch error:", err);
-      return null;
-    }
-  }
-
-  private async fetchLocalClone(text: string): Promise<string | null> {
-    try {
-      // Pick a random reference file from the extracted deepak_voice_source
-      // Hardcoded to one of the files for scaffolding purposes
-      const refAudio = join(process.cwd(), "deepak_voice_source", "TrainingData", "yXLHR_91.caf");
-      const tmpPath = join(tmpdir(), `local_tts_${Date.now()}.wav`);
-      const scriptPath = join(process.cwd(), "scripts", "local_tts.py");
-
-      await new Promise<void>((resolve, reject) => {
-        const p = spawn("python3", [scriptPath, "--text", text, "--ref", refAudio, "--out", tmpPath]);
-        p.stdout.on("data", d => console.log(d.toString().trim()));
-        p.stderr.on("data", d => console.error(d.toString().trim()));
-        p.on("exit", code => code === 0 ? resolve() : reject(new Error(`Exit code ${code}`)));
-        p.on("error", err => reject(err));
-      });
-
-      return tmpPath;
-    } catch (err) {
-      console.error("[local-clone] generation error:", err);
       return null;
     }
   }
@@ -270,9 +247,6 @@ export class Tts {
       } else if (this.engine === "elevenlabs") {
         console.log(`[jarvis] fetching elevenlabs voice for: "${text.slice(0, 30)}..."`);
         audioPath = await this.fetchElevenLabs(text);
-      } else if (this.engine === "local-clone") {
-        console.log(`[jarvis] running local open-source clone for: "${text.slice(0, 30)}..."`);
-        audioPath = await this.fetchLocalClone(text);
       } else if (this.engine === "sarvam") {
         console.log(`[jarvis] fetching sarvam voice for: "${text.slice(0, 30)}..."`);
         audioPath = await this.fetchSarvam(text);

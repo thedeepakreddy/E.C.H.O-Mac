@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { BrowserWindow, IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { getControlWeather, type ControlWeatherRequest } from "./control-weather.js";
 import type { MissionState } from "./frontier/swarm.js";
+import type { JarvisConfig } from "./config.js";
 import { KEY_FIELDS, keyStatus, keysPath } from "./keystore.js";
 import { listFleet, grantableTools, MAX_CUSTOM as FLEET_MAX_CUSTOM } from "./frontier/fleet.js";
 import { recentIntel } from "./tools/intel-feeds.js";
@@ -17,12 +18,16 @@ export interface ControlTask {
 }
 export interface ControlLog { id: number; at: number; kind: string; text: string }
 export interface ControlSettings {
-  brain: "claude" | "gemini" | "ollama" | "openai";
+  // Derived, not repeated. This union lived in three files and they drifted
+  // the moment a fifth brain arrived; config.ts is the one that decides.
+  brain: JarvisConfig["brain"];
   voice: {
     ttsEnabled: boolean; wakeWord: boolean; conversationMode: boolean; bargeIn: boolean;
     sttStreaming: boolean; ttsStreaming: boolean; sendAudioToBrain: boolean;
     sttProvider: "whisper" | "sarvam" | "apple"; sttLanguage: string;
-    ttsEngine: "mac" | "fakeyou" | "elevenlabs" | "local-clone" | "sarvam" | "gemini" | "piper";
+    ttsEngine: "mac" | "fakeyou" | "elevenlabs" | "sarvam" | "gemini" | "piper" | "vibevoice";
+    vibeVoiceUrl?: string;
+    vibeVoiceSpeaker?: string;
     maxSpokenSentences: number; conversationWindowMs: number;
   };
   hud: { startListeningOnLaunch: boolean };
@@ -37,7 +42,9 @@ export interface ControlAction {
     "refresh-connections" | "switch-model" | "spawn-agent" | "assign-agent" | "api-keys" | "save-settings" |
     "save-api-keys" | "run-board" | "run-fleet-agent" | "stop-mission" | "stop-mission-task" |
     "delete-mission" |
-    "save-agent" | "remove-agent" | "shutdown";
+    "save-agent" | "remove-agent" | "shutdown" |
+    "chatgpt-sign-in" | "chatgpt-cancel-sign-in" | "chatgpt-sign-out" |
+    "openrouter-sign-in" | "openrouter-sign-out" | "openrouter-set-model";
   text?: string; goal?: string; provider?: string; name?: string;
   settings?: Partial<ControlSettings>;
   /** For save-api-keys: env var name -> new value. A blank/omitted value leaves that key unchanged. */
@@ -56,7 +63,25 @@ export interface ControlRuntime {
     missionId?: string; agentTaskId?: string; lane?: "knowledge" | "gui" }>;
   missions: MissionState[];
   settings: ControlSettings;
-  models: Array<{ id: string; label: string; model: string; active: boolean; available: boolean; reason?: string }>;
+  models: Array<{
+    id: string; label: string; model: string; active: boolean; available: boolean; reason?: string;
+    /** OpenAI only: how it pays, and the ChatGPT sign-in state. */
+    account?: {
+      billing: "chatgpt" | "apiKey" | "none";
+      chatgpt: { status: string; planUsage: boolean; email?: string; error?: string };
+    };
+    /**
+     * OpenRouter only: the models it can be switched to, and whether it has a
+     * key. The list is fetched live rather than hardcoded — OpenRouter retires
+     * free tiers without notice, and a picker offering a model that no longer
+     * exists is worse than no picker.
+     */
+    catalogue?: {
+      signedIn: boolean;
+      models: Array<{ id: string; label: string; contextLength: number }>;
+      note?: string;
+    };
+  }>;
   connections: Array<{ name: string; status: string; tools: number | null; error?: string; lastActivityAt?: number }>;
 }
 
@@ -160,11 +185,11 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let publishTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function publishControlUpdate(): void {
-  if (!panel || panel.isDestroyed() || publishTimer) return;
+  if (!panel || panel.isDestroyed() || !panel.isVisible() || panel.isMinimized() || publishTimer) return;
   publishTimer = setTimeout(() => {
     publishTimer = null;
-    if (panel && !panel.isDestroyed() && runtime) panel.webContents.send("control:update", controlTelemetry.snapshot(runtime()));
-  }, 60);
+    if (panel && !panel.isDestroyed() && panel.isVisible() && !panel.isMinimized() && runtime) panel.webContents.send("control:update", controlTelemetry.snapshot(runtime()));
+  }, 150);
 }
 
 export function observeControlEvent(channel: string, payload: unknown): void {
@@ -195,6 +220,8 @@ export function openControlPanel(anchor?: BrowserWindow | null): void {
     if (input.type === "keyDown" && input.key === "Escape") { event.preventDefault(); closeControlPanel(); }
   });
   panel.once("ready-to-show", () => { panel?.show(); panel?.focus(); publishControlUpdate(); });
+  panel.on("restore", publishControlUpdate);
+  panel.on("show", publishControlUpdate);
   panel.on("closed", () => {
     panel = null;
     if (refreshTimer) clearInterval(refreshTimer);

@@ -163,6 +163,25 @@ export async function moveMouse(x: number, y: number): Promise<string> {
   return `moved cursor to ${cx},${cy} (verified)`;
 }
 
+/**
+ * Nudge the cursor by an offset from wherever it is — the phone's trackpad.
+ * One cliclick call (it takes relative coordinates as +n/-n) rather than read,
+ * add and move, which tripled the process spawns on every drag step. Not
+ * verified like moveMouse: the next drag step corrects any shortfall.
+ */
+export async function moveMouseBy(dx: number, dy: number): Promise<void> {
+  const rel = (n: number) => `${n >= 0 ? "+" : "-"}${Math.abs(Math.round(n))}`;
+  const result = await run(CLICLICK, [`m:${rel(dx)},${rel(dy)}`]);
+  if (result.code !== 0) throw new Error(`cliclick move failed: ${result.stderr || result.stdout}`);
+}
+
+/** Click wherever the cursor already is ("." is cliclick's current position). */
+export async function clickHere(button: "left" | "right" | "double" = "left"): Promise<void> {
+  const cmd = button === "right" ? "rc" : button === "double" ? "dc" : "c";
+  const result = await run(CLICLICK, [`${cmd}:.`]);
+  if (result.code !== 0) throw new Error(`cliclick click failed: ${result.stderr || result.stdout}`);
+}
+
 export async function click(
   x: number,
   y: number,

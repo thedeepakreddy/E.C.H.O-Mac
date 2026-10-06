@@ -7,6 +7,8 @@ import { performance } from "node:perf_hooks";
 import type { JarvisConfig } from "../config.js";
 import { withProsody } from "./prosody.js";
 import { getAppPath } from "../utils/appPath.js";
+import { jsonSse } from "../utils/json-sse.js";
+import { VibeVoiceTtsStream, vibeVoiceSupportsText } from "./vibevoice.js";
 
 /**
  * Streaming text-to-speech: sentences in, PCM out, as soon as each is ready.
@@ -360,6 +362,12 @@ const PIPER_READY = 0xffffffff;
 export class PiperWorker {
   private static workers = new Map<string, PiperWorker>();
 
+  static stopAll(): void {
+    const owned = [...PiperWorker.workers.values()];
+    PiperWorker.workers.clear();
+    for (const worker of owned) worker.stop();
+  }
+
   static for(paths: PiperPaths): PiperWorker {
     let w = PiperWorker.workers.get(paths.model);
     if (!w || w.dead) {
@@ -379,7 +387,14 @@ export class PiperWorker {
   private dead = false;
 
   private constructor(paths: PiperPaths) {
-    this.child = spawn(paths.python, [paths.worker, paths.model], { stdio: ["pipe", "pipe", "pipe"] });
+    // Piper runs on onnxruntime, whose Python build carries the same Microsoft
+    // telemetry thread that SIGABRT-ed Electron (see utils/ortEnv.ts). Off
+    // explicitly here: the Node-side switch is set lazily, so a worker started
+    // before any model loaded inherited nothing — and crashed the same way.
+    this.child = spawn(paths.python, [paths.worker, paths.model], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ORT_DISABLE_TELEMETRY: process.env.ORT_DISABLE_TELEMETRY ?? "1" },
+    });
     let markReady!: () => void;
     let markFailed!: (err: Error) => void;
     this.ready = new Promise<void>((resolve, reject) => {
@@ -520,6 +535,19 @@ export class PiperTtsStream extends EventEmitter implements TtsStream {
  * The voice to use when the configured one cannot speak: Piper if it is
  * installed (a real voice, fully offline), otherwise macOS `say`.
  */
+/**
+ * Engines that have a real streaming implementation below.
+ *
+ * Kept next to the switch it mirrors, because it was a separate hardcoded
+ * list in main.ts and it drifted: `gemini` and `piper` both have a stream
+ * here, and neither was in it. With `ttsEngine: "gemini"` the streaming path
+ * was therefore never built at all — the log said "streaming speech: off
+ * (file path)" — and every reply fell back to the non-streaming `tts.ts`,
+ * which has no gemini branch either and lands on Piper. Piper is English
+ * only, so a Telugu reply came out in an English voice.
+ */
+export const STREAMING_ENGINES = new Set(["sarvam", "elevenlabs", "gemini", "mac", "piper", "vibevoice"]);
+
 export function offlineTtsStream(cfg: JarvisConfig): TtsStream {
   const paths = piperPaths(cfg.voice.piperVoice);
   return paths ? new PiperTtsStream(paths) : new SayTtsStream(cfg.voice.ttsVoice);
@@ -671,9 +699,13 @@ export class GeminiTtsStream extends EventEmitter implements TtsStream {
         const { text, sentence } = this.queue.shift()!;
         const ac = new AbortController();
         this.controllers.add(ac);
+        const timeout = setTimeout(() => ac.abort(), 20_000);
         try {
+          // Gemini 3.1+ can emit PCM while synthesising. Waiting for res.json()
+          // made the nominal streaming adapter wait for the entire sentence.
+          const streaming = /^gemini-(?:3\.[1-9]|[4-9])/.test(this.model);
           const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:${streaming ? 'streamGenerateContent?alt=sse&' : 'generateContent?'}key=${this.apiKey}`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -687,22 +719,42 @@ export class GeminiTtsStream extends EventEmitter implements TtsStream {
               }),
             }
           );
-          const body: any = await res.json();
-          const b64 = body?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-          if (!b64) {
+          let emitted = false;
+          const audio = (body: any) => {
+            if (body?.error) throw new Error(String(body.error.message ?? 'audio generation failed'));
+            for (const part of body?.candidates?.[0]?.content?.parts ?? []) {
+              const inline = part.inlineData;
+              if (!inline?.data || this.aborted) continue;
+              const rate = Number(/rate=(\d+)/i.exec(inline.mimeType ?? '')?.[1]) || this.sampleRate;
+              const pcm = stripWav(Buffer.from(inline.data, 'base64'));
+              if (!pcm.length) continue;
+              emitted = true;
+              this.emit('audio', {pcm, sampleRate: rate, sentence} satisfies TtsAudio);
+            }
+          };
+          if (res.ok === false) {
+            const body: any = await res.json();
+            throw new Error(String(body?.error?.message ?? `HTTP ${res.status}`));
+          }
+          if (res.headers?.get('content-type')?.includes('text/event-stream')) {
+            for await (const body of jsonSse(res)) { if (this.aborted) break; audio(body); }
+          } else {
+            audio(await res.json());
+          }
+          if (!emitted && !this.aborted) {
             // Never silently drop a sentence: a turn that half-speaks reads as
             // Echo breaking off mid-thought.
-            this.emit("error", `gemini tts: ${String(body?.error?.message ?? `no audio (HTTP ${res.status})`).slice(0, 120)}`);
+            this.emit("error", `gemini tts: no audio (HTTP ${res.status})`);
             this.emit("sentenceDone", sentence);
             continue;
           }
           if (this.aborted) break;
-          this.emit("audio", { pcm: Buffer.from(b64, "base64"), sampleRate: this.sampleRate, sentence } satisfies TtsAudio);
           this.emit("sentenceDone", sentence);
         } catch (err: any) {
           if (!this.aborted) this.emit("error", `gemini tts: ${String(err?.message ?? err).slice(0, 120)}`);
           this.emit("sentenceDone", sentence);
         } finally {
+          clearTimeout(timeout);
           this.controllers.delete(ac);
         }
       }
@@ -738,6 +790,14 @@ export class GeminiTtsStream extends EventEmitter implements TtsStream {
 export function createTtsStream(cfg: JarvisConfig, firstText: string): TtsStream | null {
   if (cfg.voice.ttsStreaming === false || !cfg.voice.ttsEnabled) return null;
   switch (cfg.voice.ttsEngine) {
+    case "vibevoice": {
+      if (!vibeVoiceSupportsText(firstText)) {
+        const key = process.env[cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"];
+        return key ? new GeminiTtsStream(key, cfg.voice.realtime?.voice ?? "Charon",
+          cfg.voice.geminiTtsModel ?? "gemini-3.1-flash-tts-preview") : offlineTtsStream(cfg);
+      }
+      return new VibeVoiceTtsStream(cfg.voice.vibeVoiceUrl ?? '', cfg.voice.vibeVoiceSpeaker ?? 'Carter');
+    }
     case "sarvam": {
       const key = process.env.SARVAM_API_KEY;
       return key ? new SarvamTtsStream(cfg, key, firstText) : offlineTtsStream(cfg);
@@ -768,6 +828,6 @@ export function createTtsStream(cfg: JarvisConfig, firstText: string): TtsStream
       return offlineTtsStream(cfg);
     }
     default:
-      return null; // fakeyou / local-clone keep the file path
+      return null; // fakeyou keeps the file path
   }
 }

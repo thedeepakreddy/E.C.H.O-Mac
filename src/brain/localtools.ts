@@ -1,4 +1,8 @@
+import { CODING_TOOL_NAMES, codingToolNames } from '../coding/tool-selection.js';
+import { intelligenceToolNames } from './intelligence-routing.js';
+import { creatorProjectToolNames } from '../creator-projects.js';
 import { TOOLS } from "../tools/registry.js";
+import { contextTokens } from "../memory/conversation.js";
 
 /**
  * Helps a small local model actually call tools.
@@ -155,26 +159,28 @@ export function resolveToolName(called: string): string | null {
  * commands, and they leave the model a short enough list to choose from.
  */
 export const LOCAL_TOOL_NAMES = [
+  "inspect_coding_tools", "invoke_coding_tool", ...CODING_TOOL_NAMES,
   // seeing
   "screenshot", "read_screen_text", "list_ui_elements", "frontmost_app",
   // pointing and typing
   "click", "click_ui_element", "click_text", "type_text", "press_keys", "scroll",
   // apps
-  "open_app", "open_url", "run_shortcut", "list_shortcuts", "show_creator_page",
+  "open_app", "open_url", "run_shortcut", "list_shortcuts", "show_creator_page", "read_creator_project", "show_creator_project",
   // the switches people ask for by voice
   "toggle_hand_gestures", "toggle_eye_tracking", "away_mode", "presence_status",
   "pause_media", "lock_screen", "switch_brain",
   // controlling the Mac from a phone
   "set_remote_password", "open_phone_remote", "close_phone_remote", "phone_remote_status",
   // memory
-  "remember", "recall", "forget", "stop_learning_here", "memory_status", "inspect_memory", "inspect_task", "verify_task", "tool_memory", "search_my_past",
+  "remember", "recall", "forget", "stop_learning_here", "memory_status", "inspect_memory", "inspect_task", "verify_task", "update_task_plan", "read_tool_result", "refresh_observations", "discover_tools", "tool_memory", "search_my_past", "conversation_history",
   "create_skill", "list_skills", "run_skill",
   // durable delegation and the Result every delegated Agent Task must submit
   "run_agent_mission", "inspect_agent_mission", "cancel_agent_mission", "submit_agent_result",
+  'run_supervised_task','inspect_supervised_task','read_supervised_evidence','submit_task_review','cancel_supervised_task','show_task_report','read_browser_page',
   // scan a page and recall it later
   "scan_page", "save_last_scan", "recall_scan",
   // the world on screen, and what it says
-  "show_osiris", "osiris_layers", "osiris_intel", "osiris_focus",
+  "open_intel", "export_training_data", "show_osiris", "osiris_layers", "osiris_intel", "osiris_focus",
   // essentials
   "wait", "check_calendar", "undo_last",
 ];
@@ -184,4 +190,34 @@ export function toolsForLocalModel(all: any[]): any[] {
   const picked = all.filter((t) => wanted.has(t.function?.name ?? t.name));
   // If the names ever drift, fall back to everything rather than no tools.
   return picked.length >= 10 ? picked : all;
+}
+
+/** Fit tool definitions to local RAM limits; schemas keep their validation constraints. */
+export function fitLocalTools(all: any[], query: string, budget: number): any[] {
+  const essential = new Set(["run_supervised_task", "inspect_supervised_task", "submit_task_review", "read_browser_page", "inspect_task", "verify_task", "update_task_plan", "read_tool_result", "refresh_observations", "discover_tools", "conversation_history", "forget", "stop_learning_here", "undo_last", "read_creator_project", "show_creator_project"]);
+  const coding=codingToolNames(query).size>0;const forced = new Set([...intelligenceToolNames(query), ...(coding?["inspect_coding_tools","invoke_coding_tool"]:[])]);
+  if (/\b(?:save|export|training)\b.*\b(?:dataset|data)\b|\bdataset\b.*\b(?:save|export)\b/i.test(query)) forced.add('export_training_data');
+  for (const name of creatorProjectToolNames(query)) forced.add(name);
+  const words = new Set(query.toLowerCase().match(/[a-z0-9]+/g) ?? []);
+  const compact = (value: any): any => {
+    if (Array.isArray(value)) return value.map(compact);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key,
+      key === "description" && typeof v === "string" ? v.slice(0, 180) : compact(v)]));
+  };
+  const ranked = all.map((tool, order) => {
+    const fn = tool.function;
+    const text = `${fn.name.replace(/_/g, " ")} ${fn.description ?? ""}`.toLowerCase();
+    const score = [...words].filter(word => word.length > 2 && text.includes(word)).length;
+    return { tool: compact(tool), order, score, intent: forced.has(fn.name), essential: essential.has(fn.name) };
+  }).sort((a, b) => Number(b.intent) - Number(a.intent) || Number(b.essential) - Number(a.essential) || b.score - a.score || a.order - b.order);
+  const picked: any[] = [];
+  let used = 0;
+  for (const candidate of ranked) {
+    const cost = contextTokens(candidate.tool);
+    if (used + cost > budget) continue;
+    picked.push(candidate.tool);
+    used += cost;
+  }
+  return picked;
 }

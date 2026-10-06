@@ -1,6 +1,7 @@
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { NVIDIA_KEY_SHAPE, REDACTED } from '../safety/redact.js';
 
 /**
  * Why a run stopped.
@@ -15,6 +16,7 @@ import { join } from "node:path";
  */
 export type ExitReason =
   | "completed"
+  | "no_progress"
   | "max_iterations"
   | "model_stop_no_tool_call"
   | "abort_signal"
@@ -31,6 +33,7 @@ export type ExitReason =
 
 /** Exit reasons that mean the task did NOT finish, whatever the model said. */
 export const INCOMPLETE_EXITS: ReadonlySet<string> = new Set([
+  "no_progress",
   "max_iterations",
   "model_stop_no_tool_call",
   "abort_signal",
@@ -71,7 +74,7 @@ export type Redactor = (path: string, value: unknown) => unknown;
 export const defaultRedactor: Redactor = (path, value) =>
   /api[-_]?key|authorization|password|secret|cookie|credential|(^|[^A-Za-z])(access|refresh|bearer|auth|session|id|api)[-_]?token|\.tokens?$/i.test(path)
     ? "[REDACTED]"
-    : value;
+    : typeof value === 'string' ? value.replace(NVIDIA_KEY_SHAPE, REDACTED) : value;
 
 export function stableJson(value: unknown, redact: Redactor = defaultRedactor, path = "$"): string {
   const visit = (current: unknown, currentPath: string): unknown => {
