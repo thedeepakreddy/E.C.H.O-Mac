@@ -203,6 +203,13 @@ export function preferredHost(): { host: string; kind: HostKind } | null {
 // ---- what the phone is shown ---------------------------------------------
 
 const items: FeedItem[] = [];
+/**
+ * How many items have been dropped from the front of the ring buffer. The
+ * phone's "since" is an absolute position, so dropping old items can't shift
+ * already-seen ones back into view (they used to come back as new replies,
+ * and the phone read Echo's old answers aloud again).
+ */
+let dropped = 0;
 let running = false;
 let startedAt = 0;
 /** When the link closes on its own; 0 when it is always on. */
@@ -464,12 +471,18 @@ export function record(line: string, kind = "") {
   if (!running || !line) return;
   items.push({ at: Date.now(), line, kind });
   // A ring buffer: a long job would otherwise grow this without limit.
-  if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
+  if (items.length > MAX_ITEMS) {
+    const extra = items.length - MAX_ITEMS;
+    items.splice(0, extra);
+    dropped += extra;
+  }
 }
 
 export function recentItems(sinceIndex = 0): { items: FeedItem[]; nextIndex: number } {
-  const from = Math.max(0, Math.min(sinceIndex, items.length));
-  return { items: items.slice(from), nextIndex: items.length };
+  const end = dropped + items.length;
+  // Past the end: Echo restarted since the phone last asked, so start over.
+  const from = sinceIndex > end ? 0 : Math.max(0, sinceIndex - dropped);
+  return { items: items.slice(from), nextIndex: end };
 }
 
 export function isRunning(): boolean {
@@ -620,6 +633,7 @@ export async function startRemote(opts: {
   token = getStableToken();
   onStop = opts.onStop ?? null;
   items.length = 0;
+  dropped = 0;
   resetAttempts();
   sessions.revokeAll(); // a restart re-authenticates everyone
   signalling.reset();

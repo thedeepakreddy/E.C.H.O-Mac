@@ -277,6 +277,18 @@ console.log("  a real server, over the network");
     record("did a thing", "go");
     const ev = await fetch(`${base}/events?t=${tok}&since=0`, { headers: auth }).then((r) => r.json() as any);
     ok(ev.items.some((i: any) => i.line === "did a thing"), "the feed carries recorded events once signed in");
+    // Positions are absolute: when old items fall off the ring buffer, the phone
+    // never gets one it has already seen (it read old replies aloud again).
+    const seenAt = (recentItems(0) as any).nextIndex;
+    for (let i = 0; i < 250; i++) record(`filler ${i}`, "progress");
+    const after = recentItems(seenAt);
+    ok(after.items.length === 200 && after.items[0].line === "filler 50", "after the buffer wraps, only what's new and still kept comes back");
+    ok(after.items.every((i) => i.line !== "did a thing"), "an item the phone already saw never comes back");
+    const end = after.nextIndex;
+    record("one more", "reply");
+    const next = recentItems(end);
+    ok(next.items.length === 1 && next.items[0].line === "one more" && next.nextIndex === end + 1, "and the next poll gets exactly the new item");
+    ok(recentItems(end + 999).items.length === 201, "a position past the end (Echo restarted) starts over");
 
     const rtc = await fetch(`${base}/rtc/offer?t=${tok}`, {
       method: "POST", headers: { "content-type": "application/json", ...auth },
