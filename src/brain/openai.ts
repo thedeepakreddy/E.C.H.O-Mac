@@ -2,7 +2,7 @@ import {toolGranted} from '../safety/tool-permissions.js';
 import {codingRequestToolAllowed} from '../coding/tool-selection.js';
 import {codingContinuationEligible} from '../coding/continuation.js';
 import { z } from "zod";
-import { Brain, JARVIS_PERSONA, LOOP_CAPS, buildSystemPrompt, VOICE_TURN_CONTRACT } from "./types.js";
+import { Brain, JARVIS_PERSONA, LOOP_CAPS, buildSystemPrompt, turnContract } from "./types.js";
 import type { AudioTurn, BrainExecutionLimits, SendOptions } from "./types.js";
 import { TOOLS, ToolDef } from "../tools/registry.js";
 import { selectToolNames } from "./tool-router.js";
@@ -295,7 +295,8 @@ export class OpenAIBrain extends Brain {
   send(userText: string, _audio?: AudioTurn, opts?: SendOptions) {
     this.lastSend = opts ?? {};
     const reset = this.memory.begin(userText, opts);
-    if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
+    const contract = turnContract(opts);
+    if (contract) userText = `${userText}\n\n${contract}`;
     noteActivity();
     const style = styleFor(assess());
     if (style) userText = `${userText}\n\n[context: ${style}]`;

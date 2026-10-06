@@ -186,6 +186,8 @@ export const GEMINI_MODEL_FALLBACKS = [
 /** How a turn reached the brain, so the reply can be shaped for the ear or the eye. */
 export interface SendOptions {
   modality?: "voice" | "text";
+  /** Where the turn came from, and so where its reply goes. Absent means the Mac. */
+  channel?: "phone" | "telegram" | "chat";
   /** The voice session's turn id, echoed on streamed fragments. */
   turnId?: string;
   taskId?: string;
@@ -216,6 +218,26 @@ export const VOICE_TURN_CONTRACT =
   "[voice turn — spoken aloud: answer first, in one sentence; at most two sentences (~35 words) unless the user asked for detail; " +
   "no lists, markdown, URLs or code; if the full answer is long, give the one-line version and offer the rest; " +
   "while doing a task, one short clause per step]";
+
+/**
+ * A Telegram turn: the user is texting, and nothing is read aloud. The system
+ * prompt's rules are written for speech (ultra-concise, no lists), which on a
+ * chat reads as a terse machine — this says, per turn, to write like a person.
+ */
+export const CHAT_TURN_CONTRACT =
+  "[telegram chat — the user is texting you from their phone and reads your reply; nothing is spoken. " +
+  "This replaces the read-aloud style for this turn. Write like a real person texting a friend: warm, natural and " +
+  "direct, in your own words; match their tone and length (a quick question gets a quick answer, a real question a " +
+  "real one); react to what they said and ask a follow-up when it is natural; contractions are good, no stiff status " +
+  "phrasing, no headings; short paragraphs, and a short list only when it genuinely helps; links are fine. " +
+  "While working on a task, say what you are doing the way a person would, then report back.]";
+
+/** The per-turn reminder a brain appends to the user's message, if any. */
+export function turnContract(opts?: SendOptions): string | null {
+  if (opts?.channel === "telegram" || opts?.channel === "chat") return CHAT_TURN_CONTRACT;
+  if (opts?.modality === "voice") return VOICE_TURN_CONTRACT;
+  return null;
+}
 
 export abstract class Brain extends EventEmitter {
   declare readonly provider?: string;

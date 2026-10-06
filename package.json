@@ -54,6 +54,7 @@
     "dryruntest": "esbuild src/_dryruntest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_dryruntest.js --log-level=error && node dist/_dryruntest.js",
     "struggletest": "esbuild src/_struggletest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_struggletest.js --log-level=error && node dist/_struggletest.js",
     "researchtest": "esbuild src/_researchtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_researchtest.js --log-level=error && node dist/_researchtest.js",
+    "remoteapptest": "esbuild src/_remoteapptest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_remoteapptest.js --log-level=error && node dist/_remoteapptest.js",
     "remotetest": "esbuild src/_remotetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_remotetest.js --log-level=error && rm -rf /tmp/jarvis-remotetest && JARVIS_REMOTE_DIR=/tmp/jarvis-remotetest node dist/_remotetest.js",
     "gatetest": "esbuild src/_gatetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_gatetest.js --log-level=error && node dist/_gatetest.js",
     "personatest": "esbuild src/_personatest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_personatest.js --log-level=error && node dist/_personatest.js",

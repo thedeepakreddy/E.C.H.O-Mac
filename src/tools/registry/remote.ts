@@ -66,14 +66,19 @@ export const REMOTE_TOOLS: ToolDef[] = [
   {
     name: "open_phone_remote",
     description:
-      "Open full remote control of this Mac from the user's phone: a live view of the screen, two-way talk, sending commands, and approving actions — all behind their password. Reachable from anywhere when both devices are on Tailscale, otherwise same Wi-Fi. Shows a QR code on screen to scan. Use this when they want to see, control, or drive the Mac from their phone. Requires a remote password to be set first (set_remote_password).",
+      "Open full remote control of this Mac from the user's phone: a live view of the screen, two-way talk, sending commands, and approving actions — all behind their password. Reachable from any network (Wi-Fi or mobile data) through the Echo phone app when remote.relayUrl is set; otherwise Tailscale or the same Wi-Fi. Shows a QR code on screen to scan. Use this when they want to see, control, or drive the Mac from their phone. Requires a remote password to be set first (set_remote_password).",
     schema: {},
     readOnly: false,
     handler: async () => {
       // The stop handler and command/confirmation bridges are registered at
       // startup by whoever owns the brain; the tool layer never holds a
       // reference to the running agent.
-      const r = await remote.startRemote();
+      const { activeConfig } = await import("../../config.js");
+      const { getAppPath } = await import("../../utils/appPath.js");
+      const cfg = activeConfig(getAppPath());
+      const r = await remote.startRemote({
+        relay: (await import("../../frontier/relay-agent.js")).relayFromConfig(cfg.remote?.relayUrl),
+      });
       if (r.ok && r.url) await showRemoteLink(r.url);
       return {
         text: r.ok

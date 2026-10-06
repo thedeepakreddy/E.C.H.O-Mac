@@ -1,7 +1,7 @@
 import {toolGranted} from '../safety/tool-permissions.js';
 import { hasExternalToolGrants } from '../safety/tool-permissions.js';
 import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { Brain, LOOP_CAPS, buildSystemPrompt, VOICE_TURN_CONTRACT, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
+import { Brain, LOOP_CAPS, buildSystemPrompt, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
 import {
   currentLoop, normalizeClaudeFinish, claudeTerminalToExit, classifyProviderError,
 } from "../agent-replay/loop-log.js";
@@ -453,7 +453,8 @@ export class ClaudeBrain extends Brain {
     // state contributes nothing at all.
     noteActivity();
     const style = styleFor(assess());
-    const spoken = opts?.modality === "voice" ? `${userText}\n\n${VOICE_TURN_CONTRACT}` : userText;
+    const contract = turnContract(opts);
+    const spoken = contract ? `${userText}\n\n${contract}` : userText;
     const current = style ? `${spoken}\n\n[context: ${style}]` : spoken;
     const tools = this.limits.allowedTools ? TOOLS.filter(tool => toolGranted(this.limits.allowedTools,tool.name)) : TOOLS;
     const history = [{ role: "user", content: current }];

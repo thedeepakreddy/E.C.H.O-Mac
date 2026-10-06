@@ -74,10 +74,13 @@ import { presenceMonitor } from "./frontier/presence.js";
 import { noteLeft, noteReturned } from "./frontier/changed.js";
 import { stopResearchNow } from "./frontier/researcher.js";
 import {
-  setInterruptHandler, stopRemote, setCommandHandler, macConfirmRelay, startRemote, record as remoteRecord
+  setInterruptHandler, stopRemote, setCommandHandler, macConfirmRelay, startRemote, record as remoteRecord,
+  setStatusProvider, setActionHandler, setPublicUrlListener, setChatHandler, chatReply, chatIdle
 } from "./frontier/remote.js";
+import { listSessions as listCodingProjects } from "./coding/session.js";
 import { hasPassword as hasRemotePassword } from "./frontier/remoteauth.js";
 import { saveRemoteUrl } from "./frontier/remotelink.js";
+import { relayFromConfig } from "./frontier/relay-agent.js";
 import { startCaptureBridge, stopCaptureBridge } from "./frontier/remotecapture.js";
 import { startTelegram, type TelegramBridge } from "./frontier/telegram.js";
 import { toggleGestures } from "./tools/gestures.js";
@@ -214,6 +217,34 @@ function abortSttStreams(why: string) {
   sttStreams.clear();
 }
 let telegram: TelegramBridge | null = null;
+
+/**
+ * Where a turn's reply goes. A command from the phone remote or Telegram is
+ * answered THERE — on the phone, or in the chat — and not out of the Mac's
+ * speakers, where nobody asked. Keyed by voice-session turn id, so a new turn
+ * at the Mac is local again without anything having to reset it.
+ */
+type RemoteChannel = "phone" | "telegram" | "chat";
+const remoteTurns = new Map<string, RemoteChannel>();
+function remoteChannelOf(turnId: string | null | undefined): RemoteChannel | undefined {
+  return turnId ? remoteTurns.get(turnId) : undefined;
+}
+/** The channel for output being produced right now: the current turn's, else the brain's. */
+function replyChannel(): RemoteChannel | "local" {
+  return remoteChannelOf(voiceSession?.current?.id) ?? remoteChannelOf(voiceSession?.brainTurnId) ?? "local";
+}
+/** Send something Echo would have said to the device the turn came from. */
+function deliverRemote(channel: RemoteChannel, text: string): void {
+  if (channel === "telegram") {
+    void telegram?.reply(text).catch((error) => console.error("[telegram] reply failed:", error));
+  } else if (channel === "chat") {
+    // The phone app's chat: a message in the conversation, not speech.
+    chatReply(text);
+  } else {
+    // The phone polls these and reads them out in its own voice.
+    remoteRecord(`Echo: ${text}`, "reply");
+  }
+}
 let lastBrainStatus = "idle";
 let lastAssistantText = "";
 /**
@@ -793,7 +824,8 @@ function dispatchToBrainUnchecked(text: string, audio?: AudioTurn, turn: Turn | 
   // The window has to outlive the turn, because the SOUND does. It ages out
   // by SPOKEN_MEMORY_CHARS instead.
   // Open the TTS socket while the model thinks, so the first sentence does not wait for it.
-  if (cfg.voice.ttsEnabled) speech?.warm(text);
+  const channel = remoteChannelOf(turn?.id);
+  if (cfg.voice.ttsEnabled && !channel) speech?.warm(text);
   // Speculative execution (AGI blueprint #10), scoped to the one read-only
   // call GUI tasks always pay for at the start: see ax.ts's warmDump doc
   // comment for why this is single-use and short-lived rather than a general
@@ -808,7 +840,7 @@ function dispatchToBrainUnchecked(text: string, audio?: AudioTurn, turn: Turn | 
     .beginTurn(text, cfg.agi.autoReflex, app.getAppPath())
     .then((capture) => { if (capture.capturing) autoReflexTurn = { command: text, capture }; })
     .catch((err) => console.error("[autoreflex] beginTurn failed:", (err as any)?.message ?? err));
-  brain.send(text, audio, { modality, turnId: turn?.id, scope: currentScope() });
+  brain.send(text, audio, { modality, turnId: turn?.id, scope: currentScope(), ...(channel ? { channel } : {}) });
 }
 
 /**
@@ -1411,12 +1443,18 @@ function brainHandlers(): BrainHandlers {
         "text": (t: string) => {
             console.log(`[echo] says: ${t}`);
             const live = voiceSession.brainOutputIsLive();
+            const channel = replyChannel();
             voiceSession.noteBrainText(t);
-            remoteRecord(`Echo: ${t}`, "jarvis");
-            void telegram?.reply(t).catch((error) => console.error("[telegram] reply failed:", error));
             narrateSaid(t);
             lastAssistantText = t;
             send("message", { kind: "assistant", text: t });
+            // Asked from the phone or Telegram: answered there, and not spoken
+            // at the Mac. Shown on the HUD all the same.
+            if (channel !== "local") {
+                if (live) deliverRemote(channel, t);
+                return;
+            }
+            remoteRecord(`Echo: ${t}`, "jarvis");
             // Output the user has already cancelled is shown, never spoken: a stale
             // answer read out a moment after "stop" is the most confusing thing a voice
             // assistant can do.
@@ -1444,10 +1482,12 @@ function brainHandlers(): BrainHandlers {
                 return;
             if (!voiceSession.brainOutputIsLive())
                 return; // cancelled: shown later, never spoken
+            if (replyChannel() !== "local")
+                return; // answered on the phone or in Telegram, not aloud here
             speech.feed(text);
         },
         "textDone": () => {
-            if (speech && voiceSession.brainOutputIsLive())
+            if (speech && voiceSession.brainOutputIsLive() && replyChannel() === "local")
                 speech.endBlock();
         },
         "tool": (info: {
@@ -1490,7 +1530,7 @@ function brainHandlers(): BrainHandlers {
                 controlTelemetry.finishTask("done");
             }
             publishControlUpdate();
-            telegram?.finishTurn();
+            telegram?.finishTurn(); chatIdle();
             voiceSession.noteBrainDone();
             // If TTS is off there is no speech-finished callback, so arm the mic now.
             maybeAutoListen();
@@ -1508,7 +1548,7 @@ function brainHandlers(): BrainHandlers {
                 controlTelemetry.finishTask("failed");
             }
             publishControlUpdate();
-            telegram?.finishTurn();
+            telegram?.finishTurn(); chatIdle();
             send("notice", { level: "error", text: msg });
         }
     };
@@ -2064,6 +2104,15 @@ async function wireTts() {
     // Echo just finished — open the mic for an answer, or the conversation window.
     if (!speaking) maybeAutoListen();
   }, { speaker: cfg.voice.sarvamSpeaker, pace: cfg.voice.sarvamPace }, cfg.voice.piperVoice);
+  // Every other thing Echo says — a confirmation question, "Cancelled.", a
+  // task report — goes through tts.say, so this is the one place it is routed:
+  // during a phone or Telegram turn it goes to that device instead.
+  const sayHere = tts.say.bind(tts);
+  tts.say = (text: string) => {
+    const channel = replyChannel();
+    if (channel === "local") return sayHere(text);
+    deliverRemote(channel, text);
+  };
   tts.onAudioStart((text) => {
     // Both speech paths reach here as each sentence starts playing, which is
     // exactly the text that can leak into the microphone from now on.
@@ -2557,7 +2606,9 @@ app.whenReady().then(async () => {
     if (!hasRemotePassword()) {
       console.log("[jarvis] remote.alwaysOn is set but no remote password — not starting. Set one first.");
     } else {
-      void startRemote({ ttlMs: 0 })
+      void startRemote({
+        ttlMs: 0, relay: relayFromConfig(cfg.remote.relayUrl),
+      })
         .then((r) => {
           if (r.ok && r.url) {
             saveRemoteUrl(r.url);
@@ -2974,18 +3025,23 @@ setInterruptHandler(() => {
  * after any "stop" earlier in the session, replies to phone commands were
  * treated as leftovers of the cancelled turn and never spoken.
  */
-function handleRemoteCommand(text: string, source: "phone" | "telegram"): void {
+function handleRemoteCommand(text: string, source: RemoteChannel, modality: "voice" | "text" = "text"): void {
   if (shuttingDown) return;
   const revision = inputRevision;
   if (brainLifecycle?.isSwitching) {
     void brainLifecycle.ready().then(ready => {
-      if (ready && !shuttingDown && revision === inputRevision) handleRemoteCommand(text, source);
+      if (ready && !shuttingDown && revision === inputRevision) handleRemoteCommand(text, source, modality);
     }).catch(error => console.error('[brain] pending remote command failed:', error));
     return;
   }
+  // The turn starts here, before the confirmation and memory shortcuts, so
+  // even their answers go back to the device that asked.
+  const turn = voiceSession.beginTurn("typed");
+  remoteTurns.set(turn.id, source);
+  if (remoteTurns.size > 64) remoteTurns.delete(remoteTurns.keys().next().value!);
   try {
     console.log(`[jarvis] ${source} command: ${text}`);
-    send("message", { kind: "user", text: `${source === "phone" ? "📱" : "✈️"} ${text}` });
+    send("message", { kind: "user", text: `${source === "telegram" ? "✈️" : source === "chat" ? "💬" : "📱"} ${text}` });
     if (maybeAnswerConfirmation(text)) return;
     void maybeMemoryCommand(text)
       .then(async (handled) => {
@@ -2995,7 +3051,7 @@ function handleRemoteCommand(text: string, source: "phone" | "telegram"): void {
         await refreshScope();
         if (shuttingDown || revision !== inputRevision) return;
         beginLearnedTurn(text);
-        dispatchToBrain(text, undefined, voiceSession.beginTurn("typed"), "text");
+        dispatchToBrain(text, undefined, turn, modality);
       })
       .catch((e) => console.error(`[jarvis] ${source} command failed:`, e));
   } catch (e) {
@@ -3006,7 +3062,83 @@ function handleRemoteCommand(text: string, source: "phone" | "telegram"): void {
 // Commands typed or spoken on the phone flow through the same path as
 // Telegram, and through the same safety gate — a risky action still asks, and
 // the question can be answered from the phone.
-setCommandHandler((text: string) => handleRemoteCommand(text, "phone"));
+// The phone app's chat: answered in the conversation, like Telegram — a voice
+// note there is still a chat message, so it gets the chat style, not speech.
+setChatHandler((text: string) => handleRemoteCommand(text, "chat", "text"));
+
+// Spoken on the phone gets the short spoken style; typed gets text.
+setCommandHandler((text: string, via) => handleRemoteCommand(text, "phone", via === "voice" ? "voice" : "text"));
+
+/**
+ * Everything the phone's pages show, from the same telemetry the desktop
+ * control panel reads, so the two never disagree. Private projects stay off
+ * the phone, and the log is sent incrementally after the id the phone has.
+ */
+setStatusProvider((logsAfter) => {
+  const snap = controlTelemetry.snapshot(controlRuntime());
+  const active = snap.models.find((m) => m.active);
+  const trim = (text: unknown, n: number) => String(text ?? "").slice(0, n);
+  return {
+    status: String(snap.state.status ?? "idle"),
+    brain: active ? { id: active.id, label: active.label, model: active.model } : null,
+    models: snap.models
+      .filter((m) => m.available || m.active)
+      .map((m) => ({ id: m.id, label: m.label, model: m.model, active: m.active })),
+    voice: {
+      ttsEnabled: snap.settings.voice.ttsEnabled,
+      wakeWord: snap.settings.voice.wakeWord,
+      bargeIn: snap.settings.voice.bargeIn,
+    },
+    analytics: snap.analytics,
+    tasks: snap.tasks.slice(-6).map((t) => ({ id: t.id, title: trim(t.title, 160), status: t.status, startedAt: t.startedAt, finishedAt: t.finishedAt ?? null })),
+    missions: snap.missions.slice(0, 8).map((m) => ({
+      id: m.id, goal: trim(m.goal, 200), status: m.status, createdAt: m.createdAt, updatedAt: m.updatedAt,
+      steps: Object.values(m.tasks).slice(0, 12).map((t) => ({ goal: trim(t.goal, 140), status: t.status, actor: t.actorName ?? null, startedAt: t.startedAt ?? null })),
+    })),
+    projects: listCodingProjects()
+      .filter((p) => !p.privateMode)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 20)
+      .map((p) => ({ id: p.id, name: p.name, phase: p.phase, revision: p.revision, criteria: p.acceptance.length,
+        updatedAt: p.updatedAt, question: p.question && !p.question.answer ? trim(p.question.text, 200) : null })),
+    connections: snap.connections.map((c) => ({ name: c.name, status: c.status })),
+    agents: snap.agents.slice(0, 12).map((a) => ({ id: a.id, name: trim(a.name, 60), goal: trim(a.goal, 160), status: a.status, progress: trim(a.progress, 160), startedAt: a.startedAt })),
+    logs: snap.logs.filter((l) => l.id > logsAfter).slice(-80).map((l) => ({ id: l.id, at: l.at, kind: l.kind, text: trim(l.text, 400) })),
+  };
+});
+
+// The public link's address changes whenever the tunnel restarts, so each new
+// one is saved (the HUD's remote button and phone_remote_status read it) and
+// sent to the user's own Telegram chats — the phone needs it to get back in.
+// A permanent link comes back unchanged after every reconnect; it is sent once.
+let lastSentRemoteUrl = "";
+setPublicUrlListener((url) => {
+  if (!url || url === lastSentRemoteUrl) return;
+  lastSentRemoteUrl = url;
+  saveRemoteUrl(url);
+  const tell = (triesLeft: number) => {
+    // At launch the remote starts before Telegram does; wait for it briefly.
+    if (!telegram) { if (triesLeft > 0) setTimeout(() => tell(triesLeft - 1), 5000); return; }
+    void telegram.notify(`Echo remote — new link (works on Wi-Fi and mobile data):\n${url}`)
+      .catch((error) => console.error("[telegram] could not send the remote link:", error));
+  };
+  tell(6);
+});
+
+// The phone's short list of controls, run through the control panel's own
+// handlers so the same checks apply (an unavailable brain is refused, voice
+// settings are saved the same way). parseRemoteAction already refused the rest.
+setActionHandler(async (action) => {
+  let result: { ok: boolean; message?: string };
+  if (action.type === "switch-model") result = await handleControlAction({ type: "switch-model", provider: action.provider });
+  else if (action.type === "set-voice") result = await handleControlAction({ type: "save-settings", settings: { voice: { [action.key]: action.value } } as any });
+  else if (action.type === "open-neural") result = await handleControlAction({ type: "neural" });
+  // Face ID was checked by the remote before this is reached.
+  else if (action.type === "power-off") result = await handleControlAction({ type: "shutdown" });
+  else result = await handleControlAction({ type: "stop-mission", missionId: action.missionId });
+  publishControlUpdate();
+  return result;
+});
 
 function handleTelegramCommand(text: string): void {
   handleRemoteCommand(text, "telegram");

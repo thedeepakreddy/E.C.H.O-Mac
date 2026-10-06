@@ -11,8 +11,14 @@ import {
   newToken, tokenMatches, tokenFrom, routeOf, record, recentItems,
   renderPage, lanAddress, preferredHost, isLockedOut, noteBadAttempt, resetAttempts,
   startRemote, stopRemote, isRunning, remoteStatus,
-  MAX_ITEMS, MAX_BAD_ATTEMPTS,
+  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, remoteAssetDir,
 } from "./frontier/remote.js";
+import { parseBattery } from "./frontier/remote-vitals.js";
+import { replayLocally, relayFromConfig, RelayAgent, CLIENT_IP_HEADER } from "./frontier/relay-agent.js";
+import http from "node:http";
+import { turnContract, CHAT_TURN_CONTRACT, VOICE_TURN_CONTRACT } from "./brain/types.js";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { setPassword } from "./frontier/remoteauth.js";
 
 let pass = 0, fail = 0;
@@ -100,18 +106,118 @@ console.log("  the feed does not grow forever");
 console.log("  the page is self-contained");
 {
   const html = renderPage("deadbeef");
-  ok(!/https?:\/\//.test(html.replace(/http:\/\/'/g, "")), "no external resources are loaded");
-  ok(/deadbeef/.test(html), "the token is baked in so the phone need not retype it");
+  ok(!/https?:\/\//.test(html), "no external resources are loaded");
+  ok(/app\/remote\.js\?t=deadbeef/.test(html), "the token is baked into every app URL so the phone need not retype it");
+  ok(!/__T__/.test(html), "and no placeholder is left behind");
   ok(/viewport/.test(html), "it is sized for a phone");
-  ok(/Stop/.test(html), "there is a stop button");
-  ok(!/eval\(|innerHTML\s*=\s*[^'"]/.test(html.replace(/innerHTML = '<time><\/time><span><\/span>'/, "")),
-     "and no place where feed text is injected as markup");
+  ok(/Stop everything/.test(html), "there is a stop button");
+  ok(/reactor-jarvis-core\.png/.test(html) && /id="login"[\s\S]*class="hud/.test(html), "the login screen shows the real reactor");
+  ok(!/<script>/.test(html), "no inline script, so the policy can forbid it");
+  let threw = false;
+  try { renderPage('"><script>'); } catch { threw = true; }
+  ok(threw, "a token that is not hex is refused rather than written into the page");
 }
 {
-  // The feed text is set with textContent, never interpolated into HTML —
-  // otherwise a filename on screen could inject script into the phone page.
-  const html = renderPage("x");
-  ok(/textContent = it\.line/.test(html), "feed lines are set as TEXT, so they cannot become markup");
+  // Text from the Mac is set as TEXT, never parsed as markup — otherwise a
+  // filename on screen could inject script into a phone that drives the Mac.
+  const js = readFileSync(join(remoteAssetDir(), "remote.js"), "utf8");
+  ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/.test(js), "the phone script never turns data into markup");
+  ok(/textContent/.test(js), "it writes Mac text with textContent");
+  const css = readFileSync(join(remoteAssetDir(), "remote.css"), "utf8");
+  ok(!/https?:\/\//.test(css) && !/@import/.test(css), "the stylesheet loads nothing from elsewhere");
+  for (const name of readdirSync(remoteAssetDir())) {
+    ok(name === "index.html" || routeOf(`/app/${name}`) === "asset", `${name} is reachable as an app file`);
+  }
+}
+
+console.log("  app files and controls");
+{
+  ok(routeOf("/app/remote.css") === "asset", "/app/remote.css is an app file");
+  ok(routeOf("/app/../remote.ts") === "unknown", "a dot-dot under /app is not");
+  ok(routeOf("/app/%2e%2e%2fconfig.json") === "unknown", "nor an encoded one");
+  ok(routeOf("/app/index.html") === "unknown", "the page itself is only served at /");
+  ok(routeOf("/status") === "status" && routeOf("/action") === "action" && routeOf("/keys") === "keys", "status, action and keys are routes");
+
+  ok(parseRemoteAction({ type: "switch-model", provider: "claude" })?.type === "switch-model", "switching the brain is allowed");
+  ok(parseRemoteAction({ type: "set-voice", key: "wakeWord", value: false })?.type === "set-voice", "the three voice switches are allowed");
+  ok(parseRemoteAction({ type: "stop-mission", missionId: "supervised.abc-123" })?.type === "stop-mission", "stopping a task is allowed");
+  for (const type of ["shutdown", "save-api-keys", "api-keys", "save-settings", "spawn-agent", "save-agent", "openrouter-sign-out"]) {
+    ok(parseRemoteAction({ type }) === null, `"${type}" is refused from the phone`);
+  }
+  ok(parseRemoteAction({ type: "set-voice", key: "sttProvider", value: true }) === null, "a voice setting outside the three is refused");
+  ok(parseRemoteAction({ type: "set-voice", key: "wakeWord", value: "yes" }) === null, "and a non-boolean value");
+  ok(parseRemoteAction({ type: "switch-model", provider: "../x" }) === null, "and a malformed provider");
+  ok(!("cmd+q" in REMOTE_KEYS) && !("cmd+w" in REMOTE_KEYS), "no key chord can quit or close the Mac's apps");
+
+  ok(routeOf("/frame") === "frame", "/frame is a screen still");
+  ok(routeOf("/ping") === "ping", "/ping is a cheap check behind the link token");
+  ok(turnContract({ channel: "telegram", modality: "text" }) === CHAT_TURN_CONTRACT, "a Telegram turn is asked to chat like a person");
+  ok(turnContract({ channel: "telegram", modality: "voice" }) === CHAT_TURN_CONTRACT, "even if it came in as a voice note");
+  ok(turnContract({ channel: "phone", modality: "voice" }) === VOICE_TURN_CONTRACT, "speech from the phone keeps the short spoken style");
+  ok(turnContract({ modality: "text" }) === null, "and a typed turn at the Mac gets neither");
+
+  const b = parseBattery(" -InternalBattery-0 (id=22675555)\t81%; discharging; 9:17 remaining present: true");
+  ok(b?.percent === 81 && !b.charging && b.remaining === "9:17", "the battery line is read");
+  ok(parseBattery("Now drawing from 'AC Power'") === null, "and a Mac without one reads as none");
+  ok(parseBattery("-InternalBattery-0\t100%; charged; 0:00 remaining")?.charging === true, "charged counts as on power");
+}
+
+console.log("  the phone app's relay connection");
+{
+  // A stand-in for Echo's own loopback listener.
+  const seen: Array<{ method: string; url: string; ip: string; cookie: string; body: string }> = [];
+  const local = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ method: req.method!, url: req.url!, ip: String(req.headers[CLIENT_IP_HEADER] ?? ""), cookie: String(req.headers.cookie ?? ""), body });
+      res.writeHead(201, { "content-type": "application/json", "set-cookie": "js=abc", "x-private": "no" });
+      res.end('{"ok":true}');
+    });
+  });
+  await new Promise<void>((r) => local.listen(0, "127.0.0.1", () => r()));
+  const localBase = `http://127.0.0.1:${(local.address() as any).port}`;
+  const reply = await replayLocally({ id: "j1", method: "POST", path: "/login?t=abc", ip: "203.0.113.5",
+    headers: { "content-type": "application/json", cookie: "js=old" }, body: Buffer.from('{"password":"x"}').toString("base64") }, localBase);
+  ok(reply.status === 201 && Buffer.from(reply.body, "base64").toString() === '{"ok":true}', "a collected request is replayed locally and its answer carried back");
+  ok(seen[0].url === "/login?t=abc" && seen[0].body === '{"password":"x"}' && seen[0].cookie === "js=old", "path, query, body and session cookie arrive unchanged");
+  ok(seen[0].ip === "203.0.113.5", "with the phone's own address, for the lockout");
+  ok(reply.headers["set-cookie"] === "js=abc" && !("x-private" in reply.headers), "only content-type, set-cookie and cache-control go back");
+  const bad = await replayLocally({ id: "j2", method: "GET", path: "//evil.example.com/x", ip: "", headers: {}, body: "" }, localBase);
+  ok(bad.status === 400 && seen.length === 1, "a path that could leave this Mac is refused before any request");
+  const other = await replayLocally({ id: "j3", method: "DELETE", path: "/stop", ip: "", headers: {}, body: "" }, localBase);
+  ok(other.status === 201 && seen[1].method === "GET", "only GET and POST are ever replayed");
+
+  const saved = process.env.ECHO_RELAY_SECRET;
+  process.env.ECHO_RELAY_SECRET = "x".repeat(48);
+  ok(relayFromConfig("https://echo-remote.onrender.com")?.url === "https://echo-remote.onrender.com", "an https relay with a long secret is used");
+  ok(relayFromConfig("http://echo-remote.onrender.com") === undefined, "plain http is refused (except on this Mac, for testing)");
+  ok(relayFromConfig("") === undefined, "no address, no relay");
+  process.env.ECHO_RELAY_SECRET = "short";
+  ok(relayFromConfig("https://echo-remote.onrender.com") === undefined, "a short secret is refused");
+  if (saved === undefined) delete process.env.ECHO_RELAY_SECRET; else process.env.ECHO_RELAY_SECRET = saved;
+
+  // The agent against a minimal stand-in relay: one job in, one reply out.
+  const SECRET = "y".repeat(48);
+  let replied: any = null, polls = 0;
+  const relay = http.createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${SECRET}`) { res.writeHead(404); return res.end(); }
+    if (req.url === "/agent/poll") {
+      polls++;
+      if (polls === 1) { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ id: "r1", method: "GET", path: "/status?t=zz", ip: "198.51.100.1", headers: {}, body: "" })); }
+      return setTimeout(() => { res.writeHead(204); res.end(); }, 100);
+    }
+    let body = ""; req.on("data", (c) => (body += c)); req.on("end", () => { replied = JSON.parse(body); res.writeHead(204); res.end(); });
+  });
+  await new Promise<void>((r) => relay.listen(0, "127.0.0.1", () => r()));
+  const states: boolean[] = [];
+  const agent = new RelayAgent(`http://127.0.0.1:${(relay.address() as any).port}`, SECRET, localBase, (on) => states.push(on));
+  agent.start();
+  for (let i = 0; i < 40 && !replied; i++) await new Promise((r) => setTimeout(r, 50));
+  agent.stop();
+  ok(replied?.id === "r1" && replied.status === 201, "the agent collects a phone request and answers it");
+  ok(states[0] === true && states.at(-1) === false, "and reports connecting and disconnecting");
+  local.closeAllConnections(); local.close(); relay.closeAllConnections(); relay.close();
 }
 
 console.log("  refuses to open with no password set");
@@ -184,6 +290,33 @@ console.log("  a real server, over the network");
     const getStop = await fetch(`${base}/stop?t=${tok}`, { headers: auth });
     ok(getStop.status === 404, "stop cannot be triggered by a GET");
 
+    // ---- the app files and the new controls ----
+    const css = await fetch(`${base}/app/remote.css?t=${tok}`);
+    ok(css.status === 200 && /text\/css/.test(css.headers.get("content-type") ?? ""), "the stylesheet is served with the link token");
+    const cssNoToken = await fetch(`${base}/app/remote.css`);
+    ok(cssNoToken.status === 404, "and not without it");
+    const png = await fetch(`${base}/app/reactor-jarvis-core.png?t=${tok}`);
+    ok(png.status === 200 && (png.headers.get("content-type") ?? "") === "image/png", "the reactor art is served");
+    const missing = await fetch(`${base}/app/nothing-here.js?t=${tok}`);
+    ok(missing.status === 404, "a well-formed name that does not exist is still a 404");
+
+    const statusNoSession = await fetch(`${base}/status?t=${tok}`);
+    ok(statusNoSession.status === 401, "status needs the password, not just the link");
+    const status = await fetch(`${base}/status?t=${tok}`, { headers: auth }).then((r) => r.json() as any);
+    ok(typeof status.vitals?.uptimeSec === "number" && status.vitals.cores > 0, "status carries the Mac's vitals");
+    ok(status.remote?.expiresAt > Date.now(), "and when the link closes");
+
+    const post = (path: string, payload: unknown) => fetch(`${base}${path}?t=${tok}`, {
+      method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify(payload),
+    });
+    ok((await post("/action", { type: "shutdown" })).status === 400, "quitting Echo is refused over the network");
+    ok((await post("/action", { type: "save-api-keys", apiKeys: { X: "y" } })).status === 400, "and saving API keys");
+    ok((await post("/keys", { key: "cmd+q" })).status === 400, "a key chord outside the list is refused");
+    ok((await post("/keys", { text: "x".repeat(501) })).status === 400, "and over-long typing");
+    ok((await post("/mouse", { action: "teleport" })).status === 400, "and an unknown mouse action");
+    const getKeys = await fetch(`${base}/keys?t=${tok}`, { headers: auth });
+    ok(getKeys.status === 404, "typing cannot be triggered by a GET");
+
     let stopped = false;
     await stopRemote();
     await startRemote({ port: 7799, ttlMs: 60_000, onStop: () => { stopped = true; } });
@@ -211,6 +344,27 @@ console.log("  a real server, over the network");
     const cookie2 = (login2.headers.get("set-cookie") ?? "").split(";")[0];
     await fetch(`${base}/stop?t=${tokNew}`, { method: "POST", headers: { cookie: cookie2 } });
     ok(stopped, "a POST to stop, signed in, reaches the stop handler");
+
+    const ping = await fetch(`${base}/ping?t=${tokNew}`);
+    ok(ping.status === 204, "the watchdog's ping answers with the link token");
+    const pingNoToken = await fetch(`${base}/ping`);
+    ok(pingNoToken.status === 404, "and is a 404 without it, like everything else");
+    const frameNoSession = await fetch(`${base}/frame?t=${tokNew}`);
+    ok(frameNoSession.status === 401, "a screen still needs the password, not just the link");
+
+    // The relay agent's client-address header is believed only on the
+    // loopback listener. Sent to the LAN listener it must not give each guess
+    // a fresh address, or the lockout would never trigger.
+    for (let i = 0; i < 5; i++) {
+      await fetch(`${base}/login?t=${tokNew}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", [CLIENT_IP_HEADER]: `203.0.113.${i + 1}` },
+        body: JSON.stringify({ password: "wrong" }),
+      });
+    }
+    const afterSpoof = await fetch(`${base}/?t=${tokNew}`);
+    ok(afterSpoof.status === 404, "a forged client-address header on the LAN does not dodge the lockout");
+    resetAttempts();
 
     const msg = await stopRemote();
     ok(/won't work again/.test(msg), "closing says the link is dead");

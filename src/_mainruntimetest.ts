@@ -139,7 +139,7 @@ function runtime(names: string[], additions: Record<string, unknown> = {}) {
     brain: {provider: 'ollama'}, ollamaFailureStreak: 0, lastAssistantText: '', lastBrainStatus: 'idle', expectAnswer: false,
     voiceSession: {noteBrainDone() {}}, remoteRecord() {}, endAutoReflex() {}, finishTurn() {}, publishControlUpdate() {},
     maybeAutoListen() {}, send() {}, tts: {say() {}}, shuttingDown: false, inputRevision: 0,
-    telegram: undefined, automaticTasks: {control:()=>null,handle:()=>null},
+    telegram: undefined, chatIdle() {}, automaticTasks: {control:()=>null,handle:()=>null},
     currentScope:()=>({}), captureAllowed:()=>true, ...additions,
   };
   const functions = names.map(name => declaration('src/main.ts', name)).join('\n');

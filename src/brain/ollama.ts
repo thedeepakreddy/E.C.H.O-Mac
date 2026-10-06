@@ -1,6 +1,6 @@
 import {toolGranted} from '../safety/tool-permissions.js';
 import { z } from "zod";
-import { Brain, LOOP_CAPS, LOCAL_PERSONA, VOICE_TURN_CONTRACT, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
+import { Brain, LOOP_CAPS, LOCAL_PERSONA, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
 import { TOOLS, TOOL_MAP } from "../tools/registry.js";
 import { classify, bareToolName } from "../safety/risk.js";
 import { runGated } from "../safety/gate.js";
@@ -95,7 +95,8 @@ export class OllamaBrain extends Brain {
   send(userText: string, _audio?: AudioTurn, opts?: SendOptions) {
     this.lastSend = opts ?? {};
     const reset = this.memory.begin(userText, opts);
-    if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
+    const contract = turnContract(opts);
+    if (contract) userText = `${userText}\n\n${contract}`;
     // How the user is doing changes how a reply should read, and it changes
     // between turns — so it rides along with each message rather than being
     // baked into the system prompt at startup. Silent in the ordinary case: a

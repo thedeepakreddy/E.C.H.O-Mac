@@ -10,7 +10,7 @@ import {
   JARVIS_PERSONA,
   LOOP_CAPS,
   buildSystemPrompt,
-  VOICE_TURN_CONTRACT,
+  turnContract,
 } from "./types.js";
 import type { AudioTurn, BrainExecutionLimits, SendOptions } from "./types.js";
 import { stripAudioParts, toInlineDataPart } from "../voice/audio-turn.js";
@@ -290,7 +290,8 @@ export class GeminiBrain extends Brain {
     this.lastSend = opts ?? {};
     const reset = this.memory.begin(userText, opts);
     // A spoken turn gets the per-turn reminder that it will be read aloud.
-    if (opts?.modality === "voice") userText = `${userText}\n\n${VOICE_TURN_CONTRACT}`;
+    const contract = turnContract(opts);
+    if (contract) userText = `${userText}\n\n${contract}`;
     // How the user is doing changes how a reply should read, and it changes
     // between turns — so it rides along with each message rather than being
     // baked into the system prompt at startup. Silent in the ordinary case: a

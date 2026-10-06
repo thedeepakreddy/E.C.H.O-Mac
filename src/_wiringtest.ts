@@ -100,7 +100,8 @@ function ok(value: unknown, message: string): void {
     ["memory invalidation", /takeInvalidation\(/],
     ["fleet allowedTools", /allowedTools/],
     ["struggle-aware style", /styleFor\(assess\(\)\)/],
-    ["voice turn contract", /VOICE_TURN_CONTRACT/],
+    // The spoken (and Telegram chat) per-turn reminder, chosen by turnContract.
+    ["voice turn contract", /turnContract\(opts\)/],
     // Ollama had none of this. The other three could read mail and search
     // GitHub through Composio; the offline one answered that no such tool
     // existed — the same account, a different Echo.
@@ -339,7 +340,7 @@ console.log("  every way in answers a pending permission question");
     // which no longer has the check inline.
     // The phone and Telegram share one handler, so check that it asks, and
     // that both actually go through it.
-    ["the phone remote", /setCommandHandler\(\(text: string\) => handleRemoteCommand\(text, "phone"\)\)/],
+    ["the phone remote", /setCommandHandler\(\(text: string(?:, via)?\) => handleRemoteCommand\(text, "phone"/],
     ["Telegram", /function handleTelegramCommand[\s\S]{0,120}?handleRemoteCommand\(text, "telegram"\)/],
   ];
   for (const [what, pattern] of entryPoints) {
