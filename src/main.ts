@@ -231,6 +231,11 @@ function remoteChannelOf(turnId: string | null | undefined): RemoteChannel | und
 }
 /** The channel for output being produced right now: the current turn's, else the brain's. */
 function replyChannel(): RemoteChannel | "local" {
+  // While the brain is still answering a turn, its words go back to where that
+  // turn came from. A newer turn (a Listen tapped on the phone meanwhile) must
+  // not take an older turn's answer: a hand-off's inbox summary was read aloud
+  // on the phone that way, and never reached the chat that asked for it.
+  if (voiceSession?.brainTurnActive) return remoteChannelOf(voiceSession.brainTurnId) ?? "local";
   return remoteChannelOf(voiceSession?.current?.id) ?? remoteChannelOf(voiceSession?.brainTurnId) ?? "local";
 }
 /** Send something Echo would have said to the device the turn came from. */

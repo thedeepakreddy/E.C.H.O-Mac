@@ -302,7 +302,8 @@ function runHandoff(task: HandoffTask): Promise<{ ok: boolean; summary: string }
     chat().setTyping(true);
     const timer = setTimeout(() => {
       if (handoffTurn?.resolve === resolve) handoffTurn = null;
-      resolve({ ok: true, summary: "Started on your Mac; it's still working on it." });
+      // Said as it is: not finished. (It used to count as done, with "still working".)
+      resolve({ ok: false, summary: "It didn't finish within 20 minutes. It may still be going: look in Chat, or ask again." });
     }, HANDOFF_TURN_MS);
     handoffTurn = { replies: [], resolve, timer };
     try { chatHandler(task.text, "typed"); } catch (e: any) { chatIdle(String(e?.message ?? e)); }
