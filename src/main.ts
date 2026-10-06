@@ -1548,7 +1548,7 @@ function brainHandlers(): BrainHandlers {
                 controlTelemetry.finishTask("failed");
             }
             publishControlUpdate();
-            telegram?.finishTurn(); chatIdle();
+            telegram?.finishTurn(); chatIdle(msg);
             send("notice", { level: "error", text: msg });
         }
     };

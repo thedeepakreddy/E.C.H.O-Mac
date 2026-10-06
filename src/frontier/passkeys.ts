@@ -153,6 +153,26 @@ export class PasskeyStore {
   verify(cred: any, origin: string, rpId: string, purpose: Exclude<PasskeyPurpose, "register">, now = Date.now()): true {
     const clientRaw = fromB64url(cred?.response?.clientDataJSON);
     this.clientData(clientRaw, "webauthn.get", origin, purpose, now);
+    return this.checkAssertion(cred, clientRaw, rpId);
+  }
+
+  /**
+   * Verify Face ID over something the phone signed while the Mac was away: the
+   * challenge is the hash of that thing itself (a hand-off task), not one this
+   * Mac handed out, so it's checked against `expectedChallenge`. Single use is
+   * the caller's job (a task id only ever runs once).
+   */
+  verifySigned(cred: any, origin: string, rpId: string, expectedChallenge: string): true {
+    const clientRaw = fromB64url(cred?.response?.clientDataJSON);
+    let data: any;
+    try { data = JSON.parse(clientRaw.toString("utf8")); } catch { throw new Error("That Face ID answer is unreadable."); }
+    if (data.type !== "webauthn.get") throw new Error("Wrong passkey ceremony.");
+    if (data.origin !== origin) throw new Error("This passkey request came from somewhere else.");
+    if (data.challenge !== expectedChallenge) throw new Error("Face ID approved something else.");
+    return this.checkAssertion(cred, clientRaw, rpId);
+  }
+
+  private checkAssertion(cred: any, clientRaw: Buffer, rpId: string): true {
     const key = this.keys.find((k) => k.id === String(cred?.id ?? cred?.rawId ?? ""));
     if (!key) throw new Error("This phone's Face ID isn't set up with Echo yet.");
     const authRaw = fromB64url(cred?.response?.authenticatorData);

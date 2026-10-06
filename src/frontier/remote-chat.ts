@@ -17,6 +17,10 @@ export interface ChatMessage {
   from: "you" | "echo";
   text: string;
   kind: "text" | "voice";
+  /** "phone": answered in Phone mode and copied here once the Mac was back. "handoff": a job left on the phone with Face ID. */
+  via?: "phone" | "handoff";
+  /** The phone's own id for a copied message, so a copy is never made twice. */
+  ref?: string;
 }
 
 export const MAX_MESSAGES = 300;
@@ -39,13 +43,36 @@ export class ChatLog {
     } catch { /* a damaged file starts a fresh conversation rather than breaking the remote */ }
   }
 
-  add(from: ChatMessage["from"], text: string, kind: ChatMessage["kind"] = "text", at = Date.now()): ChatMessage {
-    const message: ChatMessage = { id: this.nextId++, at, from, text: text.slice(0, 8000), kind };
+  add(from: ChatMessage["from"], text: string, kind: ChatMessage["kind"] = "text", at = Date.now(), via?: ChatMessage["via"]): ChatMessage {
+    const message: ChatMessage = { id: this.nextId++, at, from, text: text.slice(0, 8000), kind, ...(via ? { via } : {}) };
     this.messages.push(message);
     if (this.messages.length > MAX_MESSAGES) this.messages.splice(0, this.messages.length - MAX_MESSAGES);
     if (from === "echo") this.typingUntil = 0;
     this.save();
     return message;
+  }
+
+  /**
+   * Copy in messages from Phone mode, keeping their original times. Each one
+   * carries the phone's id for it; one already here is skipped, so a retried
+   * copy never duplicates anything. Returns how many were new.
+   */
+  importFromPhone(list: Array<{ ref: string; from: ChatMessage["from"]; text: string; at: number; kind?: ChatMessage["kind"] }>, now = Date.now()): number {
+    let added = 0;
+    for (const m of list) {
+      if (!m || typeof m.ref !== "string" || !/^[\w-]{4,64}$/.test(m.ref)) continue;
+      if (m.from !== "you" && m.from !== "echo") continue;
+      const text = String(m.text ?? "").trim();
+      if (!text || this.messages.some((x) => x.ref === m.ref)) continue;
+      const at = Number.isFinite(m.at) && m.at > 0 && m.at <= now ? m.at : now;
+      this.messages.push({ id: this.nextId++, at, from: m.from, text: text.slice(0, 8000), kind: m.kind === "voice" ? "voice" : "text", via: "phone", ref: m.ref });
+      added++;
+    }
+    if (added) {
+      if (this.messages.length > MAX_MESSAGES) this.messages.splice(0, this.messages.length - MAX_MESSAGES);
+      this.save();
+    }
+    return added;
   }
 
   /** Messages after `afterId` (all of them for 0), oldest first. */

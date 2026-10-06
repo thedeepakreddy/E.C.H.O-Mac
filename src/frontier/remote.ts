@@ -8,6 +8,9 @@ import { screenFrame } from "./remote-frame.js";
 import { RelayAgent, CLIENT_IP_HEADER } from "./relay-agent.js";
 import { ChatLog } from "./remote-chat.js";
 import { PasskeyStore } from "./passkeys.js";
+import { signPass, PassGeneration, DEVICE_ID } from "./cloudpass.js";
+import { collectDigest, DIGEST_EVERY_MS } from "./phone-digest.js";
+import { processHandoffs, taskChallenge, SeenTasks, type HandoffTask } from "./handoff.js";
 import { appendFileSync, statSync, writeFileSync } from "node:fs";
 import { dataRoot } from "../memory/paths.js";
 import {
@@ -117,6 +120,7 @@ export type Route =
   | "ping"
   | "chat"
   | "chat-voice"
+  | "chat-import"
   | "passkey-options"
   | "passkey-register"
   | "passkey-login"
@@ -149,6 +153,7 @@ export function routeOf(url: string | undefined): Route {
   if (path === "/frame") return "frame"; // phone GETs a still of the screen
   if (path === "/chat") return "chat"; // phone GETs the conversation, POSTs a message
   if (path === "/chat/voice") return "chat-voice"; // phone POSTs a voice note (wav)
+  if (path === "/chat/import") return "chat-import"; // phone POSTs what Phone mode said while the Mac was away
   if (path === "/passkey/options") return "passkey-options";
   if (path === "/passkey/register") return "passkey-register";
   if (path === "/passkey/login") return "passkey-login";
@@ -217,6 +222,39 @@ let chatLog: ChatLog | null = null;
 let passkeys: PasskeyStore | null = null;
 function chat(): ChatLog { return (chatLog ??= new ChatLog(join(remoteDir(), "remote-chat.json"))); }
 function keys(): PasskeyStore { return (passkeys ??= new PasskeyStore(join(remoteDir(), "remote-passkeys.json"))); }
+/** The relay secret while the phone app's relay is in use: it signs cloud passes. */
+let relaySecret: string | null = null;
+let passGenStore: PassGeneration | null = null;
+/**
+ * The briefing digest (phone-digest.ts): sent to the relay a minute after it
+ * connects and then hourly, so the morning briefing has your day even if the
+ * Mac is off by then.
+ */
+let digestTimer: NodeJS.Timeout | null = null;
+function scheduleDigest(delay: number) {
+  if (digestTimer) clearTimeout(digestTimer);
+  digestTimer = setTimeout(async () => {
+    digestTimer = null;
+    if (!relay || !relayBase) return;
+    try {
+      const digest = await collectDigest(() => statusProvider?.(0) ?? {});
+      const sent = await relay.post("/agent/digest", digest);
+      remoteLog(sent ? `briefing digest sent (${digest.calendar?.length ?? "no"} events, ${digest.email?.length ?? "no"} emails)` : "briefing digest not accepted");
+    } catch (e: any) {
+      remoteLog(`briefing digest failed: ${e?.message ?? e}`);
+    }
+    if (relay && relayBase) scheduleDigest(DIGEST_EVERY_MS);
+  }, delay);
+}
+function passGen(): PassGeneration { return (passGenStore ??= new PassGeneration(join(remoteDir(), "remote-pass-gen.json"))); }
+/**
+ * A cloud pass for this phone (see cloudpass.ts): Phone mode's key for while the
+ * Mac is off. Only through the phone app, and only for a well-formed device id.
+ */
+function issuePass(device: unknown): string | undefined {
+  if (!relaySecret || typeof device !== "string" || !DEVICE_ID.test(device)) return undefined;
+  return signPass(relaySecret, { device, gen: passGen().get() });
+}
 
 /** What to do with a chat message from the phone app. Set by the process that owns the brain. */
 let chatHandler: ((text: string, via: "typed" | "voice") => void) | null = null;
@@ -225,11 +263,69 @@ export function setChatHandler(fn: (text: string, via: "typed" | "voice") => voi
 }
 /** Echo's answer in the chat, from the turn the phone app started. */
 export function chatReply(text: string): void {
-  if (text.trim()) chat().add("echo", text.trim());
+  if (!text.trim()) return;
+  chat().add("echo", text.trim());
+  handoffTurn?.replies.push(text.trim());
 }
-/** Echo stopped without answering (stopped, failed): clear "typing…". */
-export function chatIdle(): void {
+/** A turn ended (or failed, with its error): clear "typing…", and finish a running hand-off job. */
+export function chatIdle(error?: string): void {
   chatLog?.setTyping(false);
+  const turn = handoffTurn;
+  if (!turn) return;
+  handoffTurn = null;
+  clearTimeout(turn.timer);
+  turn.resolve(error
+    ? { ok: false, summary: `Echo hit a problem: ${String(error).slice(0, 300)}` }
+    : { ok: true, summary: turn.replies.at(-1) ?? "Done." });
+}
+
+/**
+ * Hand-off jobs (handoff.ts): left on the phone with Face ID while the Mac was
+ * away; checked here and run as ordinary chat turns, one at a time.
+ */
+let handoffTurn: { replies: string[]; resolve: (r: { ok: boolean; summary: string }) => void; timer: NodeJS.Timeout } | null = null;
+let handoffTimer: NodeJS.Timeout | null = null;
+let handoffRunning = false;
+let seenTasks: SeenTasks | null = null;
+const HANDOFF_TURN_MS = 20 * 60_000;
+function runHandoff(task: HandoffTask): Promise<{ ok: boolean; summary: string }> {
+  return new Promise((resolve) => {
+    if (!chatHandler) return resolve({ ok: false, summary: "Echo's chat isn't ready yet." });
+    chat().add("you", task.text, "text", Date.now(), "handoff");
+    chat().setTyping(true);
+    const timer = setTimeout(() => {
+      if (handoffTurn?.resolve === resolve) handoffTurn = null;
+      resolve({ ok: true, summary: "Started on your Mac; it's still working on it." });
+    }, HANDOFF_TURN_MS);
+    handoffTurn = { replies: [], resolve, timer };
+    try { chatHandler(task.text, "typed"); } catch (e: any) { chatIdle(String(e?.message ?? e)); }
+  });
+}
+function scheduleHandoffs(delay: number) {
+  if (handoffTimer || handoffRunning) return;
+  handoffTimer = setTimeout(async () => {
+    handoffTimer = null;
+    if (!relay || !relayBase || !appSite) return;
+    handoffRunning = true;
+    let busy = false;
+    try {
+      const site = appSite;
+      await processHandoffs({
+        list: async () => ((await relay?.get("/agent/handoff"))?.items ?? []),
+        update: async (id, status, summary) => { await relay?.post("/agent/handoff/update", { id, status, summary }); },
+        verify: (task, assertion) => { keys().verifySigned(assertion, site.origin, site.rpId, taskChallenge(task)); },
+        run: runHandoff,
+        busy: () => (busy = String((statusProvider?.(0) as any)?.status ?? "idle") !== "idle" || chat().typing()),
+        seen: (seenTasks ??= new SeenTasks(join(remoteDir(), "remote-handoffs-seen.json"))),
+        log: remoteLog,
+      });
+    } catch (e: any) {
+      remoteLog(`hand-off check failed: ${e?.message ?? e}`);
+    } finally {
+      handoffRunning = false;
+    }
+    if (busy) scheduleHandoffs(60_000); // Echo was busy: look again in a minute
+  }, delay);
 }
 
 /** Told the full link (with token) when the phone app connects, and null when it drops. */
@@ -603,17 +699,17 @@ export async function startRemote(opts: {
           noteBadAttempt(ip);
           return json({ ok: false }, 401);
         }
-        return signIn("password");
+        return signIn("password", body?.device);
       });
     }
     // Bound to the address on a LAN, where it stays put. Not through the phone
     // app: a phone on mobile data changes address between cell towers, and
     // https already keeps the session from being sniffed.
-    function signIn(how: string) {
+    function signIn(how: string, device?: unknown) {
       const s = sessions.issue(viaApp ? "?" : ip);
       badAttempts.delete(ip); // a correct sign-in clears this address's strikes
       record(how === "faceid" ? "A phone signed in with Face ID" : "A phone signed in", "go");
-      return json({ ok: true, s }, 200, {
+      return json({ ok: true, s, cloudPass: viaApp ? issuePass(device) : undefined }, 200, {
         "set-cookie": `js=${s}; Path=/; HttpOnly; SameSite=Strict${viaApp ? "; Secure" : ""}`,
       });
     }
@@ -640,7 +736,7 @@ export async function startRemote(opts: {
             return json({ ok: true, count: keys().count });
           }
           keys().verify(body?.credential, site.origin, site.rpId, "login");
-          return signIn("faceid");
+          return signIn("faceid", body?.device);
         } catch (e: any) {
           if (route === "passkey-login") noteBadAttempt(ip);
           return json({ ok: false, error: String(e?.message ?? e) }, 401);
@@ -721,7 +817,10 @@ export async function startRemote(opts: {
       });
     }
     if (route === "status") {
-      const after = Number(new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("logs") ?? "0");
+      const query = new URLSearchParams((req.url ?? "").split("?")[1] ?? "");
+      const after = Number(query.get("logs") ?? "0");
+      // The phone renews its cloud pass from here while the Mac is reachable.
+      const cloudPass = viaApp && query.get("pass") ? issuePass(query.get("pass")) : undefined;
       void (async () => {
         try {
           const [core, vitals] = await Promise.all([
@@ -729,7 +828,7 @@ export async function startRemote(opts: {
             readVitals(),
           ]);
           json({ ...core, vitals, remote: { startedAt, expiresAt: expiresAt || null, host: preferredHost()?.kind ?? null },
-            faceId: { available: !!appSite, registered: appSite ? keys().count : 0 } });
+            faceId: { available: !!appSite, registered: appSite ? keys().count : 0 }, ...(cloudPass ? { cloudPass } : {}) });
         } catch (e: any) {
           json({ error: String(e?.message ?? e) }, 500);
         }
@@ -770,6 +869,15 @@ export async function startRemote(opts: {
         chat().setTyping(true);
         try { chatHandler?.(norm.text, "typed"); } catch { /* a bad message must not crash the server */ }
         return json({ ok: true, message });
+      });
+    }
+    if (route === "chat-import") {
+      if (req.method !== "POST") return deny();
+      return readJsonBody(req, (body) => {
+        const list = Array.isArray(body?.messages) ? body.messages.slice(0, 200) : [];
+        const imported = chat().importFromPhone(list);
+        if (imported) record(`Phone mode: ${imported} message${imported === 1 ? "" : "s"} from while the Mac was away`, "go");
+        return json({ ok: true, imported });
       });
     }
     if (route === "chat-voice") {
@@ -813,6 +921,7 @@ export async function startRemote(opts: {
     if (route === "signout-all") {
       if (req.method !== "POST") return deny();
       sessions.revokeAll();
+      passGen().bump(); // and every Phone mode pass: the relay hears on Echo's next poll
       record("Every phone was signed out", "stop");
       return json({ ok: true });
     }
@@ -942,11 +1051,14 @@ export async function startRemote(opts: {
       if (useRelay) {
         const site = new URL(opts.relay!.url);
         appSite = { origin: site.origin, rpId: site.hostname };
+        relaySecret = opts.relay!.secret;
         relay = new RelayAgent(opts.relay!.url, opts.relay!.secret, `http://127.0.0.1:${port}`, (connected) => {
           relayBase = connected ? relay!.base : null;
+          if (connected && !digestTimer) scheduleDigest(60_000);
+          if (connected) scheduleHandoffs(5_000);
           record(connected ? "Phone app connected" : "Phone app disconnected — reconnecting", connected ? "go" : "stop");
           try { publicUrlListener?.(connected ? `${relay!.base}/?t=${token}` : null); } catch { /* a listener must not break the agent */ }
-        }, remoteLog);
+        }, remoteLog, { get: () => passGen().get(), adopt: (n) => passGen().adopt(n) }, () => scheduleHandoffs(2_000));
         relay.start();
       }
       const life = ttl > 0 ? "Reopen the remote if it's been closed." : "It stays on, even across restarts.";
@@ -990,6 +1102,9 @@ export async function stopRemote(): Promise<string> {
   relay = null;
   relayBase = null;
   appSite = null;
+  relaySecret = null;
+  if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
+  if (handoffTimer) { clearTimeout(handoffTimer); handoffTimer = null; }
   chatLog?.setTyping(false);
   await Promise.all([server, loopServer].filter(Boolean).map((l: any) => new Promise<void>((resolve) => {
     try {
