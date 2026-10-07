@@ -1,6 +1,4 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { networkInterfaces } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAppPath } from "../utils/appPath.js";
 import { readVitals } from "./remote-vitals.js";
@@ -28,9 +26,10 @@ import { moveMouseBy, clickHere, hotkey, scroll, typeText } from "../tools/compu
  * watch is a job you cannot trust. The action feed already exists as a stream
  * of events; this puts it somewhere you can see from the sofa.
  *
- * The security thinking matters more than the feature. This opens a port on
- * whatever network the machine is on — which may be a cafe, an airport, or an
- * office full of strangers — so the assumptions are:
+ * It is reached only through Echo's phone app: the relay (echo-remote on
+ * Render) is dialled OUT from here, and replays the phone's requests on a
+ * listener bound to this Mac's loopback. Nothing listens on the network. The
+ * assumptions:
  *
  *   - OFF by default, and started only when asked. It is not a background
  *     service; it exists for the duration of a job you are watching.
@@ -57,8 +56,7 @@ export interface FeedItem {
 /** Events kept for the phone to catch up on. */
 export const MAX_ITEMS = 200;
 /** Shut down on its own after this long. Long, since the link is meant to be
- *  saved and reused; a forgotten-open port on a private tailnet behind a
- *  password is a small risk, and the whole point is that it stays reachable. */
+ *  saved and reused, and the whole point is that it stays reachable. */
 export const DEFAULT_TTL_MS = 12 * 3600_000;
 /** Wrong tokens from one address before it stops answering that address. */
 export const MAX_BAD_ATTEMPTS = 5;
@@ -96,7 +94,6 @@ export function tokenFrom(url: string | undefined): string | undefined {
 }
 
 export type Route =
-  | "page"
   | "events"
   | "stop"
   | "login"
@@ -110,7 +107,6 @@ export type Route =
   | "voice"
   | "mouse"
   | "log"
-  | "asset"
   | "status"
   | "action"
   | "keys"
@@ -126,12 +122,8 @@ export type Route =
   | "passkey-login"
   | "unknown";
 
-/** Files the phone page may load from renderer/remote. Anything else is not a route. */
-export const ASSET_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*\.(?:css|js|png)$/;
-
 export function routeOf(url: string | undefined): Route {
   const path = (url ?? "/").split("?")[0].replace(/\/+$/, "") || "/";
-  if (path === "/") return "page";
   if (path === "/events") return "events";
   if (path === "/stop") return "stop";
   if (path === "/login") return "login";
@@ -158,46 +150,7 @@ export function routeOf(url: string | undefined): Route {
   if (path === "/passkey/register") return "passkey-register";
   if (path === "/passkey/login") return "passkey-login";
   if (path === "/ping") return "ping"; // a cheap "are you there?" behind the link token
-  if (path.startsWith("/app/") && ASSET_NAME.test(path.slice(5))) return "asset";
   return "unknown";
-}
-
-/**
- * A Tailscale address on this machine, if it is on a tailnet.
- *
- * Tailscale hands every device an address in the 100.64.0.0/10 range (the
- * carrier-grade NAT block it borrows for the purpose). Preferring it over the
- * ordinary LAN address is what makes the remote reachable from anywhere: the
- * phone and the Mac are on the same private, encrypted tailnet even when they
- * are on opposite sides of the world, and nothing is ever exposed to the public
- * internet.
- */
-export function tailscaleAddress(): string | null {
-  for (const addrs of Object.values(networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family !== "IPv4" || a.internal) continue;
-      const [o1, o2] = a.address.split(".").map(Number);
-      // 100.64.0.0 – 100.127.255.255
-      if (o1 === 100 && o2 >= 64 && o2 <= 127) return a.address;
-    }
-  }
-  return null;
-}
-
-export type HostKind = "tailscale" | "lan";
-
-/**
- * The address to hand the phone, preferring the tailnet.
- *
- * Tailscale first, because it works from anywhere; the LAN address is the
- * fallback for when you are on the same Wi-Fi and have not set Tailscale up.
- */
-export function preferredHost(): { host: string; kind: HostKind } | null {
-  const ts = tailscaleAddress();
-  if (ts) return { host: ts, kind: "tailscale" };
-  const lan = lanAddress();
-  if (lan) return { host: lan, kind: "lan" };
-  return null;
 }
 
 // ---- what the phone is shown ---------------------------------------------
@@ -215,12 +168,13 @@ let startedAt = 0;
 /** When the link closes on its own; 0 when it is always on. */
 let expiresAt = 0;
 let token = "";
+/** The loopback listener the relay agent replays phone requests against: the only one. */
 let server: any = null;
-/** The loopback listener the relay agent replays phone requests against. */
-let loopServer: any = null;
 let relay: RelayAgent | null = null;
 /** The phone app's permanent address while Echo is connected to it, else null. */
 let relayBase: string | null = null;
+/** The phone app's address from the settings (its origin), while the remote is on. */
+let relaySite: string | null = null;
 /** Where the phone app is served from: its origin and passkey relying-party id. */
 let appSite: { origin: string; rpId: string } | null = null;
 /** Files live with the link token and password, so tests can point them elsewhere. */
@@ -490,29 +444,10 @@ export function isRunning(): boolean {
   return running;
 }
 
-/** The address to open on the phone, or null when not running. */
-export function remoteUrl(port: number): string | null {
-  if (!running) return null;
-  // The phone app reaches the phone from any network, so it wins when connected.
-  if (relayBase) return `${relayBase}/?t=${token}`;
-  const pref = preferredHost();
-  return pref ? `http://${pref.host}:${port}/?t=${token}` : null;
-}
-
-/**
- * This machine's address on the local network.
- *
- * Explicitly not the loopback address — the whole point is reaching it from
- * another device, and a link to 127.0.0.1 would work perfectly on the Mac and
- * fail silently on the phone, which is the most confusing possible outcome.
- */
-export function lanAddress(): string | null {
-  for (const addrs of Object.values(networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family === "IPv4" && !a.internal) return a.address;
-    }
-  }
-  return null;
+/** The link to open on the phone (the phone app's, with the token), or null when not running. */
+export function remoteUrl(_port?: number): string | null {
+  if (!running || !relaySite) return null;
+  return `${relayBase ?? relaySite}/?t=${token}`;
 }
 
 /** Has this address failed too many times to keep answering? */
@@ -527,34 +462,6 @@ export function noteBadAttempt(ip: string): void {
 export function resetAttempts(): void {
   badAttempts.clear();
 }
-
-/** Where the phone app's files live: renderer/remote, beside the other windows. */
-export function remoteAssetDir(): string {
-  return join(getAppPath(), "renderer", "remote");
-}
-
-/**
- * The phone app's page, with the link token baked in.
- *
- * Login first — the live reactor and a password — then five pages: Core,
- * Screen, Work, Feed and System. The markup, stylesheet, script and reactor
- * art are files in renderer/remote, served under /app/ behind the same link
- * token as the page; nothing is loaded from anywhere else. The token goes into
- * every URL so the phone never has to retype it. It is hex, so it cannot break
- * out of the attributes it is written into.
- */
-export function renderPage(tok: string): string {
-  if (!/^[0-9a-f]+$/.test(tok)) throw new Error("Invalid link token.");
-  const file = join(remoteAssetDir(), "index.html");
-  if (!existsSync(file)) return "<!doctype html><title>Echo</title><p>The phone app files are missing from this install.</p>";
-  return readFileSync(file, "utf8").replaceAll("__T__", tok);
-}
-
-const ASSET_TYPES: Record<string, string> = {
-  css: "text/css; charset=utf-8",
-  js: "text/javascript; charset=utf-8",
-  png: "image/png",
-};
 
 // ---- the server -----------------------------------------------------------
 
@@ -613,10 +520,9 @@ export async function startRemote(opts: {
   if (running) {
     return { ok: true, url: remoteUrl(currentPort) ?? undefined, message: "The remote is already running." };
   }
-  const pref = preferredHost();
-  const useRelay = !!(opts.relay?.url && opts.relay.secret);
-  if (!pref && !useRelay) {
-    return { ok: false, message: "I can't find a network address — is this machine on Wi-Fi or Tailscale?" };
+  // The phone reaches this Mac only through Echo's phone app (the relay).
+  if (!(opts.relay?.url && opts.relay.secret)) {
+    return { ok: false, message: "The phone app isn't set up: add remote.relayUrl in Echo's settings and ECHO_RELAY_SECRET in keys.env." };
   }
   // Full control from a phone with no password is a door with no lock. Refuse.
   if (!hasPassword()) {
@@ -641,17 +547,16 @@ export async function startRemote(opts: {
   confirmRelay.cancel();
 
   const handle = (req: any, res: any) => {
-    // Through the phone app every request is replayed by the relay agent on
-    // the loopback, and the phone's real address rides in a header. That
-    // header is believed only on the loopback listener: on the LAN listener
-    // anyone could send it to dodge the lockout.
+    // Every request is replayed by the relay agent on the loopback, and the
+    // phone's real address rides in a header. It is believed only on a
+    // loopback connection, the only kind this server accepts.
     const forwarded = /127\.0\.0\.1$/.test(req.socket?.localAddress ?? "") ? req.headers?.[CLIENT_IP_HEADER] : undefined;
     const viaApp = typeof forwarded === "string" && forwarded.length > 0;
     const ip = viaApp ? forwarded : req.socket?.remoteAddress ?? "?";
     const route = routeOf(req.url);
     // The path only: the query carries the link token and the session, which
     // do not belong in a log. Polls are left out, or they would bury the rest.
-    if (!["status", "confirm-poll", "events", "rtc-answer", "frame", "asset", "mouse"].includes(route)) {
+    if (!["status", "confirm-poll", "events", "rtc-answer", "frame", "mouse"].includes(route)) {
       console.log(`[jarvis] HTTP ${req.method} ${(req.url ?? "").split("?")[0]} -> route=${route}${viaApp ? " (phone app)" : ""}`);
     }
 
@@ -682,24 +587,6 @@ export async function startRemote(opts: {
     if (route === "unknown") return deny();
 
     // ---- routes reachable with only the link token ----
-    if (route === "page") {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...secure });
-      return res.end(renderPage(token));
-    }
-    if (route === "asset") {
-      // The login screen needs its stylesheet, script and reactor before any
-      // password, so assets sit behind the link token only. ASSET_NAME already
-      // refused anything with a slash or a dot-dot in it.
-      const name = (req.url ?? "").split("?")[0].slice("/app/".length);
-      const file = join(remoteAssetDir(), name);
-      if (req.method !== "GET" || !existsSync(file)) return deny();
-      res.writeHead(200, {
-        "content-type": ASSET_TYPES[name.split(".").pop()!] ?? "application/octet-stream",
-        ...secure,
-        "cache-control": "private, max-age=3600",
-      });
-      return res.end(readFileSync(file));
-    }
     if (route === "ping") {
       // Token-gated like everything else, so it reveals nothing without the link.
       res.writeHead(204, secure);
@@ -842,7 +729,7 @@ export async function startRemote(opts: {
             Promise.resolve(statusProvider?.(Number.isFinite(after) ? after : 0) ?? {}),
             readVitals(),
           ]);
-          json({ ...core, vitals, remote: { startedAt, expiresAt: expiresAt || null, host: preferredHost()?.kind ?? null },
+          json({ ...core, vitals, remote: { startedAt, expiresAt: expiresAt || null, host: "relay" },
             faceId: { available: !!appSite, registered: appSite ? keys().count : 0 }, ...(cloudPass ? { cloudPass } : {}) });
         } catch (e: any) {
           json({ error: String(e?.message ?? e) }, 500);
@@ -1028,23 +915,19 @@ export async function startRemote(opts: {
     }
     return deny();
   };
-  // The LAN or Tailscale listener, bound to that one address rather than every
-  // interface, and with the phone app a second one on the loopback for the
-  // relay agent to replay requests against. Nothing listens anywhere else.
-  server = pref ? http.createServer(handle) : null;
-  loopServer = useRelay ? http.createServer(handle) : null;
+  // Bound to the loopback only: the relay agent replays the phone's requests
+  // here. Nothing listens on the network.
+  server = http.createServer(handle);
 
   currentPort = port;
   return new Promise<StartResult>((resolve) => {
-    const listeners = [server, loopServer].filter(Boolean);
-    let waiting = listeners.length;
     let failed = false;
     const fail = (err: any) => {
       if (failed) return;
       failed = true;
       running = false;
-      for (const l of listeners) { try { l.close(); } catch { /* not listening */ } }
-      server = loopServer = null;
+      try { server?.close(); } catch { /* not listening */ }
+      server = null;
       resolve({
         ok: false,
         message:
@@ -1054,7 +937,7 @@ export async function startRemote(opts: {
       });
     };
     const ready = async () => {
-      if (failed || --waiting > 0) return;
+      if (failed) return;
       running = true;
       startedAt = Date.now();
       const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
@@ -1063,9 +946,10 @@ export async function startRemote(opts: {
       expiry = ttl > 0 ? setTimeout(() => void stopRemote(), ttl) : null;
       expiresAt = ttl > 0 ? Date.now() + ttl : 0;
       record("Remote opened", "go");
-      if (useRelay) {
+      {
         const site = new URL(opts.relay!.url);
         appSite = { origin: site.origin, rpId: site.hostname };
+        relaySite = site.origin;
         relaySecret = opts.relay!.secret;
         relay = new RelayAgent(opts.relay!.url, opts.relay!.secret, `http://127.0.0.1:${port}`, (connected) => {
           relayBase = connected ? relay!.base : null;
@@ -1077,11 +961,7 @@ export async function startRemote(opts: {
         relay.start();
       }
       const life = ttl > 0 ? "Reopen the remote if it's been closed." : "It stays on, even across restarts.";
-      const reach = useRelay
-        ? `Open your Echo app (${opts.relay!.url.replace(/\/+$/, "")}) on your phone from any network`
-        : pref?.kind === "tailscale"
-          ? "Open this on your phone from anywhere (both on your Tailscale)"
-          : "Open this on your phone (same Wi-Fi)";
+      const reach = `Open your Echo app (${opts.relay!.url.replace(/\/+$/, "")}) on your phone from any network`;
       const lasting = "This link is permanent — save it on your phone and sign in with your password any time.";
       resolve({
         ok: true,
@@ -1089,9 +969,8 @@ export async function startRemote(opts: {
         message: `${reach}: ${remoteUrl(port)}\n${lasting} ${life}`,
       });
     };
-    for (const l of listeners) l.once("error", fail);
-    server?.listen(port, pref!.host, ready);
-    loopServer?.listen(port, "127.0.0.1", ready);
+    server.once("error", fail);
+    server.listen(port, "127.0.0.1", ready);
   });
 }
 
@@ -1116,22 +995,23 @@ export async function stopRemote(): Promise<string> {
   relay?.stop();
   relay = null;
   relayBase = null;
+  relaySite = null;
   appSite = null;
   relaySecret = null;
   if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
   if (handoffTimer) { clearTimeout(handoffTimer); handoffTimer = null; }
   chatLog?.setTyping(false);
-  await Promise.all([server, loopServer].filter(Boolean).map((l: any) => new Promise<void>((resolve) => {
+  await new Promise<void>((resolve) => {
+    if (!server) return resolve();
     try {
-      l.close(() => resolve());
+      server.close(() => resolve());
       // close() waits for open connections; the phone polls, so force it.
-      l.closeAllConnections?.();
+      server.closeAllConnections?.();
     } catch {
       resolve();
     }
-  })));
+  });
   server = null;
-  loopServer = null;
   return "Remote closed. That link won't work again.";
 }
 

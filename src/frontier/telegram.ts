@@ -125,15 +125,14 @@ export class TelegramBridge {
     // instant, works while Echo is busy, and cannot be paraphrased away.
     if (/^\/?(link|remote)$/i.test(text)) {
       this.activeChatId = chatId;
-      // With the any-network link on, never hand out the Wi-Fi-only link: it
-      // looks like it should work and fails on mobile data.
+      // The phone app's link: the only way the phone reaches this Mac.
       const pub = publicLinkState();
-      const url = pub.enabled ? pub.url : currentRemoteUrl();
+      const url = pub.url ?? currentRemoteUrl();
       void this.reply(url
-        ? `Here's your Echo remote — works on Wi-Fi and mobile data:\n${url}`
+        ? `Here's your Echo phone app link — works on Wi-Fi and mobile data:\n${url}`
         : pub.enabled
-          ? "The any-network link is reconnecting right now. I'll send it here the moment it's back — usually within a minute."
-          : "The phone remote is off. Send \"open the phone remote\" to start it.");
+          ? "Echo is reconnecting to the phone app right now. I'll send the link here the moment it's back — usually within a minute."
+          : "The phone app connection is off. Send \"open the phone remote\" to start it.");
       return;
     }
     this.activeChatId = chatId;
