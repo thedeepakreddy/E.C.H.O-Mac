@@ -126,6 +126,15 @@ export function installPreviewBridge(ipcMain, { onClose } = {}) {
   ipcMain.handle("control:fleet", () => structuredClone(fleet));
   ipcMain.handle("control:api-keys", () => ({ fields: [], values: {} }));
   ipcMain.handle("control:weather", () => ({ status: "ok", place: "Preview Lab", temperature: 21, feelsLike: 20, humidity: 43, wind: 7, condition: "Clear", source: "timezone-estimate", updatedAt: now }));
+  ipcMain.handle("control:world", () => ({
+    checkedAt: Date.now(),
+    feeds: Object.fromEntries(["conflicts", "earthquakes", "fires", "weather"].map(name => [name, {status: "current", updatedAt: Date.now(), sourceUpdatedAt: now}])),
+    conflicts: [{label: "Preview region", severity: "war", description: "Deterministic preview observation", latest: {title: "A sourced conflict update", url: "https://example.org/world"}}],
+    earthquakes: {count: 2, top: [{magnitude: 5.2, place: "Preview coast", at: now - 60000, depthKm: 12, tsunami: true, url: "https://earthquake.usgs.gov/"}]},
+    tsunamis: [{place: "Preview coast"}],
+    fires: {count: 2010, highConfidence: 42},
+    storms: [{title: "Preview tropical storm", type: "Storm", severity: "High", source: "NASA EONET", at: now}],
+  }));
   ipcMain.on("control:close", () => onClose?.());
 
   return { snapshot, fleet, mission, boardMission };

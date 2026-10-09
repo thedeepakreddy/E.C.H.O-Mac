@@ -916,3 +916,50 @@ fieldset.fleet-wide legend { padding: 0 6px; color: #8ba3aa; font-size: 10.5px; 
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
+
+/* World Intelligence uses the panel's existing bubble glass and typography. */
+.world-workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.world-heading { flex: 0 0 auto; flex-wrap: wrap; }
+.world-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.world-actions button { min-height: 34px; }
+.world-scroll { min-height: 0; overflow: auto; padding: 2px 5px 14px 0; scrollbar-width: thin; scrollbar-color: #27535b transparent; }
+.world-hero { display: flex; align-items: center; gap: 22px; min-width: 0; padding: 14px 20px; background: var(--bub-spec), var(--bub); border: 1px solid var(--bub-edge); border-radius: var(--r-card); box-shadow: var(--bub-inner); }
+.world-hero img { flex: 0 0 auto; width: 150px; height: 104px; object-fit: cover; border-radius: 18px; }
+.world-hero h2 { margin: 7px 0; font-size: 20px; font-weight: 400; color: var(--bright); }
+.world-hero p { margin: 0; max-width: 50ch; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.world-eyebrow { color: var(--cyan); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+.world-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.world-stats article { padding: 16px 12px; background: var(--bub-spec), var(--bub-quiet); border: 1px solid var(--bub-edge); border-radius: var(--r-row); box-shadow: var(--bub-inner); }
+.world-stats strong { display: block; font: 24px/1.3 ui-monospace, "SFMono-Regular", monospace; color: var(--bright); font-weight: 400; }
+.world-stats span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+.world-filters { display: flex; gap: 7px; flex-wrap: wrap; margin: 0 0 12px; }
+.world-filters button { border: 1px solid var(--bub-edge); border-radius: var(--r-pill); background: var(--bub-quiet); padding: 8px 15px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.world-filters button[aria-pressed="true"] { color: var(--bright); background: var(--bub-lit); border-color: var(--bub-edge-lit); box-shadow: var(--bub-inner); }
+.world-notice { color: #e4bd88; font-size: 12px; line-height: 1.5; padding: 10px 14px; border: 1px solid #735233; border-radius: var(--r-row); }
+.world-list { display: grid; gap: 8px; }
+.world-row { display: grid; grid-template-columns: 10px minmax(0, 1fr); align-items: start; gap: 14px; padding: 15px 18px; width: 100%; text-align: left; border: 1px solid var(--bub-edge); border-radius: var(--r-row); background: var(--bub-spec), var(--bub-quiet); box-shadow: var(--bub-inner); }
+button.world-row { cursor: pointer; }
+button.world-row:hover { border-color: var(--bub-edge-lit); background: var(--bub-lit); }
+.world-marker { height: 7px; width: 7px; margin-top: 7px; border-radius: 50%; background: #e7a278; }
+.world-row[data-kind="conflict"] .world-marker { background: #ff8985; }
+.world-row[data-kind="hazard"] .world-marker { background: #b4a1e8; }
+.world-row header { display: flex; gap: 12px; justify-content: space-between; flex-wrap: wrap; align-items: baseline; }
+.world-row h3 { margin: 0; color: #d7e8ed; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.world-row header span { color: var(--subtle); font-size: 11px; }
+.world-row p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.world-sources { padding: 15px 5px; color: var(--subtle); font-size: 11px; line-height: 1.6; }
+.world-sources summary { cursor: pointer; color: var(--muted); }
+.world-sources > p { margin-bottom: 0; }
+#world-sources p { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0 0; }
+#world-sources b { color: var(--muted); font-weight: 500; }
+@media (max-width: 900px) {
+  .world-hero { gap: 16px; padding: 12px; }
+  .world-hero img { width: 110px; height: 100px; }
+  .world-stats { gap: 7px; }
+  .world-stats article { padding: 12px 9px; }
+}
+@media (max-width: 600px) {
+  .world-hero img { width: 80px; height: 90px; }
+  .world-hero h2 { font-size: 17px; }
+  .world-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

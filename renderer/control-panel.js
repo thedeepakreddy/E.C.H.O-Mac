@@ -95,10 +95,94 @@ function setView(name) {
   });
   document.querySelectorAll(".section-nav [data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
   syncNeuralCard();
+  syncWorld();
   // Apply the newest snapshot when a page becomes visible. Hidden pages do
   // not rebuild controls or lists on every background runtime update.
   if (snapshot) render(snapshot);
 }
+
+// World data is fetched through a restricted main-process bridge, only while visible.
+const WORLD_REFRESH_MS = 30_000;
+let worldSnapshot = null, worldLoading = null, worldTimer = null, worldFilter = "all", worldFailed = false;
+const worldLabels = {conflicts: "Conflict zones", earthquakes: "Earthquakes · USGS", fires: "Fire detections · NASA FIRMS", weather: "Storms & hazards · NASA EONET"};
+function worldVisible() { return activeView === "world" && !document.hidden; }
+function syncWorld() {
+  clearTimeout(worldTimer); worldTimer = null;
+  if (worldVisible()) void loadWorld();
+}
+async function loadWorld() {
+  if (worldLoading) return worldLoading;
+  if (!worldVisible()) return;
+  const refresh = byId("world-refresh"); refresh.disabled = true;
+  if (!worldSnapshot) byId("world-updated").textContent = "Connecting to Osiris…";
+  worldLoading = (async () => {
+    try {
+      if (!bridge?.world) throw new Error("World bridge unavailable");
+      worldSnapshot = await bridge.world(); worldFailed = false;
+      renderWorld();
+    } catch {
+      worldFailed = true;
+      if (worldSnapshot) renderWorld();
+      else {
+        byId("world-updated").textContent = "Osiris unavailable · Retrying in 30 seconds";
+        byId("world-list").innerHTML = '<div class="empty-state">Couldn’t reach Osiris. Refresh to try again.</div>';
+      }
+    }
+  })().finally(() => {
+    worldLoading = null; refresh.disabled = false;
+    clearTimeout(worldTimer);
+    if (worldVisible()) worldTimer = setTimeout(loadWorld, WORLD_REFRESH_MS);
+  });
+  return worldLoading;
+}
+function renderWorld() {
+  if (!worldSnapshot) return;
+  const w = worldSnapshot, names = Object.keys(worldLabels);
+  const missing = names.filter(name => w.feeds[name].status !== "current");
+  byId("world-updated").textContent = worldFailed || missing.length === names.length
+    ? `Osiris unavailable · Last checked ${eventTime(w.checkedAt)}`
+    : `Osiris · Checked ${eventTime(w.checkedAt)}${missing.length ? " · Some feeds unavailable" : ""}`;
+  const usable = name => w.feeds[name].updatedAt !== null;
+  const stats = [[usable("conflicts") ? w.conflicts.length : null, "Conflicts"], [w.earthquakes.count, "Earthquakes · 24h"],
+    [w.fires.count, "Fire detections"], [usable("earthquakes") ? w.tsunamis.length : null, "Tsunami flags · 24h"]];
+  byId("world-stats").innerHTML = stats.map(([n, label]) => `<article><strong>${n === null ? "—" : Number(n).toLocaleString()}</strong><span>${label}</span></article>`).join("");
+  const notice = byId("world-notice"); notice.hidden = !worldFailed && !missing.length;
+  notice.textContent = worldFailed ? "Connection unavailable. Showing the last saved observations." : missing.map(name => {
+    const f = w.feeds[name];
+    return f.updatedAt === null ? `${worldLabels[name]} unavailable` : `${worldLabels[name]} unavailable; last copy ${eventTime(f.updatedAt)}`;
+  }).join(" · ");
+  const items = [];
+  for (const z of w.conflicts) items.push({kind: "conflict", feed: "conflicts", title: z.label, meta: z.severity || "Conflict zone", detail: z.latest?.title || z.description, url: z.latest?.url});
+  for (const q of w.earthquakes.top) items.push({kind: "quake", feed: "earthquakes", title: `M${q.magnitude.toFixed(1)} · ${q.place || "Earthquake"}`, meta: eventTime(q.at), detail: `${q.depthKm === null ? "Depth unavailable" : `Depth ${Math.round(q.depthKm)} km`}${q.tsunami ? " · Tsunami flagged by USGS" : ""}`, url: q.url});
+  for (const storm of w.storms) items.push({kind: "hazard", feed: "weather", title: storm.title, meta: storm.severity || storm.type || "Natural hazard", detail: [storm.type, storm.source].filter(Boolean).join(" · ")});
+  if (usable("fires")) items.push({kind: "hazard", feed: "fires", title: `${w.fires.count.toLocaleString()} fire detections`, meta: "NASA FIRMS", detail: `${w.fires.highConfidence.toLocaleString()} high-confidence hotspots worldwide`});
+  if (usable("earthquakes")) items.push({kind: "hazard", feed: "earthquakes", title: w.tsunamis.length ? `${w.tsunamis.length} tsunami-flagged earthquake${w.tsunamis.length === 1 ? "" : "s"}` : "No tsunami-flagged earthquakes", meta: "USGS · 24h", detail: w.tsunamis.length ? w.tsunamis.map(q => q.place).join(" · ") : "None of these observed earthquakes carry a USGS tsunami flag."});
+  const shown = items.filter(item => worldFilter === "all" || item.kind === worldFilter);
+  const relevant = {all: names, conflict: ["conflicts"], quake: ["earthquakes"], hazard: ["fires", "weather", "earthquakes"]}[worldFilter];
+  const categoryUnavailable = worldFailed || relevant.some(name => w.feeds[name].status !== "current");
+  byId("world-list").innerHTML = shown.length ? shown.slice(0, 60).map(item => {
+    const stale = worldFailed || w.feeds[item.feed].status !== "current";
+    const content = `<span class="world-marker" aria-hidden="true"></span><div><header><h3>${escapeHtml(item.title)}</h3><span>${escapeHtml(item.meta)}${stale ? " · Last copy" : ""}</span></header><p>${escapeHtml(item.detail)}</p></div>`;
+    return item.url ? `<button type="button" class="world-row" data-kind="${item.kind}" data-external-url="${escapeHtml(item.url)}">${content}</button>` : `<article class="world-row" data-kind="${item.kind}">${content}</article>`;
+  }).join("") : `<div class="empty-state">${categoryUnavailable ? "Observations are unavailable for this filter. Available feeds are shown above." : "No observations in this category."}</div>`;
+  byId("world-sources").innerHTML = names.map(name => {
+    const f = w.feeds[name];
+    return `<p><b>${worldLabels[name]}</b><span>${f.status === "current" && !worldFailed ? "Available" : "Unavailable"}${f.updatedAt !== null ? ` · Retrieved ${eventTime(f.updatedAt)}` : ""}${f.sourceUpdatedAt !== null ? ` · Source updated ${eventTime(f.sourceUpdatedAt)}` : ""}</span></p>`;
+  }).join("");
+}
+byId("world-list").addEventListener("click", event => {
+  const link = event.target.closest?.("[data-external-url]");
+  if (link) bridge?.openExternal?.(link.dataset.externalUrl);
+});
+document.addEventListener("visibilitychange", syncWorld);
+window.addEventListener("pagehide", () => { clearTimeout(worldTimer); worldTimer = null; });
+window.addEventListener("pageshow", () => { if (worldVisible()) syncWorld(); });
+byId("world-refresh").addEventListener("click", () => { clearTimeout(worldTimer); void loadWorld(); });
+document.querySelectorAll("[data-world-filter]").forEach(button => button.addEventListener("click", () => {
+  worldFilter = button.dataset.worldFilter;
+  document.querySelectorAll("[data-world-filter]").forEach(b => b.setAttribute("aria-pressed", String(b === button)));
+  renderWorld();
+}));
 
 function stableKey(value) {
   try { return JSON.stringify(value); } catch { return String(value); }

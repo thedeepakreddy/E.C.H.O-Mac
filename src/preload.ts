@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("echoControl", {
   action: (action: unknown) => ipcRenderer.invoke("control:action", action),
   weather: (request?: { query?: string; latitude?: number; longitude?: number }) =>
     ipcRenderer.invoke("control:weather", request),
+  world: () => ipcRenderer.invoke("control:world"),
   apiKeys: () => ipcRenderer.invoke("control:api-keys"),
   fleet: () => ipcRenderer.invoke("control:fleet"),
   openExternal: (url: string) => ipcRenderer.send("control:open-url", url),

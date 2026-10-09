@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BrowserWindow, IpcMainEvent, IpcMainInvokeEvent } from "electron";
 import { getControlWeather, type ControlWeatherRequest } from "./control-weather.js";
+import { getControlWorld } from "./control-world.js";
 import type { MissionState } from "./frontier/swarm.js";
 import type { JarvisConfig } from "./config.js";
 import { KEY_FIELDS, keyStatus, keysPath } from "./keystore.js";
@@ -270,6 +271,10 @@ export function wireControlPanel(deps: {
   ipcMain.handle("control:weather", (event, request?: ControlWeatherRequest) => {
     if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
     return getControlWeather(request);
+  });
+  ipcMain.handle("control:world", (event) => {
+    if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
+    return getControlWorld();
   });
   ipcMain.handle("control:fleet", (event) => {
     if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
