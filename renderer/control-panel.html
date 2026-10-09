@@ -15,6 +15,7 @@
         <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1" /></symbol>
         <symbol id="icon-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M6 10v2a6 6 0 0 0 12 0v-2m-6 8v4m-3 0h6" /></symbol>
         <symbol id="icon-network" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /><circle cx="12" cy="12" r="2" /><path d="m7 7 4 4m3-1 3-3M7 17l4-4m3 0 4 4" /></symbol>
+        <symbol id="icon-world" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></symbol>
         <symbol id="icon-orbit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r=".7" /></symbol>
         <symbol id="icon-settings" viewBox="0 0 24 24"><path d="m10 3 4 0 1 3 3-1 2 3-2 2 3 2-1 4-3 0-1 3-4-1-2 3-3-2 1-3-3-1 0-4 3-1-1-3 3-2Z" /><circle cx="12" cy="12" r="3" /></symbol>
         <symbol id="icon-close" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17" /></symbol>
@@ -60,6 +61,7 @@
           <button class="quick-control" data-action="interrupt" type="button"><span class="control-ring"><svg><use href="#icon-stop" /></svg></span><small>Stop</small></button>
           <button id="voice-toggle" class="quick-control" data-action="toggle-voice" type="button"><span class="control-ring"><svg><use href="#icon-mic" /></svg></span><small>Voice</small></button>
           <button class="quick-control" data-action="neural" type="button"><span class="control-ring"><svg><use href="#icon-network" /></svg></span><small>Neural Map</small></button>
+          <button class="quick-control" data-view="world" type="button" aria-label="Open World Intelligence"><span class="control-ring"><svg><use href="#icon-world" /></svg></span><small>World</small></button>
           <button class="quick-control" data-action="osiris" type="button"><span class="control-ring"><svg><use href="#icon-orbit" /></svg></span><small>Osiris</small></button>
           <button class="quick-control" data-view="settings" type="button"><span class="control-ring"><svg><use href="#icon-settings" /></svg></span><small>Settings</small></button>
           <button id="power-off" class="quick-control power-control" type="button" aria-haspopup="dialog" aria-controls="shutdown-dialog"><span class="control-ring"><svg><use href="#icon-power" /></svg></span><small>Power off</small></button>
@@ -98,6 +100,11 @@
             <form id="weather-form" class="weather-search"><input id="weather-query" type="text" placeholder="Search location" autocomplete="off" /><button type="submit">SET</button></form>
           </section>
 
+          <button class="context-section context-link compact" type="button" data-view="world">
+            <span class="context-heading"><span><i></i>World Intelligence</span><small>Open feeds</small></span>
+            <span class="route-summary"><span class="summary-icon"><svg><use href="#icon-orbit" /></svg></span><span><strong>Beyond your day</strong><small>Conflicts, earthquakes &amp; hazards</small></span><svg class="chevron"><use href="#icon-chevron" /></svg></span>
+          </button>
+
           <button class="context-section context-link" type="button" data-view="tasks">
             <span class="context-heading"><span><i></i>Missions</span><small id="mission-summary-count">0 active</small></span>
             <span id="mission-summary" class="summary-list"><span class="summary-empty">No missions yet</span></span>
@@ -129,6 +136,7 @@
         <aside class="section-nav" aria-label="Control panel sections">
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
           <button class="active" type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
           <div class="session-readout"><span>SESSION UPTIME</span><strong id="metric-uptime">00:00:00</strong></div>
@@ -186,6 +194,44 @@
         </section>
       </section>
 
+      <section id="world-view" class="view operations-view" data-view-panel="world" hidden>
+        <aside class="section-nav" aria-label="Control panel sections">
+          <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button class="active" type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
+          <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
+          <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
+        </aside>
+        <section class="world-workspace" aria-labelledby="world-title">
+          <header class="workspace-heading world-heading">
+            <div><h1 id="world-title">World Intelligence</h1><p id="world-updated" role="status">Osiris · Ready to connect</p></div>
+            <div class="world-actions">
+              <button class="refresh-button" type="button" data-view="overview" aria-label="Back to Live Overview"><svg><use href="#icon-home" /></svg></button>
+              <button id="world-refresh" class="refresh-button" type="button"><svg><use href="#icon-refresh" /></svg>Refresh</button>
+              <button class="refresh-button" type="button" data-action="osiris"><svg><use href="#icon-orbit" /></svg>Open Osiris</button>
+            </div>
+          </header>
+          <div class="world-scroll">
+            <section class="world-hero">
+              <img src="world-globe.jpg" alt="Osiris intelligence map" width="180" height="120" />
+              <div><span class="world-eyebrow">A view beyond your day</span><h2>The world, at a glance</h2><p>Conflict zones and natural hazards from the same Osiris feeds as Echo Phone.</p></div>
+            </section>
+            <div id="world-stats" class="world-stats" aria-label="World observations">
+              <article><strong>—</strong><span>Conflicts</span></article><article><strong>—</strong><span>Earthquakes · 24h</span></article><article><strong>—</strong><span>Fire detections</span></article><article><strong>—</strong><span>Tsunami flags · 24h</span></article>
+            </div>
+            <div class="world-filters" role="group" aria-label="Filter world observations">
+              <button type="button" data-world-filter="all" aria-pressed="true">All</button>
+              <button type="button" data-world-filter="conflict" aria-pressed="false">Conflicts</button>
+              <button type="button" data-world-filter="quake" aria-pressed="false">Earthquakes</button>
+              <button type="button" data-world-filter="hazard" aria-pressed="false">Hazards</button>
+            </div>
+            <p id="world-notice" class="world-notice" hidden></p>
+            <div id="world-list" class="world-list" aria-label="World intelligence feed"><div class="empty-state">Loading Osiris feeds…</div></div>
+            <details class="world-sources"><summary>Sources &amp; freshness</summary><div id="world-sources"></div><p>USGS tsunami flags describe earthquake observations; they are not official tsunami warnings.</p></details>
+          </div>
+        </section>
+      </section>
+
       <section id="models-view" class="view routing-view" data-view-panel="models" hidden>
         <aside class="activity-pane model-activity">
           <div class="section-title"><h1>Live Activity</h1><span class="live-state"><i></i>Live</span></div>
@@ -218,6 +264,7 @@
         <aside class="section-nav" aria-label="Control panel sections">
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
           <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button class="active" type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
         </aside>

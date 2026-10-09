@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
+    "test:panel-world": "npm run build && electron scripts/control_panel_world_test.mjs",
     "test:panel-routes": "npm run build && electron scripts/control_panel_routes_test.mjs",
     "test:panel-performance": "npm run build && electron scripts/control_panel_perf.mjs",
     "performancetest": "esbuild src/_performancetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_performancetest.js --log-level=error && ECHO_MCP=0 node dist/_performancetest.js",
@@ -80,6 +81,7 @@
     "pipertest": "esbuild src/_pipertest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_pipertest.js --log-level=error && node dist/_pipertest.js",
     "selfhosted:status": "node scripts/selfhosted.mjs status",
     "selfhostedtest": "esbuild src/_selfhostedtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_selfhostedtest.js --log-level=error && node dist/_selfhostedtest.js",
+    "worldtest": "esbuild src/_worldtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_worldtest.js --log-level=error && node dist/_worldtest.js",
     "osiristest": "esbuild src/_osiristest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_osiristest.js --log-level=error && node dist/_osiristest.js",
     "voicepreview": "node scripts/voice_preview.mjs",
     "hudpreview": "node scripts/preview_hud.mjs",
