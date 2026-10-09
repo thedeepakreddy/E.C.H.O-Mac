@@ -11,11 +11,13 @@ import {
   newToken, tokenMatches, tokenFrom, routeOf, record, recentItems,
   isLockedOut, noteBadAttempt, resetAttempts,
   startRemote, stopRemote, isRunning, remoteStatus,
-  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS,
+  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, setCommandHandler, setChatHandler,
 } from "./frontier/remote.js";
 import { parseBattery } from "./frontier/remote-vitals.js";
 import { replayLocally, relayFromConfig, RelayAgent, CLIENT_IP_HEADER } from "./frontier/relay-agent.js";
 import http from "node:http";
+import { existsSync, readFileSync } from "node:fs";
+import { MAX_REMOTE_VOICE_BYTES } from "./frontier/remote-voice.js";
 import { turnContract, CHAT_TURN_CONTRACT, VOICE_TURN_CONTRACT } from "./brain/types.js";
 import { setPassword } from "./frontier/remoteauth.js";
 
@@ -194,7 +196,9 @@ console.log("  a real server, on the loopback");
     setPassword("test-remote-pass"); // into the throwaway JARVIS_REMOTE_DIR
     // A phone app address nothing answers at: the relay agent just keeps retrying.
     const RELAY = { url: "http://127.0.0.1:9", secret: "s".repeat(48) };
-    const started = await startRemote({ port: 7799, ttlMs: 60_000, relay: RELAY });
+    let recognizer: (path: string) => Promise<string> = async () => "test voice";
+    const voiceFiles: string[] = [];
+    const started = await startRemote({ port: 7799, ttlMs: 60_000, relay: RELAY, transcribeVoice: async path => { voiceFiles.push(path); return recognizer(path); } });
     ok(started.ok, `it starts (${started.message.split("\n")[0].slice(0, 50)})`);
     ok(isRunning(), "and reports as running");
     ok(started.url?.startsWith("http://127.0.0.1:9/?t=") === true, "the link is the phone app's, never a network address of this Mac");
@@ -230,6 +234,77 @@ console.log("  a real server, on the loopback");
     const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
     ok(/^js=/.test(cookie), "and hands back a session cookie");
     const auth = { cookie };
+
+    // Voice acknowledges the actual transcript and delivery, never just the upload.
+    const wav = Buffer.alloc(32044);
+    wav.write("RIFF"); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8);
+    wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+    wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28); wav.writeUInt16LE(2, 32);
+    wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(wav.length - 44, 40);
+    const voicePost = (body = wav, path = "/voice", signal?: AbortSignal) => fetch(`${base}${path}?t=${tok}`, { method: "POST", headers: auth, body, signal });
+    ok((await fetch(`${base}/voice?t=${tok}`, { method: "POST", body: wav })).status === 401, "voice uploads require the password session");
+    ok((await voicePost()).status === 503, "voice refuses success while the brain handler is unavailable");
+    const delivered: Array<{text: string; via: string}> = [];
+    setCommandHandler((text, via) => delivered.push({ text, via }));
+    let finishSTT!: (value: string) => void, enteredSTT!: () => void;
+    let entered = new Promise<void>(r => { enteredSTT = r; });
+    recognizer = async path => {
+      ok(readFileSync(path).equals(wav), "the complete WAV reaches speech recognition unchanged");
+      enteredSTT(); return new Promise<string>(r => { finishSTT = r; });
+    };
+    let acknowledged = false;
+    const streamed = new Promise<{status: number; body: any}>((resolve, reject) => {
+      const req = http.request(`${base}/voice?t=${tok}`, { method: "POST", headers: auth }, res => {
+        acknowledged = true; let body = "";
+        res.on("data", c => { body += c; });
+        res.on("end", () => resolve({status: res.statusCode!, body: JSON.parse(body)}));
+      });
+      req.on("error", reject); req.write(wav.subarray(0, 44));
+      setTimeout(() => {
+        ok(!acknowledged && delivered.length === 0, "a partial upload cannot be acknowledged or dispatched");
+        req.end(wav.subarray(44));
+      }, 80);
+    });
+    await entered;
+    ok(!acknowledged && delivered.length === 0, "a complete upload still waits for transcription");
+    finishSTT("  what is two plus two?  ");
+    const spoken = await streamed;
+    ok(spoken.status === 200 && spoken.body.text === "what is two plus two?", "success contains the recognized words");
+    ok(delivered.length === 1 && delivered[0].text === spoken.body.text && delivered[0].via === "voice", "the brain receives exactly one voice turn");
+    ok(voiceFiles.every(path => !existsSync(path)), "temporary recordings are removed after success");
+    const count = delivered.length;
+    recognizer = async () => "   ";
+    const empty = await voicePost();
+    ok(empty.status === 422 && (await empty.json() as any).code === "voice_unheard" && delivered.length === count, "unheard speech reports an error without dispatch");
+    recognizer = async () => { throw new Error("private provider key and path"); };
+    const failedVoice = await voicePost(), failure = await failedVoice.json() as any;
+    ok(failedVoice.status === 503 && failure.code === "voice_transcription_failed" && !failure.error.includes("private provider"), "recognition failures are reported without leaking provider details");
+    const calls = voiceFiles.length;
+    ok((await voicePost(Buffer.alloc(45))).status === 400, "a corrupt WAV is refused before recognition");
+    ok((await voicePost(wav.subarray(0, 100))).status === 400, "an incomplete WAV is refused before recognition");
+    ok((await voicePost(Buffer.alloc(MAX_REMOTE_VOICE_BYTES + 1))).status === 413 && voiceFiles.length === calls, "oversized uploads are bounded and never transcribed");
+    recognizer = async () => "chat voice words";
+    setChatHandler((text, via) => delivered.push({text, via}));
+    const chatVoice = await voicePost(wav, "/chat/voice"), chatResult = await chatVoice.json() as any;
+    ok(chatVoice.status === 200 && chatResult.message.kind === "voice" && chatResult.message.text === "chat voice words", "chat voice keeps its recognized message and voice kind");
+    setChatHandler(() => { throw new Error("dispatch failed"); });
+    ok((await voicePost(wav, "/chat/voice")).status === 503, "a rejected chat dispatch does not acknowledge success");
+    const chatState = await fetch(`${base}/chat?t=${tok}`, {headers: auth}).then(r => r.json()) as any;
+    ok(!chatState.typing, "failed chat dispatch clears the typing indicator");
+    entered = new Promise<void>(r => { enteredSTT = r; });
+    recognizer = async () => { enteredSTT(); return new Promise<string>(r => { finishSTT = r; }); };
+    const beforeCancel = delivered.length, abort = new AbortController();
+    const cancelled = voicePost(wav, "/voice", abort.signal).catch(() => null);
+    await entered; abort.abort(); await cancelled;
+    await new Promise(r => setTimeout(r, 80)); finishSTT("cancelled voice");
+    await new Promise(r => setTimeout(r, 80));
+    ok(delivered.length === beforeCancel, "a cancelled request cannot dispatch a late voice command");
+    ok(voiceFiles.every(path => !existsSync(path)), "temporary recordings are removed after failures and cancellation too");
+    recognizer = async () => "through the relay";
+    const relayLogin = await replayLocally({id: "voice-login", method: "POST", path: `/login?t=${tok}`, ip: "198.51.100.1", headers: {"content-type": "application/json"}, body: Buffer.from(JSON.stringify({password: "test-remote-pass"})).toString("base64")}, base);
+    const relayAuth = {cookie: relayLogin.headers["set-cookie"].split(";")[0]};
+    const relayVoice = await replayLocally({id: "voice-relay", method: "POST", path: `/voice?t=${tok}`, ip: "198.51.100.2", headers: relayAuth, body: wav.toString("base64")}, base);
+    ok(relayVoice.status === 200 && JSON.parse(Buffer.from(relayVoice.body, "base64").toString()).text === "through the relay" && delivered.at(-1)?.via === "voice", "the relay returns the transcript after delivering the voice turn");
 
     // ---- with a session, control works ----
     record("did a thing", "go");

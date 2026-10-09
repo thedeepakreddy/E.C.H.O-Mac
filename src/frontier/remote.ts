@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { getAppPath } from "../utils/appPath.js";
 import { readVitals } from "./remote-vitals.js";
 import { screenFrame } from "./remote-frame.js";
+import { transcribeRemoteVoice, RemoteVoiceError } from "./remote-voice.js";
 import { RelayAgent, CLIENT_IP_HEADER } from "./relay-agent.js";
 import { ChatLog } from "./remote-chat.js";
 import { PasskeyStore } from "./passkeys.js";
@@ -516,6 +517,8 @@ export async function startRemote(opts: {
   onStop?: () => void;
   /** The phone app's relay (echo-remote on Render): reachable from any network. */
   relay?: { url: string; secret: string };
+  /** Host-side transcription dependency; never selectable by an HTTP request. */
+  transcribeVoice?: (path: string) => Promise<string>;
 } = {}): Promise<StartResult> {
   if (running) {
     return { ok: true, url: remoteUrl(currentPort) ?? undefined, message: "The remote is already running." };
@@ -782,34 +785,6 @@ export async function startRemote(opts: {
         return json({ ok: true, imported });
       });
     }
-    if (route === "chat-voice") {
-      if (req.method !== "POST") return deny();
-      const chunks: Buffer[] = [];
-      let size = 0;
-      req.on("data", (c: Buffer) => { size += c.length; if (size <= 12 * 1024 * 1024) chunks.push(c); });
-      req.on("end", async () => {
-        if (size > 12 * 1024 * 1024) return json({ ok: false, error: "That voice note is too long." }, 413);
-        const { tmpdir } = await import("node:os");
-        const { writeFileSync: write, unlinkSync } = await import("node:fs");
-        const wavPath = join(tmpdir(), `remote-chat-${Date.now()}.wav`);
-        try {
-          write(wavPath, Buffer.concat(chunks));
-          const { transcribe } = await import("../voice/stt.js");
-          const { activeConfig } = await import("../config.js");
-          const text = (await transcribe(wavPath, activeConfig(getAppPath()))).trim();
-          if (!text) return json({ ok: false, error: "I couldn't hear anything in that." }, 422);
-          const message = chat().add("you", text, "voice");
-          chat().setTyping(true);
-          try { chatHandler?.(text, "voice"); } catch { /* keep serving */ }
-          return json({ ok: true, message });
-        } catch (e: any) {
-          return json({ ok: false, error: String(e?.message ?? e) }, 500);
-        } finally {
-          try { unlinkSync(wavPath); } catch { /* already gone */ }
-        }
-      });
-      return;
-    }
     if (route === "frame") {
       if (req.method !== "GET") return deny();
       void screenFrame()
@@ -850,33 +825,41 @@ export async function startRemote(opts: {
         return json({ ok: true });
       });
     }
-    if (route === "voice") {
+    if (route === "voice" || route === "chat-voice") {
       if (req.method !== "POST") return deny();
-      const chunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", async () => {
-        const wav = Buffer.concat(chunks);
-        const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
-        const { writeFileSync, unlinkSync } = await import("node:fs");
-        const { getAppPath } = await import("../utils/appPath.js");
-        const wavPath = join(tmpdir(), "remote-voice-" + Date.now() + ".wav");
-        writeFileSync(wavPath, wav);
-        try {
-          const { transcribe } = await import("../voice/stt.js");
-          const { activeConfig } = await import("../config.js");
-          const text = await transcribe(wavPath, activeConfig(getAppPath()));
-          if (text) {
-            record(`You (phone): ${text}`, "go");
-            try { commandHandler?.(text, "voice"); } catch {}
-          }
-        } catch (e) {
-          console.error("[jarvis] remote voice failed:", e);
-        } finally {
-          try { unlinkSync(wavPath); } catch {}
-        }
+      const transcribe = opts.transcribeVoice ?? (async (path: string) => {
+        const { transcribe } = await import("../voice/stt.js");
+        const { activeConfig } = await import("../config.js");
+        return transcribe(path, activeConfig(getAppPath()));
       });
-      return json({ ok: true });
+      void (async () => {
+        try {
+          const text = await transcribeRemoteVoice(req, transcribe);
+          // A timed-out or cancelled upload must never start a late command.
+          if (res.destroyed || res.writableEnded) return;
+          const handler = route === "chat-voice" ? chatHandler : commandHandler;
+          if (!handler) return json({ ok: false, error: "Echo's brain is still starting. Try again shortly.", code: "voice_not_ready" }, 503);
+          if (route === "chat-voice") {
+            const message = chat().add("you", text, "voice");
+            chat().setTyping(true);
+            try { handler(text, "voice"); } catch (error) { chat().setTyping(false); throw error; }
+            return json({ ok: true, message, text });
+          }
+          record(`You (phone): ${text}`, "go");
+          handler(text, "voice");
+          remoteLog("phone voice transcribed and delivered to the brain");
+          return json({ ok: true, text });
+        } catch (error) {
+          if (res.destroyed || res.writableEnded) return;
+          const status = error instanceof RemoteVoiceError ? error.status : 503;
+          const code = error instanceof RemoteVoiceError ? error.code : "voice_transcription_failed";
+          // Provider errors can contain private paths or keys; keep them local.
+          remoteLog(`phone voice failed (${code})`);
+          console.error("[jarvis] remote voice failed:", error);
+          return json({ ok: false, code, error: error instanceof RemoteVoiceError ? error.message : "Your Mac couldn't transcribe the recording. Check its speech-recognition settings and try again." }, status);
+        }
+      })();
+      return;
     }
     if (route === "confirm") {
       if (req.method !== "POST") return deny();
