@@ -557,7 +557,7 @@ tool calls and results, and why the run ended.
 Echo is published here to be read and reviewed. It is **not** open source, and there is no
 licence granting you the right to use it.
 
-**Using it without permission is strictly prohibited.** That covers running it, copying it,
+**Using it without permission is strictly prohibited.** That covers running it(exception for recruiters), copying it,
 building on it, publishing it, and reusing any part of it — the code, the renderer, the
 artwork in `assets/`, the recordings in `docs/media/`, or the design — for any purpose,
 personal, academic or commercial, unless the author has given you written permission.
