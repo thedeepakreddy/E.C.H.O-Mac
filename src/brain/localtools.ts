@@ -1,6 +1,7 @@
 import { CODING_TOOL_NAMES, codingToolNames } from '../coding/tool-selection.js';
 import { intelligenceToolNames } from './intelligence-routing.js';
 import { creatorProjectToolNames } from '../creator-projects.js';
+import { isDatasetExportRequest } from '../learn/dataset-request.js';
 import { TOOLS } from "../tools/registry.js";
 import { contextTokens } from "../memory/conversation.js";
 
@@ -196,7 +197,7 @@ export function toolsForLocalModel(all: any[]): any[] {
 export function fitLocalTools(all: any[], query: string, budget: number): any[] {
   const essential = new Set(["run_supervised_task", "inspect_supervised_task", "submit_task_review", "read_browser_page", "inspect_task", "verify_task", "update_task_plan", "read_tool_result", "refresh_observations", "discover_tools", "conversation_history", "forget", "stop_learning_here", "undo_last", "read_creator_project", "show_creator_project"]);
   const coding=codingToolNames(query).size>0;const forced = new Set([...intelligenceToolNames(query), ...(coding?["inspect_coding_tools","invoke_coding_tool"]:[])]);
-  if (/\b(?:save|export|training)\b.*\b(?:dataset|data)\b|\bdataset\b.*\b(?:save|export)\b/i.test(query)) forced.add('export_training_data');
+  if (isDatasetExportRequest(query)) forced.add('export_training_data');
   for (const name of creatorProjectToolNames(query)) forced.add(name);
   const words = new Set(query.toLowerCase().match(/[a-z0-9]+/g) ?? []);
   const compact = (value: any): any => {

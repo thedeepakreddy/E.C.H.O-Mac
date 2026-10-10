@@ -474,7 +474,7 @@ export const MEMORY_TOOLS: ToolDef[] = [
   },
   {
     name: "export_training_data",
-    description: "Save dataset: export all available recorded brains, conversations, tool calls/results, outcomes and training candidates. Use for 'save dataset', 'save all training data' or 'export dataset'. Gold benchmark examples require independent review.",
+    description: "Save a fresh JSON/JSONL dataset snapshot. Use for 'save yourself for training', 'save dataset', 'save all training data' or 'export dataset'. Export available recorded brains, conversations, tool calls/results, outcomes and training candidates. Gold examples require independent review.",
     schema: {},
     readOnly: false,
     handler: async () => {

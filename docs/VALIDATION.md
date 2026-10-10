@@ -40,6 +40,16 @@ Reported assertion tallies included 170/170 risk checks, 24/24 gate checks, 73/7
 
 The [README gallery](../README.md#screenshots) uses isolated renderer captures with sample data, except labeled public feeds. It demonstrates the UI, not successful live execution of the tasks shown. Historical feature-specific checks in [Bots integration notes](bots-integration/usage.md) have their own scope and are not a fresh full-suite result here.
 
+## Save-for-training alias check on October 10, 2026
+
+Baseline: `main` at `b69b79d`, with the explicit “save yourself for training” alias and shared dataset-intent matcher added in this update. Typechecking passed. `npm test -- datasetexporttest localtest codingdatasettest` passed **3/3 suites in 2 seconds** using isolated data.
+
+`npm run build` also passed. It reported the existing duplicate `researchtest` key in `package.json`; that script definition was not changed in this update. Generated native binaries were not included in the commit.
+
+The export fixture checks that a repeated save includes a newly recorded training example, produces a new snapshot path and leaves the earlier snapshot intact. Routing checks force an unrelated tool to rank first under mocked semantic embeddings and limit the local tool budget to one tool; the dataset-export action remains available for the exact phrase. Existing export privacy, gap, provenance and coding-evidence checks also passed. The local model harness reported 19/19 checks.
+
+These checks do not exercise a live model interpreting microphone input. The alias makes the existing export tool explicit and reachable; model/tool execution, permissions and recording availability still determine the outcome. No personal dataset was exported by these tests, and no training or paid model job was started.
+
 ## Reproduce the checks
 
 ```bash

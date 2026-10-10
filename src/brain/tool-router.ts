@@ -1,6 +1,7 @@
 import { codingToolNames } from '../coding/tool-selection.js';
 import { intelligenceToolNames } from './intelligence-routing.js';
 import { creatorProjectToolNames } from '../creator-projects.js';
+import { isDatasetExportRequest } from '../learn/dataset-request.js';
 import { TOOLS } from "../tools/registry.js";
 import { embedder } from "../cognition/embeddings.js";
 import { cosine } from "../cognition/episodic.js";
@@ -103,7 +104,7 @@ export async function selectToolNames(
 
     const relevant = new Set([...intelligenceToolNames(userText), ...codingToolNames(userText), ...creatorProjectToolNames(userText)]);
     const forced = pool.filter(t => relevant.has(t.name)).map(t => t.name);
-    if (/\b(?:save|export|training)\b.*\b(?:dataset|data)\b|\bdataset\b.*\b(?:save|export)\b/i.test(userText) && pool.some(t => t.name === 'export_training_data')) forced.push('export_training_data');
+    if (isDatasetExportRequest(userText) && pool.some(t => t.name === 'export_training_data')) forced.push('export_training_data');
     const keep = new Set([...always.map((t) => t.name), ...forced, ...picked]);
     // A sanity floor: if pruning somehow produced far fewer usable tools than
     // asked for (every embedding failed midway, say), it is not to be trusted.

@@ -14,6 +14,25 @@ An observation can be a screenshot, OCR text or an Accessibility-tree representa
 
 The [dataset exporter](../src/learn/dataset-export.ts) can save available run recordings, conversations, trajectories, screenshots, coding evidence and tool schemas. It preserves provenance and labels training candidates. Its `gold.jsonl` starts empty; raw records and automatic success labels are not automatically certified gold.
 
+## Save yourself for training
+
+Say **“Echo, save yourself for training”** by voice, or type the same request. The phrase is an explicit alias for the existing `export_training_data` tool and is retained through both semantic tool pruning and local-model tool budgets.
+
+Each successful export creates a new timestamped folder under `~/.jarvis/datasets/<snapshot-id>/`, flushes pending trajectory writes and captures the available saved records up to its inventory boundary. Repeating the request after recording more experience produces an updated snapshot while preserving earlier ones. Echo reports the saved path and available record/candidate counts; failures and recording gaps are reported.
+
+| Output | Purpose |
+| --- | --- |
+| `training.jsonl` | Automatic training candidates as JSON objects, one per line, with provenance and image references. |
+| `raw/trajectories/` and `raw/runs/` | Available observations, actions, outcomes, model requests and tool results. |
+| `raw/conversations/` and `raw/coding/` | Available conversation and coding records/evidence. |
+| Screenshot files | Images referenced by available records, where present. |
+| `manifest.json` and `feature-context.json` | Snapshot counts, hashes, gaps and current tool schemas. |
+| `gold.jsonl` and `review.json` | An initially empty gold file and review requirements; automatic labels await manual verification. |
+
+This is the practical collection loop for recruiters to understand: **use Echo for real work → ask it to save its experience → curate that saved data for training**. “Yourself” refers to the recorded experience. The export is a dataset snapshot; model training is a subsequent research stage.
+
+The current save call's own later result appears in the next snapshot. Private, disabled, deleted or never-recorded history is not reconstructed. A successful export does not automatically launch training or upload the data. The CLI equivalent is `npm run dataset -- --export`.
+
 ## Inventory measured October 10, 2026
 
 Measurement time: **20:47:52 UTC**. Scope: current local trajectory logs, read without exporting task text or image pixels. See the [aggregate inventory](dataset-inventory.json) and [read-only counting script](../scripts/dataset-inventory.mjs).
