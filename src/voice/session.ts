@@ -84,6 +84,11 @@ export class VoiceSession extends EventEmitter {
     return this.brainTurn?.id ?? null;
   }
 
+  /** Is the brain still producing that turn's output (not yet done)? */
+  get brainTurnActive(): boolean {
+    return !!this.brainTurn && !this.brainTurn.brainDone;
+  }
+
   transition(next: VoiceState, why?: string): void {
     if (next === this.state) return;
     const prev = this.state;

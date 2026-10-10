@@ -3,13 +3,13 @@
  *
  *   npm run remotetest
  *
- * This is the only feature that opens a port on whatever network the machine
- * happens to be on, so the tests are weighted heavily toward what it will NOT
- * do. A real server is started at the end and probed over the loopback.
+ * Full control of the Mac from a phone, reached only through the phone app's
+ * relay, so the tests are weighted heavily toward what it will NOT do. A real
+ * server (loopback only) is started at the end and probed.
  */
 import {
   newToken, tokenMatches, tokenFrom, routeOf, record, recentItems,
-  renderPage, lanAddress, preferredHost, isLockedOut, noteBadAttempt, resetAttempts,
+  isLockedOut, noteBadAttempt, resetAttempts,
   startRemote, stopRemote, isRunning, remoteStatus,
   MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, remoteAssetDir, setCommandHandler, setChatHandler,
 } from "./frontier/remote.js";
@@ -19,8 +19,6 @@ import http from "node:http";
 import { existsSync } from "node:fs";
 import { MAX_REMOTE_VOICE_BYTES } from "./frontier/remote-voice.js";
 import { turnContract, CHAT_TURN_CONTRACT, VOICE_TURN_CONTRACT } from "./brain/types.js";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import { setPassword } from "./frontier/remoteauth.js";
 
 let pass = 0, fail = 0;
@@ -59,8 +57,8 @@ console.log("  tokens");
 
 console.log("  routing");
 {
-  ok(routeOf("/") === "page", "the root serves the page");
-  ok(routeOf("/?t=x") === "page", "with a query too");
+  ok(routeOf("/") === "unknown", "the Mac serves no page of its own: the phone app lives on the relay");
+  ok(routeOf("/?t=x") === "unknown", "with a query too");
   ok(routeOf("/events?t=x&since=0") === "events", "/events is the feed");
   ok(routeOf("/stop?t=x") === "stop", "/stop is the stop button");
   ok(routeOf("/../../etc/passwd") === "unknown", "a traversal attempt is not a route");
@@ -73,19 +71,6 @@ console.log("  routing");
   ok(routeOf("/rtc/answer") === "rtc-answer", "/rtc/answer returns the Mac's answer");
   ok(routeOf("/rtc/ice") === "rtc-ice-phone", "/rtc/ice takes the phone's candidates");
 }
-{
-  const pref = preferredHost();
-  // On any networked machine there is at least a LAN address; the point of the
-  // assertion is that when a tailnet address exists it is preferred.
-  if (pref) {
-    ok(pref.kind === "tailscale" || pref.kind === "lan", `preferred host is classified (${pref.kind})`);
-    if (pref.kind === "tailscale") {
-      const [o1, o2] = pref.host.split(".").map(Number);
-      ok(o1 === 100 && o2 >= 64 && o2 <= 127, "a Tailscale address is in the 100.64/10 range");
-    }
-  }
-}
-
 console.log("  lockout");
 {
   resetAttempts();
@@ -105,39 +90,10 @@ console.log("  the feed does not grow forever");
   ok(recentItems().items.length === 0, "nothing is recorded while the remote is off");
 }
 
-console.log("  the page is self-contained");
-{
-  const html = renderPage("deadbeef");
-  ok(!/https?:\/\//.test(html), "no external resources are loaded");
-  ok(/app\/remote\.js\?t=deadbeef/.test(html), "the token is baked into every app URL so the phone need not retype it");
-  ok(!/__T__/.test(html), "and no placeholder is left behind");
-  ok(/viewport/.test(html), "it is sized for a phone");
-  ok(/Stop everything/.test(html), "there is a stop button");
-  ok(/reactor-jarvis-core\.png/.test(html) && /id="login"[\s\S]*class="hud/.test(html), "the login screen shows the real reactor");
-  ok(!/<script>/.test(html), "no inline script, so the policy can forbid it");
-  let threw = false;
-  try { renderPage('"><script>'); } catch { threw = true; }
-  ok(threw, "a token that is not hex is refused rather than written into the page");
-}
-{
-  // Text from the Mac is set as TEXT, never parsed as markup — otherwise a
-  // filename on screen could inject script into a phone that drives the Mac.
-  const js = readFileSync(join(remoteAssetDir(), "remote.js"), "utf8");
-  ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/.test(js), "the phone script never turns data into markup");
-  ok(/textContent/.test(js), "it writes Mac text with textContent");
-  const css = readFileSync(join(remoteAssetDir(), "remote.css"), "utf8");
-  ok(!/https?:\/\//.test(css) && !/@import/.test(css), "the stylesheet loads nothing from elsewhere");
-  for (const name of readdirSync(remoteAssetDir())) {
-    ok(name === "index.html" || routeOf(`/app/${name}`) === "asset", `${name} is reachable as an app file`);
-  }
-}
-
 console.log("  app files and controls");
 {
-  ok(routeOf("/app/remote.css") === "asset", "/app/remote.css is an app file");
-  ok(routeOf("/app/../remote.ts") === "unknown", "a dot-dot under /app is not");
-  ok(routeOf("/app/%2e%2e%2fconfig.json") === "unknown", "nor an encoded one");
-  ok(routeOf("/app/index.html") === "unknown", "the page itself is only served at /");
+  ok(routeOf("/app/remote.css") === "unknown", "no app files are served from the Mac");
+  ok(routeOf("/app/../remote.ts") === "unknown", "nor anything under /app");
   ok(routeOf("/status") === "status" && routeOf("/action") === "action" && routeOf("/keys") === "keys", "status, action and keys are routes");
 
   ok(parseRemoteAction({ type: "switch-model", provider: "claude" })?.type === "switch-model", "switching the brain is allowed");
@@ -226,37 +182,37 @@ console.log("  refuses to open with no password set");
 {
   // JARVIS_REMOTE_DIR points at a throwaway dir (set by the npm script), which
   // starts empty — so this proves the refusal before a password exists.
-  const noPass = await startRemote({ port: 7798, ttlMs: 60_000 });
+  const noRelay = await startRemote({ port: 7798, ttlMs: 60_000 });
+  ok(!noRelay.ok && /phone app isn't set up/.test(noRelay.message), "it won't open without the phone app's relay: nothing listens on the network");
+  const noPass = await startRemote({ port: 7798, ttlMs: 60_000, relay: { url: "http://127.0.0.1:9", secret: "s".repeat(48) } });
   ok(!noPass.ok && /password/.test(noPass.message),
      "full control will not open without a password");
   ok(!isRunning(), "and nothing is left running");
 }
 
-console.log("  a real server, over the network");
+console.log("  a real server, on the loopback");
 {
-  const pref = preferredHost();
-  if (!pref) {
-    console.log("  ⚠ no network address on this machine — skipping the live server checks");
-  } else {
-    const host = pref.host;
+  {
     setPassword("test-remote-pass"); // into the throwaway JARVIS_REMOTE_DIR
     let recognizer: (path: string) => Promise<string> = async () => "test voice";
     const voiceFiles: string[] = [];
     const started = await startRemote({ port: 7799, ttlMs: 60_000, transcribeVoice: async path => { voiceFiles.push(path); return recognizer(path); } });
     ok(started.ok, `it starts (${started.message.split("\n")[0].slice(0, 50)})`);
     ok(isRunning(), "and reports as running");
-    ok(started.url?.includes(host) === true, "the link points at the network address, not loopback");
+    ok(started.url?.startsWith("http://127.0.0.1:9/?t=") === true, "the link is the phone app's, never a network address of this Mac");
 
     const tok = new URL(started.url!).searchParams.get("t")!;
-    const base = `http://${host}:7799`;
+    const base = `http://127.0.0.1:7799`;
 
     // ---- the link token gates existence ----
-    const noToken = await fetch(`${base}/`);
+    const noToken = await fetch(`${base}/ping`);
     ok(noToken.status === 404, `no token gets 404, not 401 (${noToken.status})`);
-    const badToken = await fetch(`${base}/?t=${"0".repeat(32)}`);
+    const badToken = await fetch(`${base}/ping?t=${"0".repeat(32)}`);
     ok(badToken.status === 404, "a wrong token gets 404 too — nothing confirms a server is here");
-    const good = await fetch(`${base}/?t=${tok}`);
-    ok(good.status === 200, "the right token gets the login page");
+    const good = await fetch(`${base}/ping?t=${tok}`);
+    ok(good.status === 204, "the right token is answered");
+    const page = await fetch(`${base}/?t=${tok}`);
+    ok(page.status === 404, "and there is no page here: the phone app is on the relay");
 
     // ---- the password gates control ----
     const controlNoSession = await fetch(`${base}/events?t=${tok}&since=0`);
@@ -355,6 +311,18 @@ console.log("  a real server, over the network");
     record("did a thing", "go");
     const ev = await fetch(`${base}/events?t=${tok}&since=0`, { headers: auth }).then((r) => r.json() as any);
     ok(ev.items.some((i: any) => i.line === "did a thing"), "the feed carries recorded events once signed in");
+    // Positions are absolute: when old items fall off the ring buffer, the phone
+    // never gets one it has already seen (it read old replies aloud again).
+    const seenAt = (recentItems(0) as any).nextIndex;
+    for (let i = 0; i < 250; i++) record(`filler ${i}`, "progress");
+    const after = recentItems(seenAt);
+    ok(after.items.length === 200 && after.items[0].line === "filler 50", "after the buffer wraps, only what's new and still kept comes back");
+    ok(after.items.every((i) => i.line !== "did a thing"), "an item the phone already saw never comes back");
+    const end = after.nextIndex;
+    record("one more", "reply");
+    const next = recentItems(end);
+    ok(next.items.length === 1 && next.items[0].line === "one more" && next.nextIndex === end + 1, "and the next poll gets exactly the new item");
+    ok(recentItems(end + 999).items.length === MAX_ITEMS, "a position past the end (Echo restarted) starts over");
 
     const rtc = await fetch(`${base}/rtc/offer?t=${tok}`, {
       method: "POST", headers: { "content-type": "application/json", ...auth },
@@ -368,15 +336,7 @@ console.log("  a real server, over the network");
     const getStop = await fetch(`${base}/stop?t=${tok}`, { headers: auth });
     ok(getStop.status === 404, "stop cannot be triggered by a GET");
 
-    // ---- the app files and the new controls ----
-    const css = await fetch(`${base}/app/remote.css?t=${tok}`);
-    ok(css.status === 200 && /text\/css/.test(css.headers.get("content-type") ?? ""), "the stylesheet is served with the link token");
-    const cssNoToken = await fetch(`${base}/app/remote.css`);
-    ok(cssNoToken.status === 404, "and not without it");
-    const png = await fetch(`${base}/app/reactor-jarvis-core.png?t=${tok}`);
-    ok(png.status === 200 && (png.headers.get("content-type") ?? "") === "image/png", "the reactor art is served");
-    const missing = await fetch(`${base}/app/nothing-here.js?t=${tok}`);
-    ok(missing.status === 404, "a well-formed name that does not exist is still a 404");
+    // ---- the controls ----
 
     const statusNoSession = await fetch(`${base}/status?t=${tok}`);
     ok(statusNoSession.status === 401, "status needs the password, not just the link");
@@ -397,7 +357,7 @@ console.log("  a real server, over the network");
 
     let stopped = false;
     await stopRemote();
-    await startRemote({ port: 7799, ttlMs: 60_000, onStop: () => { stopped = true; } });
+    await startRemote({ port: 7799, ttlMs: 60_000, relay: RELAY, onStop: () => { stopped = true; } });
     const tokNew = /t=([0-9a-f]{32})/.exec(remoteStatus())?.[1] ?? "";
     ok(tokNew === tok, "restarting keeps the SAME token, so a saved link keeps working");
 
@@ -410,9 +370,9 @@ console.log("  a real server, over the network");
     ok(oldSession === 401 || oldSession === "reset",
        `the session still dies on restart, even though the link lives (${oldSession})`);
 
-    // The saved link still reaches the login page after a restart.
-    const savedLink = await fetch(`${base}/?t=${tok}`).then((r) => r.status).catch(() => "reset" as const);
-    ok(savedLink === 200, `the saved link still opens the login page after a restart (${savedLink})`);
+    // The saved link (its token) still works after a restart.
+    const savedLink = await fetch(`${base}/ping?t=${tok}`).then((r) => r.status).catch(() => "reset" as const);
+    ok(savedLink === 204, `the saved link still works after a restart (${savedLink})`);
 
     // Sign in again to drive stop.
     const login2 = await fetch(`${base}/login?t=${tokNew}`, {
@@ -430,26 +390,12 @@ console.log("  a real server, over the network");
     const frameNoSession = await fetch(`${base}/frame?t=${tokNew}`);
     ok(frameNoSession.status === 401, "a screen still needs the password, not just the link");
 
-    // The relay agent's client-address header is believed only on the
-    // loopback listener. Sent to the LAN listener it must not give each guess
-    // a fresh address, or the lockout would never trigger.
-    for (let i = 0; i < 5; i++) {
-      await fetch(`${base}/login?t=${tokNew}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", [CLIENT_IP_HEADER]: `203.0.113.${i + 1}` },
-        body: JSON.stringify({ password: "wrong" }),
-      });
-    }
-    const afterSpoof = await fetch(`${base}/?t=${tokNew}`);
-    ok(afterSpoof.status === 404, "a forged client-address header on the LAN does not dodge the lockout");
-    resetAttempts();
-
     const msg = await stopRemote();
     ok(/won't work again/.test(msg), "closing says the link is dead");
     ok(!isRunning(), "and it is no longer running");
 
     let unreachable = false;
-    await fetch(`${base}/?t=${tokNew}`).catch(() => { unreachable = true; });
+    await fetch(`${base}/ping?t=${tokNew}`).catch(() => { unreachable = true; });
     ok(unreachable, "the port is actually closed");
   }
 }

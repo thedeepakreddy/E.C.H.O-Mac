@@ -238,6 +238,11 @@ function remoteChannelOf(turnId: string | null | undefined): RemoteChannel | und
 }
 /** The channel for output being produced right now: the current turn's, else the brain's. */
 function replyChannel(): RemoteChannel | "local" {
+  // While the brain is still answering a turn, its words go back to where that
+  // turn came from. A newer turn (a Listen tapped on the phone meanwhile) must
+  // not take an older turn's answer: a hand-off's inbox summary was read aloud
+  // on the phone that way, and never reached the chat that asked for it.
+  if (voiceSession?.brainTurnActive) return remoteChannelOf(voiceSession.brainTurnId) ?? "local";
   return remoteChannelOf(voiceSession?.current?.id) ?? remoteChannelOf(voiceSession?.brainTurnId) ?? "local";
 }
 /** Send something Echo would have said to the device the turn came from. */
@@ -2643,8 +2648,8 @@ app.whenReady().then(async () => {
 
   // Always-on phone remote: start it silently at launch so the saved link keeps
   // working, and never let it auto-close. Fails closed — a password is required,
-  // and nothing is exposed beyond the private tailnet. No QR is shown here; the
-  // user already has the link, and popping it up every launch would be noise.
+  // and it is reached only through the phone app's relay (nothing listens on the
+  // network). No QR is shown here; the user already has the link.
   if (cfg.remote?.alwaysOn) {
     if (!hasRemotePassword()) {
       console.log("[jarvis] remote.alwaysOn is set but no remote password — not starting. Set one first.");
@@ -3152,10 +3157,10 @@ setStatusProvider((logsAfter) => {
   };
 });
 
-// The public link's address changes whenever the tunnel restarts, so each new
-// one is saved (the HUD's remote button and phone_remote_status read it) and
-// sent to the user's own Telegram chats — the phone needs it to get back in.
-// A permanent link comes back unchanged after every reconnect; it is sent once.
+// The phone app's link is saved (the HUD's remote button and
+// phone_remote_status read it) and sent once to the user's own Telegram chats,
+// so the phone can always get back in. It comes back unchanged after every
+// reconnect, so it isn't sent again.
 let lastSentRemoteUrl = "";
 setPublicUrlListener((url) => {
   if (!url || url === lastSentRemoteUrl) return;

@@ -371,9 +371,8 @@ export interface JarvisConfig {
    *
    * When on, the remote starts automatically at launch (if a password is set)
    * and never auto-closes — a standing, password-guarded door reachable only
-   * over the private tailnet. Off by default because opening full control of
-   * the machine should normally be a deliberate act.
-   *
+   * through the phone app. Off by default because opening full control of the
+   * machine should normally be a deliberate act.
    *
    * `relayUrl` connects Echo to its phone app (the echo-remote server, e.g. on
    * Render): Echo dials out to it, so the app works from any network with no

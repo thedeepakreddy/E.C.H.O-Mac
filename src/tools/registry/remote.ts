@@ -66,7 +66,7 @@ export const REMOTE_TOOLS: ToolDef[] = [
   {
     name: "open_phone_remote",
     description:
-      "Open full remote control of this Mac from the user's phone: a live view of the screen, two-way talk, sending commands, and approving actions — all behind their password. Reachable from any network (Wi-Fi or mobile data) through the Echo phone app when remote.relayUrl is set; otherwise Tailscale or the same Wi-Fi. Shows a QR code on screen to scan. Use this when they want to see, control, or drive the Mac from their phone. Requires a remote password to be set first (set_remote_password).",
+      "Open full remote control of this Mac from the user's phone: a live view of the screen, two-way talk, sending commands, and approving actions — all behind their password. Reachable from any network (Wi-Fi or mobile data) through the Echo phone app (needs remote.relayUrl and ECHO_RELAY_SECRET). Shows a QR code of the phone app link to scan. Use this when they want to see, control, or drive the Mac from their phone. Requires a remote password to be set first (set_remote_password).",
     schema: {},
     readOnly: false,
     handler: async () => {

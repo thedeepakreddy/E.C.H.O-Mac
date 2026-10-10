@@ -136,8 +136,8 @@ export class SessionStore {
       this.sessions.delete(token);
       return false;
     }
-    // A session is bound to the address it was minted for; a token replayed from
-    // elsewhere on the tailnet does not carry.
+    // A session is bound to the phone address it was minted for; a token
+    // replayed from somewhere else does not carry.
     if (ip && s.ip !== "?" && s.ip !== ip) return false;
     return true;
   }
@@ -195,7 +195,7 @@ const tokenFile = (dir: string) => join(dir, "remote-token");
  * This changes the old behaviour, where every restart minted a new token and
  * killed old links. That made sense when the link was the only guard; now the
  * PASSWORD is the guard, and the link merely needs to be unguessable and stable.
- * Reachable only over the private tailnet and useless without the password, a
+ * Reachable only through the phone app and useless without the password, a
  * fixed token is the right trade for a link you bookmark on your phone.
  *
  * Rotate it deliberately (rotateToken) if a saved link should ever be revoked.

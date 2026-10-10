@@ -243,13 +243,15 @@ Echo can hand work to a **team of agents** running in the background while you k
 
 ---
 
-## 9. Phone remote and Telegram
+## 9. Echo Phone and Telegram
 
-**Phone remote:**
-1. Say *"set a remote password"*, then *"open phone remote"*.
-2. Scan the QR code on your phone.
-3. You get the live Mac screen, two-way talk, typed commands and approval of risky
-   actions. Install **Tailscale** on both devices to use it away from home Wi-Fi.
+**Echo Phone** (the phone app, from any network):
+1. Set `remote.relayUrl` to your Echo Phone address (e.g. `https://echo-phone.onrender.com`) and
+   `ECHO_RELAY_SECRET` in `keys.env` to the same secret as `RELAY_SECRET` on the relay.
+2. Say *"set a remote password"*, then *"open phone remote"*, and scan the QR code (the
+   Echo Phone link) on your phone. Telegram's `/link` sends it too.
+3. You get the live Mac screen, two-way talk, typed commands and approval of risky actions.
+   The Mac never listens on the network: Echo dials out to the phone app's relay.
 
 **Telegram:** chat with Echo through a private bot. Only the chat IDs you list can control it.
 
