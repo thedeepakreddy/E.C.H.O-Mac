@@ -25,6 +25,32 @@ the web, runs code and answers out loud, narrating each step so you can watch it
 the invariants that hold them together, and the failures each one exists to prevent.
 
 
+## Screenshots
+
+Current shipping renderers captured on October 10, 2026. Control-panel, agent and report data are sample fixtures; Osiris and Orbital show their public feeds. Captures run in isolated Electron storage with no real account, API keys, microphone or personal desktop. Click any screenshot to open it at full size.
+
+| Page | Page |
+| --- | --- |
+| **Live Overview**<br><a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" width="480" alt="Echo Live Overview screenshot"></a> | **Now & Next / Needs You**<br><a href="docs/screenshots/day.png"><img src="docs/screenshots/day.png" width="480" alt="Echo Now & Next / Needs You screenshot"></a> |
+| **Second Brain**<br><a href="docs/screenshots/brain.png"><img src="docs/screenshots/brain.png" width="480" alt="Echo Second Brain screenshot"></a> | **Bots**<br><a href="docs/screenshots/bots.png"><img src="docs/screenshots/bots.png" width="480" alt="Echo Bots screenshot"></a> |
+| **Agents board**<br><a href="docs/screenshots/tasks.png"><img src="docs/screenshots/tasks.png" width="480" alt="Echo Agents board screenshot"></a> | **Missions**<br><a href="docs/screenshots/missions.png"><img src="docs/screenshots/missions.png" width="480" alt="Echo Missions screenshot"></a> |
+| **World Intelligence**<br><a href="docs/screenshots/world.png"><img src="docs/screenshots/world.png" width="480" alt="Echo World Intelligence screenshot"></a> | **Models & Routing**<br><a href="docs/screenshots/models.png"><img src="docs/screenshots/models.png" width="480" alt="Echo Models & Routing screenshot"></a> |
+
+<details>
+<summary>Settings, reports and every additional visible window</summary>
+
+| Page | Page |
+| --- | --- |
+| **Settings**<br><a href="docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" width="480" alt="Echo Settings screenshot"></a> | **Agent roster**<br><a href="docs/screenshots/agents.png"><img src="docs/screenshots/agents.png" width="480" alt="Echo Agent roster screenshot"></a> |
+| **Bot results**<br><a href="docs/screenshots/bots-results.png"><img src="docs/screenshots/bots-results.png" width="480" alt="Echo Bot results screenshot"></a> | **Task report**<br><a href="docs/screenshots/task-report.png"><img src="docs/screenshots/task-report.png" width="480" alt="Echo Task report screenshot"></a> |
+| **API keys**<br><a href="docs/screenshots/setup.png"><img src="docs/screenshots/setup.png" width="480" alt="Echo API keys screenshot"></a> | **Voice HUD**<br><a href="docs/screenshots/hud.png"><img src="docs/screenshots/hud.png" width="480" alt="Echo Voice HUD screenshot"></a> |
+| **Neural Core**<br><a href="docs/screenshots/neural.png"><img src="docs/screenshots/neural.png" width="480" alt="Echo Neural Core screenshot"></a> | **Synaptic Field**<br><a href="docs/screenshots/synapse.png"><img src="docs/screenshots/synapse.png" width="480" alt="Echo Synaptic Field screenshot"></a> |
+| **Osiris globe**<br><a href="docs/screenshots/osiris.png"><img src="docs/screenshots/osiris.png" width="480" alt="Echo Osiris globe screenshot"></a> | **Orbital feed**<br><a href="docs/screenshots/orbital.png"><img src="docs/screenshots/orbital.png" width="480" alt="Echo Orbital feed screenshot"></a> |
+
+</details>
+
+Regenerate with `node_modules/.bin/electron scripts/readme-screenshots.mjs` after building. This uses the existing preview bridge and never starts Echo’s runtime. Invisible capture/transport windows are not user pages.
+
 ```bash
 brew install cliclick whisper-cpp        # mouse/keyboard control + local speech-to-text
 npm install                              # dependencies
