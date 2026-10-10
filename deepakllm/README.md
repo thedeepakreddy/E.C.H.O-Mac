@@ -1,7 +1,8 @@
 # DeepakLLM
 
-A local model that learns to drive a Mac by watching Claude and Gemini do it
-inside J.A.R.V.I.S, then does the same work offline, instantly, for free.
+A research project to train an open-source vision-language model for local Mac assistance using Echo's recorded observations, actions and outcomes. Deepak plans to create synthetic datasets from saved Echo records, manually edit and verify gold-standard examples, then apply SFT followed by GRPO and held-out evaluation.
+
+See the [current dataset inventory and research plan](../docs/DATASET_RESEARCH.md) for per-model counts and the stages that remain planned. Collection and export are implemented; completed training and local performance are not established by the scripts in this folder.
 
 **This folder is self-contained. Copy it anywhere.** Nothing in it imports
 Jarvis, and the client has no dependencies at all.

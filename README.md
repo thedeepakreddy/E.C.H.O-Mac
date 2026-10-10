@@ -62,6 +62,35 @@ Echo can mimic parts of a general assistant's working process: observe a situati
 
 [Automatic task planning](src/tasks/automatic.ts) · [Supervised execution](src/tasks/supervisor.ts) · [Memory](src/memory) · [Skill tools](src/tools/registry/skills.ts) · [Feature defaults](src/config.ts)
 
+## Dataset research: an open-source vision-language model for local use
+
+**Deepak's research direction:** “I'm using Echo to collect a dataset for training an open-source vision-language (VL) model that can run locally. Echo saves task context, screen observations, model/tool actions and outcomes. I will build synthetic datasets from these saved records, manually edit and verify them to gold-standard quality, then use supervised fine-tuning (SFT) followed by Group Relative Policy Optimization (GRPO).”
+
+The intended model learns to connect a user's goal and screen state to useful, valid tool actions. Data collection and export are implemented; synthetic-data curation, manual gold review and the planned SFT → GRPO training/evaluation are separate stages. The repository includes an experimental [QLoRA/SFT script](deepakllm/train/train_lora.py); its presence does not establish a completed training run or measured model quality.
+
+### Current collection
+
+Measured **October 10, 2026, 20:47 UTC** from local trajectory records: **2,110 recorded action examples across 859 turns**, **1,440 automatic training candidates**, and **481 screenshot files**. Of the candidates, **347 are paired with images**, using **182 distinct screenshot files**; the remaining 1,093 are text-only candidates.
+
+| Recorded source / model label | Recorded action examples | Automatic training candidates | Referenced screenshot files |
+| --- | ---: | ---: | ---: |
+| Claude / `claude-sonnet-5` | 285 | 224 | 70 |
+| Gemini / `gemini-3.1-flash-lite` | 1,486 | 1,051 | 202 |
+| Gemini / `gemini-3.5-flash` | 113 | 42 | 3 |
+| Gemini / `gemini-3.6-flash` | 49 | 30 | 6 |
+| Gemini / `gemini-3.7-flash` | 102 | 46 | 0 |
+| Ollama / `llama3.2:3b` | 6 | 4 | 1 |
+| OpenAI / `gpt-4o` | 34 | 15 | 5 |
+| OpenRouter / `nvidia/nemotron-3-super-120b-a12b:free` | 32 | 25 | 2 |
+| OpenRouter / `stealth/space-bunny-alpha` | 3 | 3 | 0 |
+| **Total** | **2,110** | **1,440** | **289** |
+
+These are recorded source and **declared starting-model labels**; provider fallbacks can use a different actual model. An example here is one action step, not a whole task. The 289 referenced screenshots are distinct files linked to recorded steps; another 192 stored screenshots are unreferenced by the current logs. Reused screenshots are counted once per model, not once per action. Automatic success labels are candidates for review, not certified gold examples.
+
+The older saved bundle dated September 27 contains **1,242 examples and 162 screenshot files** according to its [manifest](deepakllm/dataset/manifest.json). It overlaps the collection and is not added to the totals above. Counts are a dated inventory, not a live badge.
+
+[Dataset inventory and training plan](docs/DATASET_RESEARCH.md) · [Aggregate counts](docs/dataset-inventory.json) · [Recorder](src/learn/trajectory.ts) · [Exporter](src/learn/dataset-export.ts)
+
 ## Capabilities and evidence
 
 | Capability | Implementation | Checks and practical limits |
