@@ -119,9 +119,9 @@ import {needsTaskDispatch} from './tasks/automatic.js';
 import {captureAllowed} from './memory/capture-policy.js';
 import {closeBackgroundBrowser} from './browser/background.js';
 import {closeTaskReports} from './tasks/report-window.js';
-import {createMacBots,botIntent,botRevision} from "./frontier/bots.js";
+import {createMacBots,botIntent} from "./frontier/bots.js";
 import {randomUUID as botRequestId} from "node:crypto";
-import { listFleet, addFleetMember, removeFleetMember, grantableTools, getFleetMember, MAX_CUSTOM as FLEET_MAX_CUSTOM, type NewAgent } from "./frontier/fleet.js";
+import { listFleet, addFleetMember, removeFleetMember, grantableTools, MAX_CUSTOM as FLEET_MAX_CUSTOM, type NewAgent } from "./frontier/fleet.js";
 import { brainProjectHint, makeFleetBrain as fleetBrainFactory } from "./frontier/fleet-brain.js";
 import { closeMcpServers, loadMcpConfig } from "./brain/mcp.js";
 import {
@@ -796,8 +796,7 @@ function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = nu
   const savedStatus=automaticTasks.control(text,foregroundBusy);
   const updateIntent=phoneUpdateIntent(text);
   const botCommand=botIntent(text);
-  const botMember=botCommand?getFleetMember(botCommand.name):null;
-  const botMessage=botCommand?macBots.run({...botCommand,requestId:botRequestId(),botRevision:botMember?botRevision(botMember):""}).message:null;
+  const botMessage=botCommand?macBots.run({...botCommand,requestId:botRequestId(),botRevision:macBots.revision(botCommand.name)}).message:null;
   void (botMessage?Promise.resolve(botMessage):updateIntent?phoneUpdateCommand(updateIntent):savedStatus?Promise.resolve(savedStatus):handleBuildInput(text, cfg, owner.currentTaskState,stillCurrent)).then(handled => {
     if (!stillCurrent()) return;
     handled ??= automaticTasks.handle(text,{scope:{...currentScope()},privateMode:!captureAllowed(),foregroundBusy});
@@ -2431,49 +2430,17 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
       const after = (brain?.provider ?? cfg.brain) as Provider;
       return { ok: after === target, message: before === target ? `Already routed to ${PROVIDER_LABELS[target]}.` : message };
     }
-    case "spawn-agent": {
-      const goal = String(action.goal ?? "").trim();
-      if (!goal) return { ok: false, message: "Describe the task to assign." };
-      const result = swarm.spawn(goal, { makeBrain: makeFleetBrain() });
-      return result.ok ? { ok: true, message: `${result.name} deployed.` } : { ok: false, message: result.reason ?? "Agent could not be deployed." };
-    }
+    case "spawn-agent": return macBots.legacy({name:"research",goal:action.goal,requestId:action.requestId});
     case "assign-agent": {
       const name = String(action.name ?? "").trim();
       const goal = String(action.goal ?? "").trim();
       if (!name || !goal) return { ok: false, message: "Choose an agent and enter a task." };
       return (swarm.send(name, goal) || supervisor.send(name,goal)) ? { ok: true, message: `Task assigned to ${name}.` } : { ok: false, message: `${name} is not active.` };
     }
-    case "run-board": {
-      const goal = String(action.goal ?? "").trim();
-      const agentIds = [...new Set((action.agentIds ?? []).map((id) => String(id).trim()).filter(Boolean))];
-      if (!goal) return { ok: false, message: "Describe the task for the board." };
-      if (!agentIds.length) return { ok: false, message: "Select at least one agent for the board." };
-      const unknown = agentIds.filter((id) => !getFleetMember(id));
-      if (unknown.length) return { ok: false, message: `Unknown agent(s): ${unknown.join(", ")}.` };
-      const submitted = swarm.submitMission(
-        { id: `board-${Date.now()}`, goal, tasks: agentIds.map((id) => ({ id, goal, profile: id, lane: "knowledge" as const })) },
-        { makeBrain: makeFleetBrain() }
-      );
-      return submitted.ok
-        ? { ok: true, message: `Board dispatched to ${agentIds.length} agent${agentIds.length === 1 ? "" : "s"}.`, data: { missionId: submitted.missionId } }
-        : { ok: false, message: submitted.reason ?? "The board could not be dispatched." };
-    }
-    case "run-bot":return macBots.run(action);
-    case "stop-bot":return macBots.stop(String(action.missionId??""));
-    case "run-fleet-agent": {
-      const agentId = String(action.name ?? "").trim();
-      const goal = String(action.goal ?? "").trim();
-      const member = getFleetMember(agentId);
-      if (!member) return { ok: false, message: "Unknown agent." };
-      if (!goal) return { ok: false, message: `Describe the task for ${member.name}.` };
-      const submitted = swarm.submitMission(
-        { id: `solo-${agentId}-${Date.now()}`, goal, tasks: [{ id: agentId, goal, profile: agentId, lane: "knowledge" }] },
-        { makeBrain: makeFleetBrain() }
-      );
-      return submitted.ok
-        ? { ok: true, message: `Sent to ${member.name}.`, data: { missionId: submitted.missionId } }
-        : { ok: false, message: submitted.reason ?? `${member.name} could not be dispatched.` };
-    }
+    case "run-board": return action.agentIds?.length ? macBots.legacy({goal:action.goal,agentIds:action.agentIds,requestId:action.requestId}) : {ok:false,message:"Choose specialists in Bots before starting a team task."};
+    case "run-fleet-agent": return macBots.legacy({name:action.name,goal:action.goal,requestId:action.requestId});
+    case "run-bot": return macBots.run(action);
+    case "stop-bot": return macBots.stop(String(action.missionId??""));
     case "stop-mission":
       if(String(action.missionId ?? '').startsWith('supervised.') && supervisor.inspect(String(action.missionId))) {await supervisor.cancel(String(action.missionId));return {ok:true,message:'Supervised task stopped.'};}
       return swarm.cancelMission(String(action.missionId ?? "").trim())

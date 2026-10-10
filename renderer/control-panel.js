@@ -766,6 +766,8 @@ document.querySelectorAll("[data-view]").forEach((button) => button.addEventList
 document.querySelectorAll("[data-action]").forEach((button) => button.addEventListener("click", () => act({ type: button.dataset.action })));
 byId("mission-select").addEventListener("change", (event) => {
   selectedMissionId = event.target.value;
+  currentBoardMissionId = selectedMissionId;
+  renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
   expandedMissionTasks.clear();
   renderMissions(Array.isArray(snapshot?.missions) ? snapshot.missions : [], Array.isArray(snapshot?.agents) ? snapshot.agents : []);
 });
@@ -974,18 +976,11 @@ byId("api-keys-form").addEventListener("submit", async (event) => {
   }
 });
 
-// ---- Agent board + fleet (ported from Aira's agent canvas / agent-editor) ------
-//
-// The board is a thin client over frontier/swarm.ts's existing mission model:
-// "run-board" submits one flat mission (no dependencies) with one task per
-// selected fleet member, and everything below just renders whatever comes
-// back through the ordinary control:update snapshot — there is no separate
-// board state on the main-process side to fall out of sync with.
+// The Agents board inspects the same persisted tasks started in Bots.
 let fleetMembers = [];
 let grantableToolNames = [];
 let fleetMaxCustom = 6;
 let fleetRevision = 0; // bumped on every fleet change; feeds the board's own dirty-check
-let selectedAgentIds = new Set();
 let openBoardCards = new Set();
 /** Which mission the board is currently showing. Sticky across renders so a
  *  finished board's answer does not vanish the moment something else on the
@@ -1002,7 +997,6 @@ const ROLE_COLOUR = {
   analyse: { light: "#7fb6f0", deep: "#1f56a8" },
 };
 const DEFAULT_COLOUR = { light: "#9fb7bd", deep: "#31515a" };
-const PHASE_LABEL = { idle: "Ready", working: "Working", done: "Complete", error: "Failed", stopped: "Stopped" };
 
 /** Escaped plain text, not real markdown — an agent's report is untrusted-ish
  *  text from a model, and a hand-rolled markdown-to-HTML parser is exactly
@@ -1027,10 +1021,6 @@ async function loadFleet() {
     fleetMembers = result.members || [];
     grantableToolNames = result.grantableTools || [];
     fleetMaxCustom = result.maxCustom || 6;
-    // Default to the whole team, the first time only — a change here later
-    // must never silently re-select everyone out from under the user.
-    if (!loadFleet.everLoaded) fleetMembers.forEach((m) => selectedAgentIds.add(m.id));
-    loadFleet.everLoaded = true;
     fleetRevision++;
     renderFleetDialog();
     renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
@@ -1040,10 +1030,10 @@ async function loadFleet() {
 }
 
 function boardMissionFor(missions) {
-  const boards = missions.filter((m) => m.id.startsWith("board-") || m.id.startsWith("solo-"));
+  const boards = missions.filter((m) => m.scope?.echoBot === true || m.id.startsWith("board-") || m.id.startsWith("solo-"));
   if (currentBoardMissionId) {
     const found = boards.find((m) => m.id === currentBoardMissionId);
-    if (found) return found;
+    return found || null;
   }
   return boards.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
 }
@@ -1052,11 +1042,11 @@ function agentCardMarkup(member, task, liveProgress) {
   const phase = phaseOf(task);
   const colour = ROLE_COLOUR[member.id] || DEFAULT_COLOUR;
   const icon = ROLE_ICON[member.id] || "icon-agent";
-  const selected = selectedAgentIds.has(member.id);
+  const selected = !!task;
   const open = openBoardCards.has(member.id);
 
-  const artifactText = (task?.result?.artifacts || []).filter((a) => a.kind === "text" && a.value).map((a) => a.value).join("\n\n");
-  const fullText = [task?.result?.summary, artifactText].filter(Boolean).join("\n\n");
+  const artifactTexts = (task?.result?.artifacts || []).filter((a) => a.kind === "text" && a.value).map((a) => a.value);
+  const fullText = [...new Set([task?.result?.summary, ...artifactTexts].filter(Boolean))].join("\n\n");
   const words = fullText ? fullText.trim().split(/\s+/).length : 0;
   const lines = fullText.trim().split("\n").filter(Boolean);
   const preview = (lines.find((l) => !/^#{1,6}\s/.test(l)) || lines[0] || "").replace(/^[#>*\-\s]+/, "").slice(0, 150);
@@ -1073,14 +1063,11 @@ function agentCardMarkup(member, task, liveProgress) {
       style="--card-light:${colour.light};--card-deep:${colour.deep}">
     <div class="board-agent-card-top">
       <span class="board-agent-card-glyph"><svg><use href="#${icon}" /></svg></span>
-      <span class="board-agent-card-state"><i></i>${PHASE_LABEL[phase]}</span>
+      <span class="board-agent-card-state"><i></i>${task ? statusLabel(task.status) : "Ready"}</span>
     </div>
     <h3>${escapeHtml(member.name)}</h3>
     <p class="board-agent-card-role">${escapeHtml(member.description || (member.brief || "").split("\n")[0] || "")}</p>
-    <label class="board-agent-card-select">
-      <input type="checkbox" data-select-agent="${escapeHtml(member.id)}" ${selected ? "checked" : ""} />
-      ${selected ? "Gets the next task" : "Not in the next task"}
-    </label>
+    <p class="board-agent-card-role">${member.custom ? "Granted reading tools" : "Echo specialist"}${task ? " · In this task" : ""}</p>
     <dl class="board-agent-card-metrics">
       <div><dt><svg><use href="#icon-clock" /></svg>Time</dt><dd>${elapsedLabel}</dd></div>
       <div><dt><svg><use href="#icon-file" /></svg>Words</dt><dd>${words || "—"}</dd></div>
@@ -1091,12 +1078,8 @@ function agentCardMarkup(member, task, liveProgress) {
       ${open ? `<div class="board-agent-card-output">${renderPlainText(fullText)}</div>` : `<p class="board-agent-card-preview">${escapeHtml(preview)}</p>`}
       <button type="button" class="board-agent-card-toggle" data-toggle-agent="${escapeHtml(member.id)}">${open ? "Hide answer" : `Read answer · ${words} words`}<svg><use href="#icon-chevron" /></svg></button>
     ` : ""}
-    <form class="board-agent-card-compose" data-agent-compose="${escapeHtml(member.id)}">
-      <input type="text" placeholder="${phase === "working" ? `Queue another for ${escapeHtml(member.name)}…` : `Ask ${escapeHtml(member.name)} directly…`}" aria-label="Task for ${escapeHtml(member.name)}" />
-      ${phase === "working"
-        ? `<button type="button" data-stop-agent="${escapeHtml(member.id)}" aria-label="Stop ${escapeHtml(member.name)}"><svg><use href="#icon-stop" /></svg></button>`
-        : `<button type="submit" aria-label="Send to ${escapeHtml(member.name)}"><svg><use href="#icon-send" /></svg></button>`}
-    </form>
+    <button type="button" class="board-agent-card-toggle" data-task-agent="${escapeHtml(member.id)}">${member.id === "lead" ? "Choose a team in Bots" : "Give a task in Bots"}<svg><use href="#icon-chevron" /></svg></button>
+    ${phase === "working" ? `<button type="button" class="board-agent-card-toggle" data-stop-agent="${escapeHtml(member.id)}">Stop this step<svg><use href="#icon-stop" /></svg></button>` : ""}
   </article>`;
 }
 
@@ -1114,13 +1097,13 @@ function renderBoard(missions) {
   byId("board-column-right").innerHTML = right.map((m) => agentCardMarkup(m, taskOf(m.id), liveProgress)).join("");
 
   const busy = mission?.status === "running";
-  byId("board-run").hidden = busy;
+  byId("board-open-bots").hidden = false;
   byId("board-stop").hidden = !busy;
 
-  const leadTask = mission ? taskOf("lead") : null;
+  const leadTask = mission ? taskOf("lead") || (Object.keys(mission.tasks).length === 1 ? Object.values(mission.tasks)[0] : null) : null;
   const leadDone = leadTask && (leadTask.status === "completed" || leadTask.status === "partial") && leadTask.result?.summary;
   byId("board-answer").hidden = !leadDone;
-  byId("board-task").hidden = !!leadDone;
+  byId("board-empty").hidden = !!leadDone;
   if (leadDone) {
     byId("board-answer-goal").textContent = mission.goal;
     byId("board-answer-text").innerHTML = renderPlainText(leadTask.result.summary);
@@ -1132,7 +1115,7 @@ function renderBoard(missions) {
     const working = fleetMembers.filter((m) => phaseOf(taskOf(m.id)) === "working").map((m) => m.name);
     statusEl.textContent = working.length ? `${working.join(", ")} working…` : "Starting…";
   } else {
-    statusEl.textContent = "Finished.";
+    statusEl.textContent = statusLabel(mission.status);
   }
   statusEl.closest(".board-task-status").classList.toggle("live", busy);
 }
@@ -1149,64 +1132,31 @@ for (const col of boardColumns()) {
       renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
       return;
     }
+    const taskLink = event.target.closest("[data-task-agent]");
+    if (taskLink) {void window.echoBotsUI?.prefill({name:taskLink.dataset.taskAgent==="lead"?"echo:team":taskLink.dataset.taskAgent}); return;}
     const stop = event.target.closest("[data-stop-agent]");
     if (stop && currentBoardMissionId) void act({ type: "stop-mission-task", missionId: currentBoardMissionId, name: stop.dataset.stopAgent });
   });
-  col.addEventListener("change", (event) => {
-    const checkbox = event.target.closest("[data-select-agent]");
-    if (!checkbox) return;
-    const id = checkbox.dataset.selectAgent;
-    if (checkbox.checked) selectedAgentIds.add(id); else selectedAgentIds.delete(id);
-    renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
-  });
-  col.addEventListener("submit", (event) => {
-    const form = event.target.closest("[data-agent-compose]");
-    if (!form) return;
-    event.preventDefault();
-    const input = form.querySelector("input");
-    const text = input.value.trim();
-    if (!text) return;
-    void act({ type: "run-fleet-agent", name: form.dataset.agentCompose, goal: text }).then((result) => {
-      if (!result.ok) return;
-      input.value = "";
-      if (result.data?.missionId) currentBoardMissionId = result.data.missionId;
-    });
-  });
-}
+ }
 
-byId("board-select-all").addEventListener("click", () => {
-  fleetMembers.forEach((m) => selectedAgentIds.add(m.id));
-  renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
-});
+byId("board-team").addEventListener("click", () => window.echoBotsUI?.prefill({name:"echo:team"}));
 byId("board-toggle-output").addEventListener("click", () => {
   openBoardCards = openBoardCards.size ? new Set() : new Set(fleetMembers.map((m) => m.id));
   renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
 });
-byId("board-run").addEventListener("click", () => {
-  const text = byId("board-task").value.trim();
-  if (!text) return;
-  if (!selectedAgentIds.size) return notify("Select at least one agent for the board.", true);
-  void act({ type: "run-board", goal: text, agentIds: [...selectedAgentIds] }).then((result) => {
-    if (!result.ok) return;
-    if (result.data?.missionId) currentBoardMissionId = result.data.missionId;
-    renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
-  });
-});
-byId("board-task").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); byId("board-run").click(); }
-});
+byId("board-open-bots").addEventListener("click", () => window.echoBotsUI?.prefill({}));
 byId("board-stop").addEventListener("click", () => {
   if (currentBoardMissionId) void act({ type: "stop-mission", missionId: currentBoardMissionId });
 });
 byId("board-clear").addEventListener("click", () => {
   currentBoardMissionId = null;
-  byId("board-task").value = "";
   openBoardCards.clear();
   renderBoard(Array.isArray(snapshot?.missions) ? snapshot.missions : []);
 });
 
 document.querySelectorAll(".ops-tab").forEach((tab) => tab.addEventListener("click", () => {
   const view = tab.dataset.opsView;
+  if (!view) return;
   document.querySelectorAll(".ops-tab").forEach((t) => { t.classList.toggle("active", t === tab); t.setAttribute("aria-selected", String(t === tab)); });
   document.querySelectorAll("[data-ops-panel]").forEach((panel) => { panel.hidden = panel.dataset.opsPanel !== view; });
 }));
@@ -1237,7 +1187,9 @@ byId("agents-zoom-in").addEventListener("click", () => { agentsZoom += AGENTS_ZO
 byId("agents-zoom-out").addEventListener("click", () => { agentsZoom -= AGENTS_ZOOM_STEP; applyAgentsZoom(); });
 applyAgentsZoom();
 
-// ---- Fleet editor dialog (ported from Aira's agent-editor.tsx) -----------------
+window.echoAgentsUI = {inspect(id) {currentBoardMissionId=id;selectedMissionId=id;setView('tasks');document.querySelector('[data-ops-view="board"]')?.click();renderBoard(Array.isArray(snapshot?.missions)?snapshot.missions:[]);}};
+
+// ---- Shared specialist roster editor ----
 const fleetDialog = byId("fleet-dialog");
 let fleetIdTouched = false;
 const slugify = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
@@ -1332,7 +1284,6 @@ byId("fleet-mine").addEventListener("click", async (event) => {
     errorEl.textContent = result.message || "Could not remove the agent.";
     return;
   }
-  selectedAgentIds.delete(button.dataset.removeAgent);
   await loadFleet();
 });
 
