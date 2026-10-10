@@ -68,6 +68,12 @@ Echo can mimic parts of a general assistant's working process: observe a situati
 
 The intended model learns to connect a user's goal and screen state to useful, valid tool actions. Data collection and export are implemented; synthetic-data curation, manual gold review and the planned SFT → GRPO training/evaluation are separate stages. The repository includes an experimental [QLoRA/SFT script](deepakllm/train/train_lora.py); its presence does not establish a completed training run or measured model quality.
 
+### Save the latest experience by voice
+
+Simply say **“Echo, save yourself for training.”** Echo's dataset-export tool creates a fresh, timestamped snapshot of the available recorded examples under `~/.jarvis/datasets/`. You can repeat the request as new experience accumulates; each save keeps earlier snapshots and includes records available at the new snapshot boundary.
+
+For recruiters, “save yourself” means **save Echo's recorded experience as training data**: JSON metadata and schemas, JSONL examples (one JSON object per line), recorded actions/results and referenced screenshot files. Private or unrecorded history is excluded, and manually reviewed gold data remains a later step. [See what the save contains](docs/DATASET_RESEARCH.md#save-yourself-for-training).
+
 ### Current collection
 
 Measured **October 10, 2026, 20:47 UTC** from local trajectory records: **2,110 recorded action examples across 859 turns**, **1,440 automatic training candidates**, and **481 screenshot files**. Of the candidates, **347 are paired with images**, using **182 distinct screenshot files**; the remaining 1,093 are text-only candidates.

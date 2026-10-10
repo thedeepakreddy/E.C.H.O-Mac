@@ -53,6 +53,8 @@ npm run toolspec                # regenerate tools.json after adding tools
 ```
 
 The live journal stays in `~/.jarvis/trajectories`; export takes a snapshot.
+You can simply tell Echo **“save yourself for training”** to create a fresh snapshot of its available recorded experience in JSON/JSONL with referenced screenshots. Repeat it after new work to save up-to-date examples; earlier snapshots remain available. [What that command saves](../docs/DATASET_RESEARCH.md#save-yourself-for-training).
+
 Re-export after adding tools or collecting more. “Save dataset” and the CLI now
 save a new portable folder under `~/.jarvis/datasets/<snapshot-id>/`, preserving
 previous exports. It contains `raw/runs/` (all available providers, messages,

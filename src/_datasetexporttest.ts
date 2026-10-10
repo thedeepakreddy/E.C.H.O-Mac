@@ -75,8 +75,12 @@ try {
   assert((await readFile(join(exported.path,'raw/conversations/chat.jsonl'),'utf8')).includes('A greeting without tools'));
   assert((await readFile(join(exported.path,'feature-context.json'),'utf8')).includes('export_training_data'));
   const {TOOL_MAP} = await import('./tools/registry.js');
+  learning.startTurn('capture the latest example','future-brain','future-model');
+  learning.recordStep({tool:'future_tool',args:{},tier:'low',reason:'read',allowed:true,resultText:'latest result'});
+  learning.finishTurn('success','automatic completion');
   const response = await TOOL_MAP.get('export_training_data')!.handler({});
   assert((response.data as any).path !== exported.path); assert((await readFile(join(exported.path,'manifest.json'),'utf8')).includes(exported.snapshotId));
+  assert.equal((response.data as any).trainingExamples,2,'a repeated save includes newly recorded examples');
   setPrivateTask('private-test',true);
   await assert.rejects(exportDataset(),/private task/);
   setPrivateTask('private-test',false);
@@ -93,5 +97,19 @@ try {
   const {fitLocalTools} = await import('./brain/localtools.js');
   const definitions = [{type:'function',function:{name:'export_training_data',description:'Save dataset',parameters:{type:'object'}}}];
   assert(fitLocalTools(definitions,'save dataset',1200).length === 1);
+  const {contextTokens} = await import('./memory/conversation.js');
+  const competing = [{type:'function',function:{name:'discover_tools',description:'Find tools',parameters:{type:'object'}}}, ...definitions];
+  for (const request of ['Echo, save yourself for training','Please save yourself for training.','save dataset']) {
+    const fitted = fitLocalTools(competing,request,contextTokens(definitions[0]));
+    assert.deepEqual(fitted.map(tool=>tool.function.name),['export_training_data'],`save survives a one-tool local budget: ${request}`);
+  }
+  const {_setEmbedderForTests} = await import('./cognition/embeddings.js');
+  const {selectToolNames} = await import('./brain/tool-router.js');
+  _setEmbedderForTests({available:()=>true,embed:async()=>new Float32Array([1,0])} as any);
+  try {
+    const pool = [{name:'unrelated_read',description:'Read something else'}, {name:'export_training_data',description:'Save dataset'}];
+    const kept = await selectToolNames('Echo, save yourself for training',1,undefined,pool);
+    assert(kept?.has('export_training_data'),'exact phrase survives semantic pruning even when another tool ranks first');
+  } finally { _setEmbedderForTests(null); }
   console.log('PASS complete provider-neutral dataset snapshots, full payloads, messages, privacy, gaps, hashes, pending flush and non-gold automatic labels');
 } finally { setPrivateTask('private-test',false); await rm(root,{recursive:true,force:true}); }
