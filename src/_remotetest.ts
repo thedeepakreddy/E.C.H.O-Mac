@@ -11,12 +11,12 @@ import {
   newToken, tokenMatches, tokenFrom, routeOf, record, recentItems,
   isLockedOut, noteBadAttempt, resetAttempts,
   startRemote, stopRemote, isRunning, remoteStatus,
-  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, remoteAssetDir, setCommandHandler, setChatHandler,
+  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, setCommandHandler, setChatHandler,
 } from "./frontier/remote.js";
 import { parseBattery } from "./frontier/remote-vitals.js";
 import { replayLocally, relayFromConfig, RelayAgent, CLIENT_IP_HEADER } from "./frontier/relay-agent.js";
 import http from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { MAX_REMOTE_VOICE_BYTES } from "./frontier/remote-voice.js";
 import { turnContract, CHAT_TURN_CONTRACT, VOICE_TURN_CONTRACT } from "./brain/types.js";
 import { setPassword } from "./frontier/remoteauth.js";
@@ -194,9 +194,10 @@ console.log("  a real server, on the loopback");
 {
   {
     setPassword("test-remote-pass"); // into the throwaway JARVIS_REMOTE_DIR
+    const RELAY = { url: "http://127.0.0.1:9", secret: "s".repeat(48) };
     let recognizer: (path: string) => Promise<string> = async () => "test voice";
     const voiceFiles: string[] = [];
-    const started = await startRemote({ port: 7799, ttlMs: 60_000, transcribeVoice: async path => { voiceFiles.push(path); return recognizer(path); } });
+    const started = await startRemote({ port: 7799, ttlMs: 60_000, relay: RELAY, transcribeVoice: async path => { voiceFiles.push(path); return recognizer(path); } });
     ok(started.ok, `it starts (${started.message.split("\n")[0].slice(0, 50)})`);
     ok(isRunning(), "and reports as running");
     ok(started.url?.startsWith("http://127.0.0.1:9/?t=") === true, "the link is the phone app's, never a network address of this Mac");
