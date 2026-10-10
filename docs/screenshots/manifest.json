@@ -1,0 +1,77 @@
+{
+  "source": "Shipping renderers in isolated storage. Control-panel and report data are sample fixtures. Osiris/Orbital are public feeds. No personal desktop, microphone, account or API keys captured.",
+  "captures": [
+    {
+      "id": "overview",
+      "title": "Live Overview"
+    },
+    {
+      "id": "day",
+      "title": "Now & Next / Needs You"
+    },
+    {
+      "id": "brain",
+      "title": "Second Brain"
+    },
+    {
+      "id": "tasks",
+      "title": "Agents board"
+    },
+    {
+      "id": "bots",
+      "title": "Bots"
+    },
+    {
+      "id": "bots-results",
+      "title": "Bot results"
+    },
+    {
+      "id": "world",
+      "title": "World Intelligence"
+    },
+    {
+      "id": "models",
+      "title": "Models & Routing"
+    },
+    {
+      "id": "settings",
+      "title": "Settings"
+    },
+    {
+      "id": "agents",
+      "title": "Agent roster"
+    },
+    {
+      "id": "missions",
+      "title": "Missions"
+    },
+    {
+      "id": "task-report",
+      "title": "Task report"
+    },
+    {
+      "id": "setup",
+      "title": "API keys"
+    },
+    {
+      "id": "hud",
+      "title": "Voice HUD"
+    },
+    {
+      "id": "neural",
+      "title": "Neural Core"
+    },
+    {
+      "id": "synapse",
+      "title": "Synaptic Field"
+    },
+    {
+      "id": "osiris",
+      "title": "Osiris globe"
+    },
+    {
+      "id": "orbital",
+      "title": "Orbital feed"
+    }
+  ]
+}
