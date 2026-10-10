@@ -12,6 +12,8 @@ Local Whisper, Apple recognition, cloud recognition, local synthesis and cloud s
 
 ## Tasks, Bots and agents
 
+For building or changing software through conversation, see [Vibe coding with Echo](VIBE_CODING.md), including project tools, previews, the worker–inspector workflow and human review.
+
 The **Bots** page starts a task or a coordinated team, shows progress, and displays the result. The **Agents** views show the underlying task board and configured roles. They share [the task service](../src/frontier/swarm.ts); they are not two independent task engines.
 
 Built-in fleet roles are Lead, Research, Plan, Write, Review and Analyse. Role tier and grants influence which model and tools a worker can use. Bot teams use dependencies so later roles can consume earlier work. Screen-control ownership limits competing input; separate research workers can proceed without taking over the desktop.
