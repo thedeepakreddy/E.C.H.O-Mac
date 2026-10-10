@@ -174,7 +174,9 @@
     "controlcompaniontest": "esbuild src/_controlcompaniontest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_controlcompaniontest.js --log-level=error && node dist/_controlcompaniontest.js",
     "test:panel-companion": "npm run build && electron scripts/control_panel_companion_test.mjs",
     "botstest": "esbuild src/_botstest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_botstest.js --log-level=error && ECHO_MCP=0 node dist/_botstest.js",
-    "test:panel-bots": "npm run build && electron scripts/control_panel_bots_test.mjs"
+    "test:panel-bots": "npm run build && electron scripts/control_panel_bots_test.mjs",
+    "test:panel-markdown": "npm run build && electron scripts/control_panel_markdown_test.mjs",
+    "researchtest": "node --test scripts/research-test.mjs scripts/image-search-test.mjs"
   },
   "author": "",
   "license": "MIT",
@@ -184,6 +186,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/ws": "^8.18.1",
     "@typesafe-ai/sdk": "^0.6.0",
+    "fast-xml-parser": "5.11.2",
     "jose": "^6.2.12",
     "onnxruntime-node": "^1.29.0",
     "openai": "^7.17.0",

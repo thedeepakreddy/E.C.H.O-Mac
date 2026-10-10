@@ -36,6 +36,8 @@ ok(speakableText("See **this**").includes("this") && !speakableText("See **this*
 ok(speakableText("Go to https://example.com/x?y=1").includes("the link"), "a URL becomes 'the link'");
 ok(speakableText("```\ncode\n```").includes("code block"), "a code fence is summarised");
 ok(speakableText("[docs](https://x.com)") === "docs", "a link keeps only its words");
+ok(speakableText("Here ![Diagram](https://upload.wikimedia.org/wikipedia/commons/a/ab/test.png), is the finding.") === "Here , is the finding.", "an inline illustration is not spoken as markup or a URL");
+ok(speakableText("![AI diagram](https://upload.wikimedia.org/wikipedia/commons/a/ab/Test_(diagram).png)\nUseful finding.") === "Useful finding.", "image paths with parentheses stay out of speech");
 
 console.log("  the controls are well formed");
 const out = withProsody("Done — everything passed.");

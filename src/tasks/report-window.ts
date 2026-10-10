@@ -28,7 +28,10 @@ async function ensureWindow():Promise<Electron.BrowserWindow> {
   const created=new BrowserWindow({show:false,title:'Echo · Task report',width:1040,height:900,minWidth:520,minHeight:500,backgroundColor:'#030e15',
     webPreferences:{preload:join(getAppPath(),'dist','report-preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,webgl:false}});
   window=created;
-  created.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+  created.webContents.setWindowOpenHandler(({url}) => {
+    try {const target=new URL(url);if(target.protocol==='https:'&&!target.username&&!target.password){void shell.openExternal(target.href);}}catch{}
+    return {action:'deny'};
+  });
   created.webContents.on('will-navigate',event=>event.preventDefault());
   created.on('closed',()=>{if(window===created) window=undefined;});
   await created.loadFile(join(getAppPath(),'renderer','task-report.html'));

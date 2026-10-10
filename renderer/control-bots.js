@@ -12,7 +12,7 @@
  function paint(d){if(loadError){status("");loadError=false;}data=d;const select=byId('bots-member'),chosen=select.value;
   if(JSON.stringify(d.bots.map(b=>[b.id,b.revision]))!==select.dataset.signature){select.replaceChildren(...d.bots.map(b=>{const o=node('option','',b.name);o.value=b.id;return o;}));if(d.bots.some(b=>b.id===chosen))select.value=chosen;else if(d.bots.some(b=>b.id==='research'))select.value='research';select.dataset.signature=JSON.stringify(d.bots.map(b=>[b.id,b.revision]));role();}
   const list=byId('bots-jobs');list.replaceChildren();if(!d.jobs.length)list.append(node('p','companion-muted','No bot runs yet. Give a bot a clear result to deliver.'));
-  for(const j of d.jobs){const row=node('article','companion-row'),shown=new Set();const copy=text=>{if(!text||shown.has(text))return;shown.add(text);row.append(node('p','companion-copy',text));};row.append(node('h3','',`${j.botName} · ${j.goal}`),node('p','companion-muted',`${j.status} · ${new Date(j.updatedAt).toLocaleString()}`));
+  for(const j of d.jobs){const row=node('article','companion-row'),shown=new Set();const copy=text=>{if(!text||shown.has(text))return;shown.add(text);const body=window.EchoMarkdown.render(text);body.classList.add('companion-copy');row.append(body);};row.append(node('h3','',`${j.botName} · ${j.goal}`),node('p','companion-muted',`${j.status} · ${new Date(j.updatedAt).toLocaleString()}`));
    for(const s of j.steps||[]){row.append(node('p','companion-muted',`${s.name||s.id||'Specialist'} · ${s.status}`));if(s.result?.summary&&s.result.summary!==j.result?.summary)copy(s.result.summary);}
    copy(j.result?.summary);
    for(const a of j.result?.artifacts||[]){if(shown.has(a.value))continue;row.append(node('h3','',a.label||a.kind));copy(a.value);}

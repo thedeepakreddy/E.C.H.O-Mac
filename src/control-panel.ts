@@ -217,7 +217,10 @@ export function openControlPanel(anchor?: BrowserWindow | null): void {
     webPreferences: { preload: join(here, "preload.cjs"), sandbox: true, contextIsolation: true,
       nodeIntegration: false, webSecurity: true },
   });
-  panel.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  panel.webContents.setWindowOpenHandler(({url}) => {
+    try {const target=new URL(url);if(target.protocol==='https:'&&!target.username&&!target.password){const {shell}=nodeRequire('electron') as typeof import('electron');void shell.openExternal(target.href);}}catch{}
+    return {action:'deny'};
+  });
   panel.webContents.on("will-navigate", (event) => event.preventDefault());
   panel.webContents.on("before-input-event", (event, input) => {
     if (input.type === "keyDown" && input.key === "Escape") { event.preventDefault(); closeControlPanel(); }
