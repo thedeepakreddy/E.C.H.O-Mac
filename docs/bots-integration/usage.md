@@ -1,6 +1,6 @@
 # Echo Bots
 
-Phone: More → Bots. Choose This phone for standalone work, or Your Mac for the paired Mac’s roster. Mac: Control Panel → Tasks & Agents → Bots. Existing screens, styles, icons and navigation remain intact; only a Bots entry and a new page were added.
+Phone: Bots in the bottom page bar. Choose This phone for standalone work, or Your Mac for the paired Mac’s roster. Mac: Control Panel → Tasks & Agents → Bots. Existing styles and icons remain intact. Phone’s pages are Echo, Today, Chat, Bots and Browser. More and highlighted World Intelligence are on Echo; Saved is in More. Mac adds a matching Bots page within Tasks & Agents.
 
 Choose a standing bot, give it the result you need and Start task. Progress and actual results stay in the page. Follow up carries the previous goal, outcome and blockers into a new bounded run. Stop prevents new tool actions; review actions that were already in progress. A failed or interrupted run is never presented as success.
 
@@ -11,9 +11,9 @@ Mac uses its existing fleet, native guarded tools, structured task results and m
 You can also say “Ask Research to compare these options” on Mac, or ask Echo Phone to delegate a background task to Research, Plan, Write, Review, Analyse or Echo Assistant. Ordinary chat and voice keep their existing behavior.
 
 ## Runtime and limits
-OpenBot source is pinned at a4dce8c47c7253ecd9bd6f4e2626f4205817a104. Its MIT license, history/tool-result pairing, provenance guidance and stream/call assembler are retained in src/vendor/openbot and the compiled Phone mirror. Echo supplies its own provider, authentication, execution grants, budgets and UI.
+Echo supplies the model provider, authentication, execution grants, budgets and UI. Bot turns pair tool results with their requests, assemble streamed calls before execution and keep task context separate from trusted instructions. Required third-party licenses remain alongside the runtime source.
 
-This integration does not provision OpenBot’s separate browser computers, containers, Bun backend or shared-database frontend. Phone research uses existing web tools; prepared Browser actions use Echo’s existing Browser. Mac tasks use native Echo tools. There is no claimed per-bot isolated browser or OpenBot browser preview.
+Phone research uses existing web tools; prepared Browser actions use Echo’s existing Browser. Mac tasks use native Echo tools. Separate browser computers or per-bot isolated containers are not provisioned.
 
 Phone: one active run per account, four workers per relay process, eight model turns, four minutes, 30 recent runs. State mutations use token-owned atomic leases; interrupted Phone jobs never replay automatically. Mac: one live bot run at a time, 40 iterations, two recovery attempts, ten minutes, 12 recent runs in the page. Native checkpoint recovery retains Echo’s existing journal and execution checks.
 
