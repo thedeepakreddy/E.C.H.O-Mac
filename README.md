@@ -10,15 +10,69 @@ This repository contains the implementation, renderer previews and test harnesse
 
 [Setup](docs/GETTING_STARTED.md) · [Configuration](docs/CONFIGURATION.md) · [User guide and troubleshooting](docs/USER_GUIDE.md) · [Validation results](docs/VALIDATION.md) · [Architecture](docs/ARCHITECTURE.md)
 
+## What you can do with Echo
+
+Give Echo a goal in ordinary language, by voice or text. It can combine conversation with tools to work on that goal, then show progress, outputs and checks. These are examples to try once the relevant providers, permissions and services are configured:
+
+| You want to… | Ask Echo… | What it can do |
+| --- | --- | --- |
+| Build software | “Build a study app with lessons, a local database and tests. Ask me about important choices.” | Open a project, save requirements, edit code, run available checks, show a local preview and inspect requested flows. See [vibe coding](#vibe-coding-with-a-human-in-the-loop). |
+| Improve an existing project | “Find why this app crashes, fix the cause and rerun the relevant checks.” | Inspect files and logs, apply guarded patches, run managed processes and record check results. |
+| Research and write | “Research current battery technologies, compare the evidence and write a report with sources.” | Search the web and research indexes, fetch public pages, coordinate Bots and produce formatted reports with relevant sourced illustrations. |
+| Work across Mac apps | “Open Safari, find the export control on this page and help me save the result.” | Open apps and URLs, inspect available controls or screenshots, click, type, scroll and check observable results. |
+| Remember and retrieve | “Remember this decision,” or “What did we decide about the project last week?” | Save facts, retrieve conversation history and search captured content or indexed files when those features are enabled. |
+| Manage daily work | “What's coming up?” or “What needs my attention?” | Surface saved commitments, upcoming work and pending attention in Now & Next, Needs You and Second Brain; inspect a configured calendar. |
+| Repeat a routine | “Watch me do this,” or “Make a skill that opens these apps and checks their status.” | Record supported workflows or compose existing tools into a reusable named skill. |
+| Keep work moving | “Research this while I'm away,” or “What did the agents find?” | Run bounded background tasks, inspect saved progress and return results while the main conversation remains available. |
+| Use the phone with the Mac | “Send me updates to my phone.” | Use the configured companion connection for handoff, task updates and remote Mac interaction. Phone mode also works independently. |
+| Inspect your Mac or world feeds | “Why is my Mac slow?” or “Show me recent earthquakes.” | Read configured system-health services or public intelligence feeds and display their results. |
+
+Natural requests do not need tool names or a supervision toggle. Clear complex requests can enter the supervised workflow automatically; ambiguous requirements may need a question first. See the [user guide](docs/USER_GUIDE.md) for feature setup and operating details.
+
+## Vibe coding with a human in the loop
+
+Describe the application you want, then refine it through conversation while Echo works in a real project. For example:
+
+> “Build a personal expense tracker with a local database. Let me add expenses, filter by month and see totals. Use a simple interface, test those flows, and show me a preview before publishing anything.”
+
+The implemented workflow supports:
+
+1. **Define the outcome.** Save requirements and observable acceptance criteria. Echo can ask a persisted question when a material choice blocks the build; your answer becomes part of the saved project decisions.
+2. **Build and iterate.** Inspect existing files, apply guarded edits, install dependencies when permitted, and run managed build/test/server commands using the available toolchain.
+3. **Exercise the result.** Open a local web preview, inspect controls, console and network outcomes, and test supported flows with exact selectors. Native application projects use configured start commands and available macOS tooling.
+4. **Inspect and repair.** A worker implements the task; a separate model-based inspector checks evidence against the plan and acceptance criteria and can request bounded repairs. Current checks and evidence are required by the completion guard.
+5. **Review together.** Inspect the preview, output files, checks and task report. Answer questions, request changes or stop the work. You decide whether the result meets your needs and whether to authorize publication.
+
+Echo has a bounded Vercel **preview** deployment adapter; credentials, project access and authorization are required. Deployment readiness and passing tests do not prove an app is production-ready. Project processes run with your OS access, so the project directory is not a security sandbox.
+
+[Detailed coding guide](docs/VIBE_CODING.md) · [Coding tools](src/tools/registry/coding.ts) · [Supervisor](src/tasks/supervisor.ts)
+
+## AGI-like skills: what that means here
+
+Echo can mimic parts of a general assistant's working process: observe a situation, retain context, form a plan, select tools, act, inspect feedback and revise its approach. It can combine these behaviors across coding, research and supported desktop workflows:
+
+- **Perception and action:** use screen observations and app controls to connect a request to the current desktop.
+- **Planning and delegation:** break a complex goal into steps and coordinate worker roles with dependencies.
+- **Memory and continuity:** retrieve relevant facts, decisions and saved task state across conversations and model changes.
+- **Verification and adaptation:** inspect real tool outcomes, seek a separate review and attempt repairs within a budget.
+- **Reusable skills:** learn supported demonstrations and compose existing tools into saved procedures.
+- **Human collaboration:** ask for missing decisions, accept corrections, expose progress and request approvals through the configured action policies.
+
+“AGI-like” describes this combination of behaviors. Echo uses configured language models, explicit tools, saved state and verification rules; these features do not establish AGI or unlimited autonomous capability. Saved skills are procedures built from existing tools. Optional curiosity and UI rehearsal are off by default.
+
+[Automatic task planning](src/tasks/automatic.ts) · [Supervised execution](src/tasks/supervisor.ts) · [Memory](src/memory) · [Skill tools](src/tools/registry/skills.ts) · [Feature defaults](src/config.ts)
+
 ## Capabilities and evidence
 
 | Capability | Implementation | Checks and practical limits |
 | --- | --- | --- |
 | Screen interaction | [Screen tools](src/tools/registry/screen.ts), [Accessibility](src/tools/ax.ts), [computer actions](src/tools/computer-actions.ts) | [Targeting tests](src/_screentargettest.ts). Accessibility, OCR and screenshots provide different ways to locate controls; layouts, permissions and protected surfaces can still prevent an action. |
 | Model selection | [Brain adapters](src/brain), [configuration](src/config.ts) | [Wiring tests](src/_wiringtest.ts). Hosted providers require credentials and available quota; local models require an installed service and sufficient resources. |
+| Vibe coding and supervision | [Coding tools](src/tools/registry/coding.ts), [supervisor](src/tasks/supervisor.ts), [completion checks](src/coding/diagnostics.ts) | [Coding conformance tests](src/_codingconformancetest.ts), [supervisor tests](src/_supervisedtest.ts). Available toolchains and observable acceptance evidence bound what a build can establish. See the [coding guide](docs/VIBE_CODING.md). |
 | Action checks and approvals | [Risk classification](src/safety/risk.ts), [tool gate](src/safety/gate.ts) | [Risk tests](src/_risktest.ts), [gate tests](src/_gatetest.ts), [tool architecture tests](src/_toolarchitecturetest.ts). Classification and grants reduce risk; they are not a guarantee against every unintended action. |
 | Bots and background work | [Bots](src/frontier/bots.ts), [task service](src/frontier/swarm.ts), [agent fleet](src/frontier/fleet.ts) | [Bots tests](src/_botstest.ts), [fleet tests](src/_fleettest.ts). Bots use the existing task service and agent roles. Results still require review; interrupted work may need recovery. |
 | Second Brain and conversation history | [Memory](src/memory), [history tests](src/_historytest.ts) | [Memory tests](src/_memtest.ts). Saved content can be recalled into model prompts according to the memory settings; see [data handling](docs/USER_GUIDE.md#data-handling). |
+| Reusable skills and workflows | [Skill tools](src/tools/registry/skills.ts), [workflow replay](src/frontier/replay.ts) | [Skill tests](src/_skillstest.ts). Saved procedures use existing tools; changed layouts, missing controls or denied operations can prevent replay. |
 | Voice interaction | [Voice pipeline](src/voice) | [Voice tests](src/_voicetest.ts), [prosody tests](src/_prosodytest.ts). Microphones, wake detection, language routing and cloud voices need separate device/service checks. |
 | Phone connection and handoff | [Remote service](src/frontier/remote.ts), [companion state](src/_controlcompaniontest.ts) | [Remote tests](src/_remotetest.ts). Mac control requires a paired relay and a running Mac. Echo Phone can also be used independently in Phone mode. |
 | Web and research | [Research sources](src/tools/research.mjs), [research tests](scripts/research-test.mjs) | Search and fetched pages provide current source material when available. Availability, coverage and factual accuracy are separate questions; inspect the cited sources. |
