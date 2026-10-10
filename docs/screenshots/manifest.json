@@ -1,5 +1,5 @@
 {
-  "source": "Shipping renderers in isolated storage. Control-panel and report data are sample fixtures. Osiris/Orbital are public feeds. No personal desktop, microphone, account or API keys captured.",
+  "source": "Shipping renderers in isolated storage. Control-panel and report data are sample fixtures; desktop HUD uses a clean preview background. Osiris/Orbital are public feeds. No personal desktop, microphone, account or API keys captured.",
   "captures": [
     {
       "id": "overview",
@@ -56,6 +56,10 @@
     {
       "id": "hud",
       "title": "Voice HUD"
+    },
+    {
+      "id": "desktop-hud",
+      "title": "Main desktop HUD (clean preview)"
     },
     {
       "id": "neural",
