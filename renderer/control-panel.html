@@ -154,6 +154,7 @@
             <div class="ops-subnav" role="tablist" aria-label="Agent view">
               <button type="button" class="ops-tab active" data-ops-view="board" role="tab" aria-selected="true">Board</button>
               <button type="button" class="ops-tab" data-ops-view="missions" role="tab" aria-selected="false">Missions</button>
+              <button type="button" class="ops-tab" data-view="bots">Bots</button>
             </div>
             <div class="zoom-control" role="group" aria-label="Zoom agents panel">
               <button type="button" id="agents-zoom-out" title="Zoom out" aria-label="Zoom out"><svg><use href="#icon-minus" /></svg></button>
@@ -200,6 +201,24 @@
         </section>
       </section>
 
+      <section id="bots-view" class="view operations-view companion-view" data-view-panel="bots" hidden>
+<aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
+          <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
+          <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
+          <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
+          <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
+<button class="active" type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Bots</span></button></aside>
+        <section class="companion-main"><header class="section-title"><h1>Bots</h1><button type="button" class="secondary-button" id="bots-refresh">Refresh</button></header>
+          <div class="companion-scroll">
+            <section class="companion-card"><h2>Give your bot a task</h2><p class="companion-muted">Your standing agents, powered by Echo’s models and guarded native tools. Runs and results stay on this Mac; your paired phone can follow them.</p>
+              <form id="bots-run"><label for="bots-member">Bot</label><select id="bots-member" required></select><p id="bots-role" class="companion-muted"></p><label for="bots-goal">What should it do?</label><textarea id="bots-goal" rows="3" maxlength="4000" required placeholder="Research three options and prepare a useful comparison"></textarea><p id="bots-followup" class="companion-muted" hidden></p><div class="companion-actions"><button class="primary-button" type="submit">Start task</button><button type="button" class="secondary-button" id="bots-fresh" hidden>New task</button><button type="button" class="secondary-button" id="bots-manage">Manage bots</button></div></form>
+              <p id="bots-status" role="status" class="companion-muted"></p>
+            </section><section class="companion-card"><h2>Runs &amp; results</h2><div id="bots-jobs"></div></section>
+          </div>
+        </section>
+      </section>
       <section id="day-view" class="view operations-view companion-view" data-view-panel="day" hidden>
         <aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
@@ -513,5 +532,6 @@
     <script src="synapse/synapse-field.js"></script>
     <script src="control-panel.js"></script>
     <script src="control-companion.js"></script>
+    <script src="control-bots.js"></script>
   </body>
 </html>

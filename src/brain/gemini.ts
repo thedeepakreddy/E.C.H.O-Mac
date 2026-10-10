@@ -1,3 +1,4 @@
+import {runAgentTurn,type ProviderChunk} from "../vendor/openbot/agent-turn.js";
 import {toolGranted} from '../safety/tool-permissions.js';
 import {codingRequestToolAllowed} from '../coding/tool-selection.js';
 import {codingContinuationEligible, codingActionRequest, CODING_ACTION_TOOLS} from '../coding/continuation.js';
@@ -394,23 +395,42 @@ export class GeminiBrain extends Brain {
     let last: any = null;
     let streamedText = false;
     const iterator=(stream as AsyncIterable<any>)[Symbol.asyncIterator]();
-    while(true) {
-      const step=await streamStep(()=>iterator.next(),requestAbort,streamSilenceMs(),parent);
-      if(step.done)break;
-      const chunk=step.value;
-      last = chunk;
-      const parts = chunk?.candidates?.[0]?.content?.parts ?? [];
-      for (const p of parts) {
-        if (typeof p.text === "string" && p.text) {
-          if (p.thought) continue; // the model thinking aloud is not the reply
-          text += p.text;
-          streamedText = true;
-          this.emitEvent("textDelta", { text: p.text, turnId });
-        } else if (p.functionCall || p.inlineData || p.executableCode || p.codeExecutionResult) {
-          otherParts.push(p);
+    if(this.limits.openBot){
+      const source=async function*():AsyncGenerator<ProviderChunk>{
+        let index=0;
+        while(true){
+          const step=await streamStep(()=>iterator.next(),requestAbort,streamSilenceMs(),parent);
+          if(step.done)break;
+          const chunk=step.value;last=chunk;
+          for(const p of chunk?.candidates?.[0]?.content?.parts??[]){
+            if(p.text&&!p.thought)yield {choices:[{delta:{content:p.text}}]};
+            else if(p.functionCall){otherParts.push(p);yield {choices:[{delta:{tool_calls:[{index:index++,id:p.functionCall.id,function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args??{})}}]}}]};}
+            else if(p.inlineData||p.executableCode||p.codeExecutionResult)otherParts.push(p);
+          }
         }
+      };
+      const assembled=await runAgentTurn({threadId:this.lastSend.taskId??"echo-bot",runId:turnId??`${this.lastSend.taskId??"echo-bot"}-${Date.now()}`},async()=>source(),event=>{
+        if(event.type==='TEXT_MESSAGE_CONTENT')this.emitEvent('textDelta',{text:String(event.delta),turnId});
+        if(event.type==='TEXT_MESSAGE_END')streamedText=true;
+      },signal);
+      text=assembled.text;
+      const calls=otherParts.filter(p=>p.functionCall);
+      if(calls.length!==assembled.calls.length)throw new Error('Bot tool stream was incomplete.');
+      calls.forEach((p,i)=>{p.functionCall={...p.functionCall,name:assembled.calls[i].name,args:JSON.parse(assembled.calls[i].args||'{}')};});
+    }else {
+      while(true) {
+        const step=await streamStep(()=>iterator.next(),requestAbort,streamSilenceMs(),parent);
+        if(step.done)break;
+        const chunk=step.value;last=chunk;
+        for (const p of chunk?.candidates?.[0]?.content?.parts ?? []) {
+          if (typeof p.text === "string" && p.text) {
+            if (p.thought) continue;
+            text += p.text;streamedText = true;
+            this.emitEvent("textDelta", { text: p.text, turnId });
+          } else if (p.functionCall || p.inlineData || p.executableCode || p.codeExecutionResult) otherParts.push(p);
+        }
+        if (signal?.aborted) break;
       }
-      if (signal?.aborted) break;
     }
     if (streamedText) this.emitEvent("textDone", { text, turnId });
     const cand = last?.candidates?.[0] ?? {};

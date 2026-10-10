@@ -1,3 +1,4 @@
+import {botRevision} from "./bots.js";
 import { createBrain } from "../brain/index.js";
 import type { JarvisConfig } from "../config.js";
 import type { SwarmDeps } from "./swarm.js";
@@ -16,6 +17,7 @@ export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDe
   return (identity, task) => {
     const member = task?.profile ? getFleetMember(task.profile) : null;
     if (task?.profile && !member) throw new Error(`Unknown agent profile "${task.profile}". Select an existing fleet member.`);
+    if(member && task?.runtime === "openbot" && task.botRevision !== botRevision(member))throw new Error("This bot changed after its task was queued. Refresh and start a new run.");
     const provider = member ? TIER_PROVIDER[member.tier] : null;
     const allowed = member ? allowedToolsFor(member) : null;
     const clone = create(provider ? { ...cfg, brain: provider } : cfg, {
@@ -23,7 +25,7 @@ export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDe
       maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
       // Result submission is an actor-owned lifecycle operation, not a user
       // resource grant. Without it a read-only agent can never finish a mission.
-      limits: { maxIterations: task?.budget.maxIterations, allowedTools: allowed === null ? undefined : new Set([...allowed, 'submit_agent_result']) },
+      limits: { openBot:task?.runtime === "openbot", maxIterations: task?.budget.maxIterations, allowedTools: allowed === null ? undefined : new Set([...allowed, 'submit_agent_result']) },
     }).brain;
     clone.projectHint = brainProjectHint.value;
     return clone;

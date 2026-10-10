@@ -199,6 +199,8 @@ export interface SendOptions {
 
 /** Hard per-agent limits supplied by a Mission's Agent Task budget. */
 export interface BrainExecutionLimits {
+  /** Explicit bot runs use the pinned OpenBot stream/call assembler. Ordinary Echo turns keep their current runtime. */
+  openBot?:boolean;
   maxIterations?: number;
   /**
    * Hard execution grants for built-in and MCP tools. Discovery and execution

@@ -39,13 +39,14 @@ export interface ControlSettings {
   configPath: string;
 }
 export interface ControlAction {
-  type: "phone-updates" | "memory-save" | "memory-forget" | "answer-approval" | "answer-project" | "retry-work" | "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
+  type: "run-bot" | "stop-bot" | "phone-updates" | "memory-save" | "memory-forget" | "answer-approval" | "answer-project" | "retry-work" | "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
     "refresh-connections" | "switch-model" | "spawn-agent" | "assign-agent" | "api-keys" | "save-settings" |
     "save-api-keys" | "run-board" | "run-fleet-agent" | "stop-mission" | "stop-mission-task" |
     "delete-mission" |
     "save-agent" | "remove-agent" | "shutdown" |
     "chatgpt-sign-in" | "chatgpt-cancel-sign-in" | "chatgpt-sign-out" |
     "openrouter-sign-in" | "openrouter-sign-out" | "openrouter-set-model";
+  requestId?:string; botRevision?:string; parentId?:string;
   projectId?:string; id?:string; revision?:number; questionId?:string; approved?:boolean; enabled?:boolean; kind?:string;
   text?: string; goal?: string; provider?: string; name?: string;
   settings?: Partial<ControlSettings>;
@@ -248,6 +249,7 @@ function authorized(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
 export function wireControlPanel(deps: {
   runtime: () => ControlRuntime;
   action: (action: ControlAction) => Promise<ControlResult>;
+  bots?:()=>unknown;
   companion?: (request?:{query?:string;memory?:boolean})=>unknown;
 }): void {
   runtime = deps.runtime;
@@ -279,6 +281,7 @@ export function wireControlPanel(deps: {
     if(request && (typeof request!=='object'||Array.isArray(request)||request.memory!==undefined&&typeof request.memory!=='boolean'||request.query!==undefined&&typeof request.query!=='string'||request.query&&request.query.length>500))throw new Error('Invalid search.');
     return deps.companion?.(request)??null;
   });
+  ipcMain.handle("control:bots",event=>{if(!authorized(event))throw new Error("Untrusted control-panel sender.");return deps.bots?.()??null;});
   ipcMain.handle("control:world", (event) => {
     if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
     return getControlWorld();
