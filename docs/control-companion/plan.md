@@ -1,0 +1,17 @@
+# Control companion implementation
+
+Keep the existing control panel style and navigation. Older tasks/plan.md and tasks/todo.md belong to the voice coding project and remain untouched; this task's plan is here.
+
+## Contracts and order
+1. Project a bounded local view of durable task metadata (not full tool traces), owned coding projects, current confirmation, telemetry fallback and source-aware Memory OS. Deduplicate linked project tasks. Now & Next prioritizes an exact pending decision, active work, then recent saved work. Needs You distinguishes approvals, project questions and failures; it never manufactures permission requests.
+2. Expose companion and memory reads only to the authorized panel main frame. Validate identifiers, revisions and current state at every mutation. Approve/deny settles the exact live broker ID; project answers address the exact question and resume the existing build. Retry is a fresh user-requested continuation that inspects existing effects before repeating them, only while foreground is idle. Stop uses the existing task controls.
+3. Second Brain uses the existing memory store and scope rules. Show sources, trust, age, status and privacy. Correct requires the observed memory revision and resets obsolete embeddings; Forget uses deletion propagation. Explicit user notes enter Memory OS, never a separate display-only store. Private mode refuses new durable capture.
+4. Persist a 24-hour phone update session and bounded outbox on Mac. Speak/type “send me updates to my phone” or start from the panel; “stop sending updates to my phone” disables it. Send a start snapshot and subsequent significant task phase/decision changes, not every log line. Exclude private work; bind delivery to paired cloud session generation and expiry. Retry transient failures using the same event ID, without duplicate notifications. Stopping discards queued updates. No remote execution is added by handoff.
+5. Relay verifies agent authentication; records paired session metadata only from signed passes; excludes standalone/suspended/revoked phones. Durable, per-device updates appear on Phone Missions even when notifications are off. Push retries per eligible installation, removes expired subscriptions and reports actual delivery status. Phone refreshes its updates on opening Missions and foregrounding. Existing phone approvals retain their current checks.
+6. Add matching Now & Next / Needs You and Second Brain pages plus overview entry points. Lazy reads, bounded polling, lifecycle cleanup, escaped text, inline exact-item edit/forget forms and accessible status feedback. Preserve all existing views.
+
+## Acceptance and validation
+- Fixtures cover live/stale tasks, deterministic ordering, linked-task deduplication, private exclusions, exact approval IDs, conflicts/deletion, conservative command recognition, outbox restart/retry/stop/expiry.
+- Relay integration tests cover authentication, standalone isolation, generation/expiry, durable inbox, idempotent retry, multi-installation delivery, expired subscriptions and transient errors.
+- Real Electron UI tests cover navigation, safe content, search/edit/forget/approval/answer/handoff actions, hidden/foreground polling and scroll/layout.
+- Run relevant existing memory, confirmation, task, remote, phone tests; typecheck and build. Push tested commits to Mac and Phone GitHub branches/main without session links, deploy the exact Phone commit, verify health and served assets. Restart Mac only when idle.

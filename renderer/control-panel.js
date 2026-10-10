@@ -96,6 +96,7 @@ function setView(name) {
   document.querySelectorAll(".section-nav [data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
   syncNeuralCard();
   syncWorld();
+  window.echoCompanionUI?.sync();
   // Apply the newest snapshot when a page becomes visible. Hidden pages do
   // not rebuild controls or lists on every background runtime update.
   if (snapshot) render(snapshot);

@@ -50,12 +50,13 @@ function review(f: ReturnType<typeof fixture>, verdict: 'pass'|'repair', refs = 
 try {
   {
     const f = fixture('complete'); finishWorker(f); await tick();
-    assert.equal(f.supervisor.panelMissions()[0].status,'running');assert.equal(f.supervisor.panelMissions()[0].tasks.inspector.status,'working');
+    assert.equal(f.supervisor.panelMissions()[0].status,'running');assert.equal(f.supervisor.panelMissions()[0].tasks.inspector.status,'working');assert.equal(f.supervisor.companionMetadata()[0].live,true);
+    const restored=new TaskSupervisor({coordinator:f.coordinator,makeWorker:()=>new Agent(),makeInspector:()=>new Agent(),verify:async()=>[]});assert.equal(restored.companionMetadata()[0].live,false);assert.equal(restored.companionMetadata()[0].privateMode,false);
     assert.equal(f.supervisor.inspect(f.id)?.status, 'inspecting');
     assert.equal(f.reports.length, 0, 'worker completion must not publish success');
     review(f,'pass'); await tick();
     assert.equal(f.supervisor.inspect(f.id)?.status,'completed');
-    assert.equal(f.supervisor.panelMissions()[0].status,'completed');
+    assert.equal(f.supervisor.panelMissions()[0].status,'completed');assert.equal(f.supervisor.companionMetadata()[0].live,false);
     assert.equal(f.reports.length,1); assert.equal(f.workers[0].stops,1); assert.equal(f.inspectors[0].stops,1);
     f.workers[0].emit('turnEnd'); f.inspectors[0].emit('turnEnd'); await tick();
     assert.equal(f.reports.length,1, 'late events cannot publish twice'); count++;

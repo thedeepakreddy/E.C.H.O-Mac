@@ -1,7 +1,7 @@
 {
   "name": "jarvis",
   "version": "0.1.0",
-  "description": "J.A.R.V.I.S — a voice-activated, always-on-screen autonomous desktop assistant that can see your screen and control your Mac.",
+  "description": "J.A.R.V.I.S \u2014 a voice-activated, always-on-screen autonomous desktop assistant that can see your screen and control your Mac.",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
@@ -170,7 +170,9 @@
     "superviseduitest": "esbuild src/_superviseduitest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_superviseduitest.js --log-level=error && ECHO_MCP=0 electron dist/_superviseduitest.js",
     "supervisedwiringtest": "esbuild src/_supervisedwiringtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_supervisedwiringtest.js --log-level=error && ECHO_MCP=0 node dist/_supervisedwiringtest.js",
     "automatictasktest": "esbuild src/_automatictasktest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_automatictasktest.js --log-level=error && ECHO_MCP=0 node dist/_automatictasktest.js",
-    "nvidiatest": "esbuild src/_nvidiatest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_nvidiatest.js --log-level=error && ECHO_MCP=0 node dist/_nvidiatest.js"
+    "nvidiatest": "esbuild src/_nvidiatest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_nvidiatest.js --log-level=error && ECHO_MCP=0 node dist/_nvidiatest.js",
+    "controlcompaniontest": "esbuild src/_controlcompaniontest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_controlcompaniontest.js --log-level=error && node dist/_controlcompaniontest.js",
+    "test:panel-companion": "npm run build && electron scripts/control_panel_companion_test.mjs"
   },
   "author": "",
   "license": "MIT",

@@ -116,6 +116,7 @@ export function installPreviewBridge(ipcMain, { onClose } = {}) {
   snapshot.missions.push(boardMission);
   snapshot.agents.push({ id: "board-preview.analyse", name: "Analyse", goal: boardMission.goal, status: "working", startedAt: boardMission.tasks.analyse.startedAt, progress: "Weighing three open risks against the research notes.", missionId: boardMission.id, agentTaskId: "analyse", lane: "knowledge" });
   
+  ipcMain.handle('control:companion',()=>({checkedAt:Date.now(),approval:null,work:[],needs:[],now:[],next:'Tell Echo what you want to get done.',phone:{active:false,expiresAt:null,queued:0,lastDeliveredAt:null,message:'Phone updates are off.'},scope:{},memory:{scope:{},revision:0,total:0,items:[]}}));
   ipcMain.handle("control:snapshot", () => structuredClone(snapshot));
   ipcMain.handle("control:action", (_event, action) => {
     if (action?.type === "save-settings" && action.settings) snapshot.settings = { ...snapshot.settings, ...action.settings, configPath: snapshot.settings.configPath };

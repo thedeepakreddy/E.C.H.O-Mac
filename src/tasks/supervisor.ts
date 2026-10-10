@@ -109,6 +109,12 @@ export class TaskSupervisor {
     if(!this.panelsLoaded) {for(const row of this.deps.coordinator.listBindings<SupervisedState>('supervised',20)) if(!this.panels.has(row.taskId)) this.panels.set(row.taskId,supervisionPanel(row.value));this.panelsLoaded=true;}
     return [...this.panels.values()].sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,20).map(s=>structuredClone(s));
   }
+  /** Lightweight ownership metadata; saved running states are not live workers. */
+  companionMetadata(): Array<{id:string;projectIds:string[];privateMode:boolean;live:boolean}> {
+    const states=new Map(this.deps.coordinator.listBindings<SupervisedState>('supervised',20).map(t=>[t.taskId,t.value]));
+    for(const [id,task] of this.live)states.set(id,task.state);
+    return [...states.values()].map(s=>({id:s.id,projectIds:[...(s.spec.projectIds??[])],privateMode:!!s.spec.privateMode,live:this.live.has(s.id)&&!terminal(s.status)}));
+  }
   activeCount(): number {return this.live.size;}
   current(ownerActorId = 'echo'): SupervisedState | null {
     const task=[...this.live.values()].find(t=>(t.state.spec.scope?.supervisorOwnerActorId ?? 'echo')===ownerActorId);
