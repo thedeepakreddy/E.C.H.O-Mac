@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-10T20:47:52.037Z",
+  "scope": "current-local-trajectory-logs",
+  "attribution": "recorded-source-and-declared-starting-model; fallback identity may differ",
+  "units": "one example is an action step; screenshots are distinct filenames, not pixel-content deduplication",
+  "dailyLogs": 39,
+  "recordedSteps": 2110,
+  "turns": 859,
+  "labelledTurns": {
+    "success": 737,
+    "failure": 84,
+    "rejected": 29
+  },
+  "screenshotsOnDisk": 481,
+  "imageReferences": 559,
+  "referencedScreenshots": 289,
+  "unreferencedScreenshots": 192,
+  "missingReferencedScreenshots": 0,
+  "trainingCandidates": 1440,
+  "candidatesWithImages": 347,
+  "candidateScreenshots": 182,
+  "invalidRows": 0,
+  "byModel": [
+    {
+      "provider": "claude",
+      "declaredModel": "claude-sonnet-5",
+      "recordedSteps": 285,
+      "turns": 103,
+      "imageReferences": 141,
+      "referencedScreenshots": 70,
+      "trainingCandidates": 224,
+      "candidatesWithImages": 95,
+      "candidateScreenshots": 44
+    },
+    {
+      "provider": "gemini",
+      "declaredModel": "gemini-3.1-flash-lite",
+      "recordedSteps": 1486,
+      "turns": 655,
+      "imageReferences": 393,
+      "referencedScreenshots": 202,
+      "trainingCandidates": 1051,
+      "candidatesWithImages": 241,
+      "candidateScreenshots": 130
+    },
+    {
+      "provider": "gemini",
+      "declaredModel": "gemini-3.5-flash",
+      "recordedSteps": 113,
+      "turns": 21,
+      "imageReferences": 7,
+      "referencedScreenshots": 3,
+      "trainingCandidates": 42,
+      "candidatesWithImages": 3,
+      "candidateScreenshots": 1
+    },
+    {
+      "provider": "gemini",
+      "declaredModel": "gemini-3.6-flash",
+      "recordedSteps": 49,
+      "turns": 27,
+      "imageReferences": 9,
+      "referencedScreenshots": 6,
+      "trainingCandidates": 30,
+      "candidatesWithImages": 1,
+      "candidateScreenshots": 1
+    },
+    {
+      "provider": "gemini",
+      "declaredModel": "gemini-3.7-flash",
+      "recordedSteps": 102,
+      "turns": 35,
+      "imageReferences": 0,
+      "referencedScreenshots": 0,
+      "trainingCandidates": 46,
+      "candidatesWithImages": 0,
+      "candidateScreenshots": 0
+    },
+    {
+      "provider": "ollama",
+      "declaredModel": "llama3.2:3b",
+      "recordedSteps": 6,
+      "turns": 4,
+      "imageReferences": 1,
+      "referencedScreenshots": 1,
+      "trainingCandidates": 4,
+      "candidatesWithImages": 1,
+      "candidateScreenshots": 1
+    },
+    {
+      "provider": "openai",
+      "declaredModel": "gpt-4o",
+      "recordedSteps": 34,
+      "turns": 8,
+      "imageReferences": 6,
+      "referencedScreenshots": 5,
+      "trainingCandidates": 15,
+      "candidatesWithImages": 5,
+      "candidateScreenshots": 4
+    },
+    {
+      "provider": "openrouter",
+      "declaredModel": "nvidia/nemotron-3-super-120b-a12b:free",
+      "recordedSteps": 32,
+      "turns": 3,
+      "imageReferences": 2,
+      "referencedScreenshots": 2,
+      "trainingCandidates": 25,
+      "candidatesWithImages": 1,
+      "candidateScreenshots": 1
+    },
+    {
+      "provider": "openrouter",
+      "declaredModel": "stealth/space-bunny-alpha",
+      "recordedSteps": 3,
+      "turns": 3,
+      "imageReferences": 0,
+      "referencedScreenshots": 0,
+      "trainingCandidates": 3,
+      "candidatesWithImages": 0,
+      "candidateScreenshots": 0
+    }
+  ]
+}
