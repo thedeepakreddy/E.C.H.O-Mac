@@ -1,0 +1,5 @@
+- [x] Pinned licensed agent source and protocol/history checks.
+- [x] Durable Phone bot execution, identity/permissions/idempotency/stop/restart tests.
+- [x] Mac fleet integration and paired Phone dispatch tests.
+- [x] Existing-style Bots pages and real UI tests.
+- [ ] Regressions, publish, exact deployment and local load verification.

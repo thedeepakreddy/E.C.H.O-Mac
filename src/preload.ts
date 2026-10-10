@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("echoControl", {
   companion:(request?:{query?:string;memory?:boolean})=>ipcRenderer.invoke('control:companion',request),
   world: () => ipcRenderer.invoke("control:world"),
   apiKeys: () => ipcRenderer.invoke("control:api-keys"),
+  bots:()=>ipcRenderer.invoke("control:bots"),
   fleet: () => ipcRenderer.invoke("control:fleet"),
   openExternal: (url: string) => ipcRenderer.send("control:open-url", url),
   close: () => ipcRenderer.send("control:close"),

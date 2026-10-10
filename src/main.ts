@@ -119,6 +119,8 @@ import {needsTaskDispatch} from './tasks/automatic.js';
 import {captureAllowed} from './memory/capture-policy.js';
 import {closeBackgroundBrowser} from './browser/background.js';
 import {closeTaskReports} from './tasks/report-window.js';
+import {createMacBots,botIntent,botRevision} from "./frontier/bots.js";
+import {randomUUID as botRequestId} from "node:crypto";
 import { listFleet, addFleetMember, removeFleetMember, grantableTools, getFleetMember, MAX_CUSTOM as FLEET_MAX_CUSTOM, type NewAgent } from "./frontier/fleet.js";
 import { brainProjectHint, makeFleetBrain as fleetBrainFactory } from "./frontier/fleet-brain.js";
 import { closeMcpServers, loadMcpConfig } from "./brain/mcp.js";
@@ -788,7 +790,10 @@ function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = nu
   const foregroundBusy=!!owner.currentTaskState && ['running','waiting','verifying'].includes(owner.currentTaskState.status);
   const savedStatus=automaticTasks.control(text,foregroundBusy);
   const updateIntent=phoneUpdateIntent(text);
-  void (updateIntent?phoneUpdateCommand(updateIntent):savedStatus?Promise.resolve(savedStatus):handleBuildInput(text, cfg, owner.currentTaskState,stillCurrent)).then(handled => {
+  const botCommand=botIntent(text);
+  const botMember=botCommand?getFleetMember(botCommand.name):null;
+  const botMessage=botCommand?macBots.run({...botCommand,requestId:botRequestId(),botRevision:botMember?botRevision(botMember):""}).message:null;
+  void (botMessage?Promise.resolve(botMessage):updateIntent?phoneUpdateCommand(updateIntent):savedStatus?Promise.resolve(savedStatus):handleBuildInput(text, cfg, owner.currentTaskState,stillCurrent)).then(handled => {
     if (!stillCurrent()) return;
     handled ??= automaticTasks.handle(text,{scope:{...currentScope()},privateMode:!captureAllowed(),foregroundBusy});
     if (!handled) {dispatchToBrainUnchecked(text, audio, turn, modality); return;}
@@ -2247,6 +2252,8 @@ function makeFleetBrain() {
   return fleetBrainFactory(cfg);
 }
 
+const macBots=createMacBots(swarm,()=>({makeBrain:makeFleetBrain()}),()=>({...currentScope()}),captureAllowed);
+
 async function handleControlAction(action: ControlAction): Promise<{ ok: boolean; message?: string; data?: Record<string, unknown> }> {
   if (shuttingDown) return {ok: false, message: "Echo is shutting down."};
   switch (action.type) {
@@ -2446,6 +2453,8 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
         ? { ok: true, message: `Board dispatched to ${agentIds.length} agent${agentIds.length === 1 ? "" : "s"}.`, data: { missionId: submitted.missionId } }
         : { ok: false, message: submitted.reason ?? "The board could not be dispatched." };
     }
+    case "run-bot":return macBots.run(action);
+    case "stop-bot":return macBots.stop(String(action.missionId??""));
     case "run-fleet-agent": {
       const agentId = String(action.name ?? "").trim();
       const goal = String(action.goal ?? "").trim();
@@ -2827,7 +2836,7 @@ app.whenReady().then(async () => {
   mainTimers.every(4000, drainHeldSpeech);
   wireConfirmations();
   wireIpc();
-  wireControlPanel({ runtime: controlRuntime, action: handleControlAction, companion:readCompanion });
+  wireControlPanel({ runtime: controlRuntime, action: handleControlAction, companion:readCompanion, bots:()=>macBots.list() });
   mainTimers.every(5000,async()=>{if(!phoneUpdates.snapshot().active||!captureAllowed())return;if(Date.now()-lastPhoneInventoryCheck>60000){lastPhoneInventoryCheck=Date.now();const inventory=await phoneUpdateInventory();if(inventory)phoneUpdates.reconcile(inventory);if(!phoneUpdates.snapshot().active)return;}const view=readCompanion();phoneUpdates.observe(view.work,view.work.some(w=>w.privateMode&&['running','working','waiting','verifying','waiting-for-input'].includes(w.status))?null:view.approval);await phoneUpdates.flush(sendPhoneUpdate);},error=>console.error("[phone updates]",error instanceof Error?error.message:"Update failed"));
   wireShortcuts();
 
@@ -3157,6 +3166,7 @@ setStatusProvider((logsAfter) => {
       wakeWord: snap.settings.voice.wakeWord,
       bargeIn: snap.settings.voice.bargeIn,
     },
+    bots:macBots.list(),
     analytics: snap.analytics,
     tasks: snap.tasks.slice(-6).map((t) => ({ id: t.id, title: trim(t.title, 160), status: t.status, startedAt: t.startedAt, finishedAt: t.finishedAt ?? null })),
     missions: snap.missions.slice(0, 8).map((m) => ({
@@ -3200,6 +3210,7 @@ setActionHandler(async (action) => {
   let result: { ok: boolean; message?: string };
   if (action.type === "switch-model") result = await handleControlAction({ type: "switch-model", provider: action.provider });
   else if (action.type === "set-voice") result = await handleControlAction({ type: "save-settings", settings: { voice: { [action.key]: action.value } } as any });
+  else if (action.type === "run-bot" || action.type === "stop-bot") result = await handleControlAction(action);
   else if (action.type === "open-neural") result = await handleControlAction({ type: "neural" });
   // Face ID was checked by the remote before this is reached.
   else if (action.type === "power-off") result = await handleControlAction({ type: "shutdown" });
