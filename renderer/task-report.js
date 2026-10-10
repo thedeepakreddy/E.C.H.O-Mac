@@ -9,11 +9,11 @@ const history=node('select');history.id='report-history';history.setAttribute('a
 byId('actions-button').addEventListener('click',()=>window.taskReport?.close());
 function card(key,title,summary,badge){
   const body=byId(sections[key]).querySelector('.card-summary');body.replaceChildren();
-  if(badge)body.append(node('span',badge,'badge'));body.append(node('h2',title),node('p',summary));return body;
+  if(badge)body.append(node('span',badge,'badge'));body.append(node('h2',title),window.EchoMarkdown.render(summary));return body;
 }
 function rows(parent,items){
   const list=node('ul',undefined,'rows');
-  for(const item of items){const li=node('li');if(item.status){const status=node('span',item.status,'row-status');status.dataset.status=item.status;li.append(status);}li.append(node('span',item.title));if(item.detail)li.append(node('p',item.detail,'detail'));list.append(li);}
+  for(const item of items){const li=node('li');if(item.status){const status=node('span',item.status,'row-status');status.dataset.status=item.status;li.append(status);}li.append(node('span',item.title));if(item.detail)li.append(window.EchoMarkdown.render(item.detail));list.append(li);}
   parent.append(list);
 }
 window.renderTaskReport=({report,history:reports=[]})=>{
@@ -29,7 +29,7 @@ window.renderTaskReport=({report,history:reports=[]})=>{
   const passed=report.checks.filter(c=>c.status==='passed').length;
   rows(card('checks','Verification checks',report.checks.length?'Observed tool checks; untested behavior remains unverified.':'No verification checks recorded.',`${passed} / ${report.checks.length}`),report.checks);
   const outputs=card('outputs','Output',report.outputs.length?'Files, previews and recorded results.':'No output artifacts recorded.');
-  report.outputs.forEach((output,index)=>{const row=node('div',undefined,'rows');row.append(node('p',output.label||'Output'));if(/^(https?:\/\/|\/)/.test(output.value)){const button=node('button',output.value,'output');button.addEventListener('click',()=>window.taskReport?.open(index));row.append(button);}else row.append(node('p',output.value,'detail'));outputs.append(row);});
+  report.outputs.forEach((output,index)=>{const row=node('div',undefined,'rows');row.append(node('p',output.label||'Output'));if(/^(https?:\/\/|\/)/.test(output.value)){const button=node('button',output.value,'output');button.addEventListener('click',()=>window.taskReport?.open(index));row.append(button);}else row.append(window.EchoMarkdown.render(output.value));outputs.append(row);});
   rows(card('blockers','Blockers',report.blockers.length?'Further work or user input is required.':'No unresolved blockers recorded.',String(report.blockers.length)),report.blockers.map(title=>({title})));
   card('cleanup','Agent cleanup',report.cleanup,report.cleanup.startsWith('All ')?'Stopped':'Incomplete');
 };

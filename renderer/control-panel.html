@@ -2,12 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self';" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://upload.wikimedia.org https://thumb.wikimedia.org data:; style-src 'self'; script-src 'self';" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ECHO | Desktop Intelligence</title>
     <link rel="stylesheet" href="synapse/synapse-field.css" />
     <link rel="stylesheet" href="control-panel.css" />
-  </head>
+  <link rel="stylesheet" href="markdown.css">
+</head>
   <body data-status="idle">
     <svg class="svg-symbols" aria-hidden="true">
       <defs>
@@ -525,7 +526,10 @@
         </form>
       </div>
     </dialog>
-    <script src="humanoid-core.js"></script>
+    <script src="vendor/markdown-it.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="markdown.js"></script>
+<script src="humanoid-core.js"></script>
     <script src="synapse/neuronmap-data.js"></script>
     <script src="synapse/synapse-maps.js"></script>
     <script src="synapse/synapse-field.js"></script>

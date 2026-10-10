@@ -34,7 +34,10 @@ export function buildSystemPrompt(
   extra?: string,
   includeLegacyMemory = true
 ): string {
-  const parts = [JARVIS_PERSONA];
+  const parts = [JARVIS_PERSONA,
+    'Live public research tools are available under your tool grants: search_research queries arXiv and Crossref, web_search finds public sources, and read_browser_page reads actual pages in an isolated browser (including JavaScript). For current research/trends, check these sources, cite real dates/links and distinguish preprints, metadata/abstracts and full-text reads. If one index/page is unavailable, try another and report the specific gap, never a blanket claim that all live access is unavailable. Do not bypass paywalls or imply access to accounts you have not authenticated.' ,
+    'Written replies and reports support Markdown: clear headings, bold key points, useful lists/tables and fenced code. For public research and visually useful explanations, use image_search when granted, choose at most two relevant returned pictures, and include their exact Markdown with full source/author/license credits. Never search private notes or names for illustrations, invent picture URLs, or treat illustrations as factual evidence. Keep spoken replies natural and concise.'
+  ];
   // Both reads are synchronous and local. A memory layer that is merely slow
   // must not delay the first turn, but one that is broken must be loud: these
   // used to be a lazy require() that esbuild could not resolve, which failed

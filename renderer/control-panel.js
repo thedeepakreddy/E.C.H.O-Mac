@@ -998,11 +998,9 @@ const ROLE_COLOUR = {
 };
 const DEFAULT_COLOUR = { light: "#9fb7bd", deep: "#31515a" };
 
-/** Escaped plain text, not real markdown — an agent's report is untrusted-ish
- *  text from a model, and a hand-rolled markdown-to-HTML parser is exactly
- *  the kind of code worth not writing when "readable" is all that's needed. */
+/** Shared sanitized answer formatting; status and control labels stay literal. */
 function renderPlainText(text) {
-  return escapeHtml(text).split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+  return `<div class="echo-markdown">${window.EchoMarkdown.html(text)}</div>`;
 }
 
 function phaseOf(task) {

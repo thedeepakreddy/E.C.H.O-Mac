@@ -91,6 +91,7 @@ function addBreaths(text: string): string {
  */
 export function speakableText(text: string): string {
   return (text ?? "")
+    .replace(/!\[[^\]]*\]\((?:[^()\n]|\([^()\n]*\))*\)/g, " ")
     .replace(/```[\s\S]*?```/g, " the code block ")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
