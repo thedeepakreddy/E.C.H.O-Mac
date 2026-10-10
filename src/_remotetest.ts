@@ -11,12 +11,12 @@ import {
   newToken, tokenMatches, tokenFrom, routeOf, record, recentItems,
   isLockedOut, noteBadAttempt, resetAttempts,
   startRemote, stopRemote, isRunning, remoteStatus,
-  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, setCommandHandler, setChatHandler,
+  MAX_ITEMS, MAX_BAD_ATTEMPTS, parseRemoteAction, REMOTE_KEYS, remoteAssetDir, setCommandHandler, setChatHandler,
 } from "./frontier/remote.js";
 import { parseBattery } from "./frontier/remote-vitals.js";
 import { replayLocally, relayFromConfig, RelayAgent, CLIENT_IP_HEADER } from "./frontier/relay-agent.js";
 import http from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { MAX_REMOTE_VOICE_BYTES } from "./frontier/remote-voice.js";
 import { turnContract, CHAT_TURN_CONTRACT, VOICE_TURN_CONTRACT } from "./brain/types.js";
 import { setPassword } from "./frontier/remoteauth.js";
@@ -194,11 +194,9 @@ console.log("  a real server, on the loopback");
 {
   {
     setPassword("test-remote-pass"); // into the throwaway JARVIS_REMOTE_DIR
-    // A phone app address nothing answers at: the relay agent just keeps retrying.
-    const RELAY = { url: "http://127.0.0.1:9", secret: "s".repeat(48) };
     let recognizer: (path: string) => Promise<string> = async () => "test voice";
     const voiceFiles: string[] = [];
-    const started = await startRemote({ port: 7799, ttlMs: 60_000, relay: RELAY, transcribeVoice: async path => { voiceFiles.push(path); return recognizer(path); } });
+    const started = await startRemote({ port: 7799, ttlMs: 60_000, transcribeVoice: async path => { voiceFiles.push(path); return recognizer(path); } });
     ok(started.ok, `it starts (${started.message.split("\n")[0].slice(0, 50)})`);
     ok(isRunning(), "and reports as running");
     ok(started.url?.startsWith("http://127.0.0.1:9/?t=") === true, "the link is the phone app's, never a network address of this Mac");
@@ -241,7 +239,10 @@ console.log("  a real server, on the loopback");
     wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
     wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28); wav.writeUInt16LE(2, 32);
     wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(wav.length - 44, 40);
-    const voicePost = (body = wav, path = "/voice", signal?: AbortSignal) => fetch(`${base}${path}?t=${tok}`, { method: "POST", headers: auth, body, signal });
+    const voiceBase = base;
+    const voiceLogin = await fetch(`${voiceBase}/login?t=${tok}`, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({password: "test-remote-pass"})});
+    const voiceAuth = {cookie: voiceLogin.headers.get("set-cookie")!.split(";")[0]};
+    const voicePost = (body = wav, path = "/voice", signal?: AbortSignal) => fetch(`${voiceBase}${path}?t=${tok}`, { method: "POST", headers: voiceAuth, body, signal });
     ok((await fetch(`${base}/voice?t=${tok}`, { method: "POST", body: wav })).status === 401, "voice uploads require the password session");
     ok((await voicePost()).status === 503, "voice refuses success while the brain handler is unavailable");
     const delivered: Array<{text: string; via: string}> = [];
@@ -254,7 +255,7 @@ console.log("  a real server, on the loopback");
     };
     let acknowledged = false;
     const streamed = new Promise<{status: number; body: any}>((resolve, reject) => {
-      const req = http.request(`${base}/voice?t=${tok}`, { method: "POST", headers: auth }, res => {
+      const req = http.request(`${voiceBase}/voice?t=${tok}`, { method: "POST", headers: voiceAuth }, res => {
         acknowledged = true; let body = "";
         res.on("data", c => { body += c; });
         res.on("end", () => resolve({status: res.statusCode!, body: JSON.parse(body)}));
@@ -301,9 +302,9 @@ console.log("  a real server, on the loopback");
     ok(delivered.length === beforeCancel, "a cancelled request cannot dispatch a late voice command");
     ok(voiceFiles.every(path => !existsSync(path)), "temporary recordings are removed after failures and cancellation too");
     recognizer = async () => "through the relay";
-    const relayLogin = await replayLocally({id: "voice-login", method: "POST", path: `/login?t=${tok}`, ip: "198.51.100.1", headers: {"content-type": "application/json"}, body: Buffer.from(JSON.stringify({password: "test-remote-pass"})).toString("base64")}, base);
+    const relayLogin = await replayLocally({id: "voice-login", method: "POST", path: `/login?t=${tok}`, ip: "198.51.100.1", headers: {"content-type": "application/json"}, body: Buffer.from(JSON.stringify({password: "test-remote-pass"})).toString("base64")}, voiceBase);
     const relayAuth = {cookie: relayLogin.headers["set-cookie"].split(";")[0]};
-    const relayVoice = await replayLocally({id: "voice-relay", method: "POST", path: `/voice?t=${tok}`, ip: "198.51.100.2", headers: relayAuth, body: wav.toString("base64")}, base);
+    const relayVoice = await replayLocally({id: "voice-relay", method: "POST", path: `/voice?t=${tok}`, ip: "198.51.100.2", headers: relayAuth, body: wav.toString("base64")}, voiceBase);
     ok(relayVoice.status === 200 && JSON.parse(Buffer.from(relayVoice.body, "base64").toString()).text === "through the relay" && delivered.at(-1)?.via === "voice", "the relay returns the transcript after delivering the voice turn");
 
     // ---- with a session, control works ----
