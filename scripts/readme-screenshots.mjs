@@ -55,7 +55,16 @@ app.whenReady().then(async () => {
     win = windowFor(680, 780); await win.loadFile(join(root, 'renderer/setup.html')); win.showInactive(); await capture(win, 'setup', 'API keys'); win.destroy();
     win = windowFor(480, 480); await win.loadFile(join(root, 'renderer/index.html')); win.showInactive();
     win.webContents.send('state', {status: 'idle', skin: 'jarvis'});
-    await capture(win, 'hud', 'Voice HUD'); win.destroy();
+    await capture(win, 'hud', 'Voice HUD');
+    // A clean desktop-sized preview shows the production reactor at its normal
+    // bottom-right position. Only this disposable preview gets a background;
+    // the app's real 240×240 always-on-top window stays transparent.
+    win.setSize(1200, 800);
+    await win.webContents.executeJavaScript(`Object.assign(document.body.style, {
+      background: 'radial-gradient(ellipse at 18% 10%, #6591c4 0%, transparent 48%), radial-gradient(ellipse at 88% 80%, #3c205c 0%, transparent 55%), linear-gradient(135deg, #214579, #14274d 52%, #242147)',
+      alignItems: 'flex-end', paddingRight: '55px', paddingBottom: '42px'
+    })`);
+    await capture(win, 'desktop-hud', 'Main desktop HUD (clean preview)'); win.destroy();
     for (const [id, file, title] of [['neural','neural.html','Neural Core'],['synapse','synapse/synapse.html','Synaptic Field']]) {
       win = windowFor(); await win.loadFile(join(root, 'renderer', file)); win.showInactive(); await capture(win, id, title, 1600); win.destroy();
     }
@@ -66,7 +75,7 @@ app.whenReady().then(async () => {
       await win.loadFile(join(root, 'renderer', id + '.html')); win.showInactive();
       await capture(win, id, title, 12000); win.destroy();
     }
-    if (!selected) writeFileSync(join(out, 'manifest.json'), JSON.stringify({source: 'Shipping renderers in isolated storage. Control-panel and report data are sample fixtures. Osiris/Orbital are public feeds. No personal desktop, microphone, account or API keys captured.', captures}, null, 2) + '\n');
+    if (!selected) writeFileSync(join(out, 'manifest.json'), JSON.stringify({source: 'Shipping renderers in isolated storage. Control-panel and report data are sample fixtures; desktop HUD uses a clean preview background. Osiris/Orbital are public feeds. No personal desktop, microphone, account or API keys captured.', captures}, null, 2) + '\n');
     app.exit(0);
   } catch (e) {console.error(e); win?.destroy(); app.exit(1);}
 });

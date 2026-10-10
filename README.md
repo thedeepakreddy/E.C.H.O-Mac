@@ -29,6 +29,12 @@ the invariants that hold them together, and the failures each one exists to prev
 
 Current shipping renderers captured on October 10, 2026. Control-panel, agent and report data are sample fixtures; Osiris and Orbital show their public feeds. Captures run in isolated Electron storage with no real account, API keys, microphone or personal desktop. Click any screenshot to open it at full size.
 
+**Main Echo HUD on the desktop**
+
+[![Echo's floating desktop HUD](docs/screenshots/desktop-hud.png)](docs/screenshots/desktop-hud.png)
+
+The shipping reactor HUD in its normal bottom-right position, shown against a clean desktop preview background. It floats above your work; the full Control Panel opens separately. [See the HUD close-up](docs/screenshots/hud.png).
+
 | Page | Page |
 | --- | --- |
 | **Live Overview**<br><a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" width="480" alt="Echo Live Overview screenshot"></a> | **Now & Next / Needs You**<br><a href="docs/screenshots/day.png"><img src="docs/screenshots/day.png" width="480" alt="Echo Now & Next / Needs You screenshot"></a> |
