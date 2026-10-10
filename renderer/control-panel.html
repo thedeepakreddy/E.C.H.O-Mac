@@ -150,7 +150,7 @@
 
         <section class="mission-workspace" aria-labelledby="mission-monitor-title">
           <div class="workspace-heading mission-heading">
-            <div><h1 id="mission-monitor-title">Agents</h1><p id="ops-subtitle">Your fleet, one task, every report</p></div>
+            <div><h1 id="mission-monitor-title">Agents</h1><p id="ops-subtitle">Manage your specialists and inspect their task reports</p></div>
             <div class="ops-subnav" role="tablist" aria-label="Agent view">
               <button type="button" class="ops-tab active" data-ops-view="board" role="tab" aria-selected="true">Board</button>
               <button type="button" class="ops-tab" data-ops-view="missions" role="tab" aria-selected="false">Missions</button>
@@ -161,7 +161,7 @@
               <span id="agents-zoom-level">100%</span>
               <button type="button" id="agents-zoom-in" title="Zoom in" aria-label="Zoom in"><svg><use href="#icon-plus" /></svg></button>
             </div>
-            <label class="mission-picker" for="mission-select" hidden><span>Mission</span><select id="mission-select" aria-label="Select a mission"><option value="">No missions</option></select></label>
+            <label class="mission-picker" for="mission-select"><span>Mission</span><select id="mission-select" aria-label="Select a mission"><option value="">No missions</option></select></label>
           </div>
 
           <section id="board-view" class="agent-board" data-ops-panel="board">
@@ -174,16 +174,15 @@
                     <p class="board-answer-goal" id="board-answer-goal"></p>
                     <div class="board-answer-text" id="board-answer-text"></div>
                   </div>
-                  <textarea id="board-task" class="board-task-input" rows="3"
-                    placeholder="Describe the outcome you want, with any context and constraints…"></textarea>
+                  <p id="board-empty" class="companion-muted">Start a task in Bots. This board shows the same run, each specialist’s progress and its reports.</p>
                 </div>
                 <div class="board-task-status">
                   <span id="board-status-text">Ready when you are.</span>
                 </div>
                 <div class="board-task-tools">
-                  <button type="button" class="board-round" id="board-select-all" title="Select every agent" aria-label="Select every agent"><svg><use href="#icon-network" /></svg></button>
+                  <button type="button" class="board-round" id="board-team" title="Choose a team in Bots" aria-label="Choose a team in Bots"><svg><use href="#icon-network" /></svg></button>
                   <button type="button" class="board-round" id="board-toggle-output" title="Show or hide every agent's output" aria-label="Toggle all output"><svg><use href="#icon-eye" /></svg></button>
-                  <button type="button" class="board-round primary" id="board-run" title="Run this task" aria-label="Run task"><svg><use href="#icon-send" /></svg></button>
+                  <button type="button" class="board-round primary" id="board-open-bots" title="Start a task in Bots" aria-label="Start a task in Bots"><svg><use href="#icon-send" /></svg></button>
                   <button type="button" class="board-round primary danger" id="board-stop" title="Stop the board" aria-label="Stop the board" hidden><svg><use href="#icon-stop" /></svg></button>
                 </div>
               </div>
@@ -193,7 +192,7 @@
 
             <div class="board-dock">
               <button type="button" id="board-manage" title="Your agents" aria-label="Your agents"><svg><use href="#icon-agent" /></svg>Manage agents</button>
-              <button type="button" id="board-clear" title="Clear the board and start again" aria-label="Clear the board"><svg><use href="#icon-trash" /></svg></button>
+              <button type="button" id="board-clear" title="Show the latest run" aria-label="Show the latest run"><svg><use href="#icon-trash" /></svg></button>
             </div>
           </section>
 
@@ -212,8 +211,8 @@
 <button class="active" type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Bots</span></button></aside>
         <section class="companion-main"><header class="section-title"><h1>Bots</h1><button type="button" class="secondary-button" id="bots-refresh">Refresh</button></header>
           <div class="companion-scroll">
-            <section class="companion-card"><h2>Give your bot a task</h2><p class="companion-muted">Your standing agents, powered by Echo’s models and guarded native tools. Runs and results stay on this Mac; your paired phone can follow them.</p>
-              <form id="bots-run"><label for="bots-member">Bot</label><select id="bots-member" required></select><p id="bots-role" class="companion-muted"></p><label for="bots-goal">What should it do?</label><textarea id="bots-goal" rows="3" maxlength="4000" required placeholder="Research three options and prepare a useful comparison"></textarea><p id="bots-followup" class="companion-muted" hidden></p><div class="companion-actions"><button class="primary-button" type="submit">Start task</button><button type="button" class="secondary-button" id="bots-fresh" hidden>New task</button><button type="button" class="secondary-button" id="bots-manage">Manage bots</button></div></form>
+            <section class="companion-card"><h2>Give your bot a task</h2><p class="companion-muted">Choose one specialist to do work, or a team to prepare reports and a combined answer. Agents manages the same specialists and inspects these same runs. Your paired phone can follow them.</p>
+              <form id="bots-run"><label for="bots-member">Specialist or team</label><select id="bots-member" required></select><p id="bots-role" class="companion-muted"></p><div id="bots-team" hidden><p class="companion-muted">Choose the specialists. They use reading tools; Review checks their reports and Lead combines the answer. Team tasks use several model runs.</p><div id="bots-team-members"></div></div><label for="bots-goal">What should it do?</label><textarea id="bots-goal" rows="3" maxlength="4000" required placeholder="Research three options and prepare a useful comparison"></textarea><p id="bots-followup" class="companion-muted" hidden></p><div class="companion-actions"><button class="primary-button" type="submit">Start task</button><button type="button" class="secondary-button" id="bots-fresh" hidden>New task</button><button type="button" class="secondary-button" id="bots-manage">Manage agents</button></div></form>
               <p id="bots-status" role="status" class="companion-muted"></p>
             </section><section class="companion-card"><h2>Runs &amp; results</h2><div id="bots-jobs"></div></section>
           </div>

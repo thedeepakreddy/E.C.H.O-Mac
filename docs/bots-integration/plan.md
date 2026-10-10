@@ -15,3 +15,15 @@ Keep current Phone and Mac UI styles and existing pages intact. Add a Bots page 
 - A paired signed-in Phone can run the same Mac bot available in Mac Control Panel and see its actual mission. Repeated transport requests do not duplicate a run or modify its goal.
 - Stop, model failure, quota, storage failure and process restart terminate visibly; no success is fabricated and no stopped run starts additional tool effects.
 - Required source licenses are preserved; existing screens/styles remain intact, new pages use existing classes.
+
+## Shared tasks and distinct page responsibilities
+
+Bots is the sole task composer for a single specialist or a selected team. Agents keeps its existing board styling but becomes a roster and execution inspector: profile management, reports, task selection and Stop. Its task links prefill Bots without dispatching work. Both pages and signed-in Phone requests read the same native mission IDs; there is no second job store or worker loop.
+
+1. Extend the existing Bots service with a team profile, canonical immutable request identity, active semantic duplicate detection, and adapters for former board/solo dispatch. Retain old task history and IDs. Explicit new tasks after completion are allowed; retrying a request cannot change its payload.
+2. Build selected-role dependencies: research/analysis before planning/writing, Review after reports, Lead last. Team workers receive a hard intersection of read-only grants and profile permissions. Single specialists retain existing permissions. Failed dependencies block later steps; Stop remains the existing mission cancellation path.
+3. Move the board's task entry controls to links that prefill Bots. Add team selection to the existing Bots form using existing styles. The board inspects the selected canonical run and never independently starts it. Protect drafts and request IDs, expose actual terminal status, and avoid repeated result text.
+4. Keep paired Phone compatibility: ordinary bot requests remain valid, team requests and follow-up preserve participant identity, legacy results remain accessible. No Phone theme or navigation change is required.
+5. Verify actual scheduler ordering, duplicate/retry conflicts, grant boundaries, history compatibility, profile changes, stop/failure, and real Electron paths. Publish only this feature to development and main, update Phone if required, and load Mac only when idle.
+
+Acceptance: no duplicate worker launch through different task entry paths; one accepted request resolves to one persisted mission; Lead receives actual completed reports; team work cannot execute external writes; both pages show the same run and honest status. Styling and user data remain intact. No session links or credentials are published.

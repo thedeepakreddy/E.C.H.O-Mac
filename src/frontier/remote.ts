@@ -1,3 +1,4 @@
+import {isBotRunId,TEAM_BOT_ID} from "./bots.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
@@ -383,11 +384,11 @@ export function setStatusProvider(fn: StatusProvider) {
 /**
  * The controls the phone may use beyond talking and stopping. Deliberately a
  * short list: brain, three voice switches, and stopping one task. API keys,
- * settings files, agents and quitting Echo stay at the Mac — a phone can be
+ * settings files and agent-profile management stay at the Mac — a phone can be
  * picked up by someone else while it is still signed in.
  */
 export type RemoteAction =
-  | {type:"run-bot";name:string;goal:string;requestId:string;botRevision:string;parentId?:string}
+  | {type:"run-bot";name:string;goal:string;requestId:string;botRevision:string;parentId?:string;agentIds?:string[]}
   | {type:"stop-bot";missionId:string}
   | { type: "switch-model"; provider: string }
   | { type: "set-voice"; key: "ttsEnabled" | "wakeWord" | "bargeIn"; value: boolean }
@@ -404,8 +405,8 @@ export function setActionHandler(fn: ActionHandler) {
 /** Validate a phone's action against the allowlist; anything else is null. */
 export function parseRemoteAction(body: any): RemoteAction | null {
   const type = body?.type;
-  if(type === 'run-bot' && typeof body.name==='string' && /^[a-z][a-z0-9-]{0,23}$/.test(body.name) && typeof body.goal==='string' && body.goal.trim() && body.goal.length<=4000 && typeof body.requestId==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId) && typeof body.botRevision==='string' && /^[a-f0-9]{24}$/.test(body.botRevision) && (body.parentId===undefined || typeof body.parentId==='string' && /^bot-[a-f0-9-]{36}$/.test(body.parentId)))return {type,name:body.name,goal:body.goal,requestId:body.requestId,botRevision:body.botRevision,parentId:body.parentId};
-  if(type === 'stop-bot' && typeof body.missionId==='string' && /^bot-[a-f0-9-]{36}$/.test(body.missionId))return {type,missionId:body.missionId};
+  if(type==='run-bot' && typeof body.name==='string' && (body.name===TEAM_BOT_ID||/^[a-z][a-z0-9-]{0,23}$/.test(body.name)) && typeof body.goal==='string' && body.goal.trim() && body.goal.length<=4000 && typeof body.requestId==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId) && typeof body.botRevision==='string' && /^[a-f0-9]{24}$/.test(body.botRevision) && (body.parentId===undefined||typeof body.parentId==='string'&&isBotRunId(body.parentId)) && (body.agentIds===undefined||body.name===TEAM_BOT_ID&&Array.isArray(body.agentIds)&&body.agentIds.length>0&&body.agentIds.length<=12&&body.agentIds.every((id:unknown)=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,23}$/.test(id))))return {type,name:body.name,goal:body.goal,requestId:body.requestId,botRevision:body.botRevision,parentId:body.parentId,...(body.agentIds?{agentIds:[...new Set<string>(body.agentIds)]}:{})};
+  if(type==='stop-bot' && typeof body.missionId==='string' && isBotRunId(body.missionId))return {type,missionId:body.missionId};
   if (type === "switch-model" && typeof body.provider === "string" && /^[a-z]{2,20}$/.test(body.provider)) {
     return { type, provider: body.provider };
   }

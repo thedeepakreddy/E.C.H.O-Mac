@@ -52,7 +52,7 @@ export interface ControlAction {
   settings?: Partial<ControlSettings>;
   /** For save-api-keys: env var name -> new value. A blank/omitted value leaves that key unchanged. */
   apiKeys?: Record<string, string>;
-  /** For run-board: which fleet member ids get the task. */
+  /** For a team bot task (or a legacy board request): the selected fleet member ids. */
   agentIds?: string[];
   /** For stop-mission / stop-mission-task / delete-mission. */
   missionId?: string;

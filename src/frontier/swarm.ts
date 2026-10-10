@@ -58,6 +58,8 @@ export interface AgentTaskSpec {
   profile?: string;
   runtime?: "openbot";
   botRevision?:string;
+  /** Team reports cannot perform external mutations. Enforced at brain construction. */
+  readOnly?:boolean;
   budget?: Partial<AgentTaskBudget>;
 }
 
@@ -286,8 +288,8 @@ export class SwarmManager {
 
   isMissionLive(id: string): boolean {return this.missionDeps.has(id)&&this.missions.get(id)?.status==="running";}
 
-  listMissions(): MissionState[] {
-    return this.persistedMissions(taskCoordinator);
+  listMissions(limit=20): MissionState[] {
+    return this.persistedMissions(taskCoordinator,limit);
   }
 
   /** The same view, from a given coordinator — reconciliation must read what it will write. */

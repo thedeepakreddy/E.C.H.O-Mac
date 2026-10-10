@@ -981,3 +981,6 @@ button.world-row:hover { border-color: var(--bub-edge-lit); background: var(--bu
 .companion-main summary {cursor:pointer;font-size:12px;color:var(--bright);padding:9px 0;}.companion-search{margin-bottom:14px;}
 @media(max-width:900px){.companion-view{grid-template-columns:130px minmax(0,1fr);gap:12px;padding:14px;}.companion-view .section-nav{overflow-y:auto;}.companion-view .section-nav button{font-size:11px;gap:6px;padding:6px 4px;}.companion-view .nav-icon{width:25px;height:25px;}}
 @media(max-width:600px){.companion-view{grid-template-columns:90px minmax(0,1fr);padding:10px;gap:8px;}.companion-view .nav-icon{display:none;}.companion-card{padding:12px;}}
+
+/* Team selection reuses existing switch rows inside the Bots form. */
+#bots-team .switch-row {display:flex;margin:0;}
