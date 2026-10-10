@@ -178,6 +178,10 @@ export class RelayAgent {
     }
   }
 
+  async postJson(path:string, body:unknown):Promise<any|null> {
+    try {const res=await fetch(`${this.base}${path}`,{method:'POST',headers:{authorization:`Bearer ${this.secret}`,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20000)});return res.ok?await res.json():null;}catch{return null;}
+  }
+
   private backoff(slow: boolean): Promise<void> {
     const ms = slow ? 60_000 : Math.min(30_000, 1000 * 2 ** Math.min(this.failures, 5));
     return new Promise((r) => setTimeout(r, ms));

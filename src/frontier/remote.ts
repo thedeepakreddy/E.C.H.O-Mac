@@ -1008,3 +1008,7 @@ export function remoteStatus(): string {
 export function currentRemoteUrl(): string | null {
   return running ? remoteUrl(currentPort) : null;
 }
+
+/** Authenticated fixed-purpose owner updates; no new remote control surface. */
+export async function phoneUpdateInventory() { return relay?.get('/agent/updates') ?? null; }
+export async function sendPhoneUpdate(event:import('./phone-updates.js').PhoneUpdate) { return relay?.postJson('/agent/updates',event) ?? null; }

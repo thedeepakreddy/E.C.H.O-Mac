@@ -139,6 +139,15 @@ export class TaskCoordinator {
   }
   get(taskId: string): TaskState | null { this.load(); const state = this.states.get(taskId); return state ? copy(state) : null; }
   list(): TaskState[] { this.load(); return [...this.states.values()].map(copy); }
+  /** Bounded owner dashboard metadata; never clone payloads, calls or screenshots per poll. */
+  overview(limit=40) {
+    this.load(); return [...this.states.values()].filter(s=>!s.parentTaskId)
+      .sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)).slice(0,limit).map(s=>({
+        taskId:s.taskId,goal:s.goal,status:s.status,privateMode:s.privateMode,revision:s.revision,
+        updatedAt:s.updatedAt,summary:s.result?.summary??s.summary??'',
+        blockers:(s.result?.blockers??s.blockers).filter((x):x is string=>typeof x==='string').slice(0,5),
+      }));
+  }
   /** Project only matching bindings; UI refreshes should not clone historical tool traces. */
   listBindings<T>(key:string,limit=Infinity):Array<{taskId:string;value:T}> {
     this.load();return [...this.states.values()].filter(state=>state.bindings[key]!==undefined)

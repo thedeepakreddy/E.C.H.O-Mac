@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("echoControl", {
   action: (action: unknown) => ipcRenderer.invoke("control:action", action),
   weather: (request?: { query?: string; latitude?: number; longitude?: number }) =>
     ipcRenderer.invoke("control:weather", request),
+  companion:(request?:{query?:string;memory?:boolean})=>ipcRenderer.invoke('control:companion',request),
   world: () => ipcRenderer.invoke("control:world"),
   apiKeys: () => ipcRenderer.invoke("control:api-keys"),
   fleet: () => ipcRenderer.invoke("control:fleet"),

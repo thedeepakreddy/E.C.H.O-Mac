@@ -11,7 +11,11 @@ import { EventEmitter } from "node:events";
  * Emits: 'ask'({ id, question }), 'settled'({ id, approved, why })
  */
 export class ConfirmationBroker extends EventEmitter {
-  private pending: { id: string; resolve: (ok: boolean) => void; timer: NodeJS.Timeout } | null = null;
+  private pending: { id: string; resolve: (ok: boolean) => void; timer: NodeJS.Timeout; question:string; expiresAt:number } | null = null;
+
+  current(): {id:string;question:string;expiresAt:number}|null {
+    return this.pending ? {id:this.pending.id,question:this.pending.question,expiresAt:this.pending.expiresAt} : null;
+  }
 
   /** Is a confirmation currently waiting on the user? */
   get isWaiting(): boolean {
@@ -30,7 +34,7 @@ export class ConfirmationBroker extends EventEmitter {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => this.settle(id, false, "no answer"), timeoutMs);
-      this.pending = { id, resolve, timer };
+      this.pending = { id, resolve, timer, question, expiresAt:Date.now()+timeoutMs };
       this.emit("ask", { id, question });
     });
   }
@@ -39,6 +43,7 @@ export class ConfirmationBroker extends EventEmitter {
   settle(id: string | null, approved: boolean, why = ""): boolean {
     const p = this.pending;
     if (!p || (id !== null && p.id !== id)) return false;
+    if(approved && Date.now()>=p.expiresAt){this.settle(p.id,false,"no answer");return false;}
     clearTimeout(p.timer);
     this.pending = null;
     p.resolve(approved);

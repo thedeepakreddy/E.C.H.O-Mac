@@ -11,6 +11,7 @@ import {currentAgentRunContext} from '../agent-replay/context.js';
 import type {SupervisedSpec} from '../tasks/supervisor.js';
 import type {BuildSession} from './session.js';
 const workers=new Map<string,{brain:Brain;phase:'building'|'paused';prompt:string}>();
+export const projectIsBuilding=(id:string)=>workers.get(id)?.phase==='building';
 type BuildEvent={kind:'progress'|'question'|'error'|'finished';projectId:string;text:string};
 let eventHandler:(event:BuildEvent)=>void=()=>{};
 export const setCodingEventHandler=(handler:typeof eventHandler)=>{eventHandler=handler;};
@@ -36,8 +37,13 @@ export async function startProjectBuild(id:string,prompt:string,cfg:JarvisConfig
  const session=getSession(id);if(workers.get(id)?.phase==='building')throw new Error('This project already has an active writer. Send a change instead.');
  if([...workers.entries()].some(([key,value])=>key!==id&&value.phase==='building'))throw new Error('One coding writer may run at a time on this laptop. Pause the current build first.');
  if(!makeBrain){
-  const {startSupervisedTask}=await import('../tasks/runtime.js');
+  const {startSupervisedTask,supervisor}=await import('../tasks/runtime.js');
   if(!isCurrent())throw new Error('Build request was cancelled before starting');
+  const existing=supervisor.companionMetadata().find(s=>s.live&&(s.projectIds.includes(id)||s.id===session.supervisorTaskId));
+  if(existing){
+   if(!supervisor.send(`${existing.id}.worker`,`${prompt} Inspect the current project ${id} and its saved decisions before continuing.`))throw new Error('The answer is saved, but this project is being inspected. Wait for its current result before continuing.');
+   return {projectId:id,phase:'building',revision:session.revision,taskId:existing.id};
+  }
   const state=startSupervisedTask(supervisedProjectSpec(session,prompt));
   return {projectId:id,phase:'building',revision:session.revision,taskId:state.id};
  }

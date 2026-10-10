@@ -281,6 +281,8 @@ export class SwarmManager {
     return saved ? structuredClone(saved) : null;
   }
 
+  isMissionLive(id: string): boolean {return this.missionDeps.has(id)&&this.missions.get(id)?.status==="running";}
+
   listMissions(): MissionState[] {
     return this.persistedMissions(taskCoordinator);
   }

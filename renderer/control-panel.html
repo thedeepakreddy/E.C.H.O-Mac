@@ -100,6 +100,10 @@
             <form id="weather-form" class="weather-search"><input id="weather-query" type="text" placeholder="Search location" autocomplete="off" /><button type="submit">SET</button></form>
           </section>
 
+          <button class="context-section context-link compact" type="button" data-view="day"><span class="context-heading"><span><i></i>Now &amp; Next</span><small>Open your day</small></span><span id="companion-next-summary" class="summary-empty">Your work and next step</span></button>
+          <button class="context-section context-link compact" type="button" data-view="day" data-open-needs><span class="context-heading"><span><i></i>Needs You</span><small id="companion-needs-count">Checking…</small></span><span class="summary-empty">Decisions, questions &amp; blockers</span></button>
+          <button class="context-section context-link compact" type="button" data-view="brain"><span class="context-heading"><span><i></i>Second Brain</span><small>Search memory</small></span><span class="summary-empty">What Echo remembers, with sources</span></button>
+
           <button class="context-section context-link compact" type="button" data-view="world">
             <span class="context-heading"><span><i></i>World Intelligence</span><small>Open feeds</small></span>
             <span class="route-summary"><span class="summary-icon"><svg><use href="#icon-orbit" /></svg></span><span><strong>Beyond your day</strong><small>Conflicts, earthquakes &amp; hazards</small></span><svg class="chevron"><use href="#icon-chevron" /></svg></span>
@@ -134,6 +138,8 @@
 
       <section id="tasks-view" class="view operations-view" data-view-panel="tasks" hidden>
         <aside class="section-nav" aria-label="Control panel sections">
+          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
+          <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
           <button class="active" type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
@@ -194,8 +200,45 @@
         </section>
       </section>
 
+      <section id="day-view" class="view operations-view companion-view" data-view-panel="day" hidden>
+        <aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
+          <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
+          <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
+          <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
+          <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
+</aside>
+        <section class="companion-main"><header class="section-title"><h1>Now &amp; Next</h1><button type="button" class="secondary-button" data-companion-refresh>Refresh</button></header>
+          <div class="companion-scroll"><p id="companion-next" class="companion-next">Reading your current work…</p>
+            <section class="companion-card"><h2>Now</h2><div id="companion-now"></div></section>
+            <section id="companion-needs-section" class="companion-card"><h2>Needs You</h2><p class="companion-muted">Decisions apply to the exact pending action. Expired questions cannot approve another action.</p><div id="companion-needs"></div></section>
+            <section class="companion-card"><h2>On your phone</h2><p id="companion-phone-status" role="status"></p><p class="companion-muted">Say “send me updates to my phone”. Progress, results and questions for 24 hours. Keep this Mac awake with Echo running. Private work stays here.</p><div class="companion-actions"><button id="companion-phone-start" type="button" class="primary-button">Send me updates</button><button id="companion-phone-stop" type="button" class="secondary-button" hidden>Stop updates</button></div></section>
+            <section class="companion-card"><h2>Recent work</h2><div id="companion-recent"></div></section>
+          </div>
+        </section>
+      </section>
+      <section id="brain-view" class="view operations-view companion-view" data-view-panel="brain" hidden>
+        <aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
+          <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
+          <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
+          <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
+          <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
+</aside>
+        <section class="companion-main"><header class="section-title"><h1>Second Brain</h1><button type="button" class="secondary-button" data-companion-refresh>Refresh</button></header>
+          <div class="companion-scroll"><p id="companion-memory-scope" class="companion-muted"></p>
+            <form id="companion-search" class="companion-search"><label for="companion-query">Find a memory</label><div class="companion-actions"><input id="companion-query" type="search" maxlength="500" placeholder="Search decisions, preferences, commitments…"><button class="secondary-button" type="submit">Search</button></div></form>
+            <details class="companion-card"><summary>Remember something</summary><form id="companion-add"><label for="companion-note">What should Echo remember?</label><textarea id="companion-note" required maxlength="12000" rows="3"></textarea><label for="companion-note-kind">Kind</label><select id="companion-note-kind"><option value="note">Note</option><option value="preference">Preference</option><option value="decision">Decision</option><option value="commitment">Commitment</option></select><button type="submit" class="primary-button">Remember</button><p class="companion-muted">Saved in Echo’s existing memory. A commitment here is a note; use a reminder for a timed alert.</p></form></details>
+            <p id="companion-memory-status" role="status"></p><div id="companion-memories"></div>
+          </div>
+        </section>
+      </section>
       <section id="world-view" class="view operations-view" data-view-panel="world" hidden>
         <aside class="section-nav" aria-label="Control panel sections">
+          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
+          <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
           <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
           <button class="active" type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
@@ -262,6 +305,8 @@
 
       <section id="settings-view" class="view settings-view" data-view-panel="settings" hidden>
         <aside class="section-nav" aria-label="Control panel sections">
+          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
+          <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
           <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
@@ -467,5 +512,6 @@
     <script src="synapse/synapse-maps.js"></script>
     <script src="synapse/synapse-field.js"></script>
     <script src="control-panel.js"></script>
+    <script src="control-companion.js"></script>
   </body>
 </html>

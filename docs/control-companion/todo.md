@@ -1,0 +1,5 @@
+- [x] Local projections and exact state-checked actions; focused tests.
+- [x] Paired phone updates relay/inbox and durable Mac outbox; integration tests.
+- [x] Existing-style panel/phone navigation and interactions; Electron checks.
+- [x] Relevant regressions, typecheck/build, review.
+- [ ] Push/deploy/verify and load Mac build when idle.

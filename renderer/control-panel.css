@@ -963,3 +963,21 @@ button.world-row:hover { border-color: var(--bub-edge-lit); background: var(--bu
   .world-hero h2 { font-size: 17px; }
   .world-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Companion pages extend the existing glass palette without restyling other views. */
+.companion-main {display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;}
+.companion-main > .section-title {flex:0 0 auto;margin-bottom:12px;}
+.companion-scroll {min-height:0;overflow:auto;padding:2px 5px 14px 2px;}
+.companion-card {margin:0 0 14px;padding:18px;border:1px solid var(--bub-edge);border-radius:var(--r-card);background:var(--bub-spec),var(--bub);box-shadow:var(--bub-inner);}
+.companion-card h2 {font-size:16px;color:var(--bright);margin:0 0 12px;}
+.companion-card h3 {font-size:14px;font-weight:500;margin:0 0 6px;color:var(--bright);overflow-wrap:anywhere;}
+.companion-row {padding:13px 0;border-bottom:1px solid var(--bub-edge);}.companion-row:last-child{border-bottom:0;}
+.companion-copy,.companion-next {white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;font-size:13px;color:var(--bright);}
+.companion-next {font-size:16px;margin:6px 0 20px;}.companion-muted {color:var(--subtle);font-size:12px;line-height:1.6;overflow-wrap:anywhere;}
+.companion-actions {display:flex;gap:9px;align-items:center;flex-wrap:wrap;}.companion-actions input{flex:1;min-width:120px;}
+.companion-main label {display:block;margin:12px 0 6px;font-size:12px;color:var(--bright);}
+.companion-main input,.companion-main textarea,.companion-main select {width:100%;box-sizing:border-box;padding:10px 12px;color:var(--bright);border:1px solid var(--bub-edge);border-radius:12px;background:rgba(0,18,26,.35);font:inherit;}
+.companion-main textarea{resize:vertical;min-height:70px;}.companion-main select{margin-bottom:10px;}
+.companion-main summary {cursor:pointer;font-size:12px;color:var(--bright);padding:9px 0;}.companion-search{margin-bottom:14px;}
+@media(max-width:900px){.companion-view{grid-template-columns:130px minmax(0,1fr);gap:12px;padding:14px;}.companion-view .section-nav{overflow-y:auto;}.companion-view .section-nav button{font-size:11px;gap:6px;padding:6px 4px;}.companion-view .nav-icon{width:25px;height:25px;}}
+@media(max-width:600px){.companion-view{grid-template-columns:90px minmax(0,1fr);padding:10px;gap:8px;}.companion-view .nav-icon{display:none;}.companion-card{padding:12px;}}

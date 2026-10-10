@@ -1,3 +1,8 @@
+import {companionProjection,companionMemory,saveCompanionMemory,forgetCompanionMemory,phoneUpdateIntent,type CompanionWork} from './control-companion.js';
+import {taskCoordinator} from './memory/task-state.js';
+import {PhoneUpdates} from './frontier/phone-updates.js';
+import {phoneUpdateInventory,sendPhoneUpdate} from './frontier/remote.js';
+import {answerBuildQuestion,startProjectBuild,projectIsBuilding} from './coding/dialogue.js';
 import { BrainLifecycle, type BrainHandlers } from "./brain/lifecycle.js";
 import { controlSettingsFor, normalizeControlSettings } from "./runtime/control-settings.js";
 import { stopTerminalCommands } from './system/terminal.js';
@@ -787,7 +792,8 @@ function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = nu
   const stillCurrent = () => !shuttingDown && revision === inputRevision && owner === brain;
   const foregroundBusy=!!owner.currentTaskState && ['running','waiting','verifying'].includes(owner.currentTaskState.status);
   const savedStatus=automaticTasks.control(text,foregroundBusy);
-  void (savedStatus?Promise.resolve(savedStatus):handleBuildInput(text, cfg, owner.currentTaskState,stillCurrent)).then(handled => {
+  const updateIntent=phoneUpdateIntent(text);
+  void (updateIntent?phoneUpdateCommand(updateIntent):savedStatus?Promise.resolve(savedStatus):handleBuildInput(text, cfg, owner.currentTaskState,stillCurrent)).then(handled => {
     if (!stillCurrent()) return;
     handled ??= automaticTasks.handle(text,{scope:{...currentScope()},privateMode:!captureAllowed(),foregroundBusy});
     if (!handled) {dispatchToBrainUnchecked(text, audio, turn, modality); return;}
@@ -811,7 +817,7 @@ function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = nu
 }
 function dispatchToBrainUnchecked(text: string, audio?: AudioTurn, turn: Turn | null = null, modality: "voice" | "text" = "voice") {
   if (shuttingDown) return;
-  controlTelemetry.beginTask(text);
+  controlTelemetry.beginTask(text, "Echo", !captureAllowed());
   publishControlUpdate();
   voiceSession.noteBrainSend(turn, text, brain.provider ?? cfg.brain);
   speech?.newTurn();
@@ -1283,6 +1289,7 @@ async function handleUtterance(wavPath: string, needsWakeWord = false, meta: Utt
   // what the hearing pass noticed, which is the whole point of that pass.
   // Speech-to-speech first when it is on: the model hears the recording itself,
   // so tone and emphasis reach it instead of being flattened into a transcript.
+  if(phoneUpdateIntent(command)){dispatchToBrain(command,undefined,turn,'voice');return;}
   if ((await useLive()) && (await dispatchToRealtime(wavPath, turn, command))) return;
   dispatchToBrain(heard ? command : withTone(command, tone), heard ?? undefined, turn);
 }
@@ -2178,6 +2185,36 @@ function handleTypedInput(value: unknown): void {
   });
 }
 
+let lastPhoneInventoryCheck=0;
+const phoneUpdates = new PhoneUpdates(()=>join(dataRoot(),'phone-updates.json'));
+function companionWork():CompanionWork[] {
+  const projects=listCodingProjects();
+  const missions=[...swarm.listMissions(),...supervisor.panelMissions()];
+  const current=brain?.currentTaskState;
+  const overview=taskCoordinator.overview();
+  const supervised=supervisor.companionMetadata();
+  const rows:CompanionWork[]=overview.map(t=>({id:t.taskId,kind:'task',title:t.goal,status:t.status,updatedAt:Date.parse(t.updatedAt),revision:t.revision,summary:[t.summary,...t.blockers].filter(Boolean).join('\n'),privateMode:t.privateMode,live:t.taskId===current?.taskId}));
+  rows.push(...projects.map(p=>({id:p.id,kind:'project' as const,title:p.name,status:p.phase,updatedAt:Date.parse(p.updatedAt),revision:p.revision,summary:p.decisions.at(-1)??'',privateMode:p.privateMode,taskId:p.supervisorTaskId??p.taskId,linkedTaskIds:[p.taskId,p.supervisorTaskId,...supervised.filter(s=>s.projectIds.includes(p.id)).map(s=>s.id)].filter((x):x is string=>!!x),live:projectIsBuilding(p.id)||supervised.some(s=>s.live&&(s.projectIds.includes(p.id)||s.id===p.supervisorTaskId)),question:p.question&&!p.question.answer?p.question:undefined})));
+  rows.push(...missions.map(m=>({id:m.id,kind:'mission' as const,title:m.goal,status:m.status,updatedAt:m.updatedAt,revision:m.updatedAt,summary:m.result?.summary??'',privateMode:supervised.find(s=>s.id===m.id)?.privateMode??overview.find(t=>t.taskId===m.taskId)?.privateMode??true,taskId:m.taskId,live:supervised.find(s=>s.id===m.id)?.live??swarm.isMissionLive(m.id)})));
+  // Session telemetry is a fallback when no durable foreground task exists.
+  if(!current)rows.push(...controlTelemetry.tasks.slice(-8).filter(t=>!rows.some(w=>w.title===t.title&&Math.abs(w.updatedAt-(t.finishedAt??t.startedAt))<10000)).map(t=>({id:t.id,kind:'session' as const,title:t.title,status:t.status,updatedAt:t.finishedAt??t.startedAt,revision:t.finishedAt??t.startedAt,summary:'Foreground conversation',privateMode:t.privateMode??true,live:!t.finishedAt})));
+  return rows;
+}
+function readCompanion(request?:{query?:string;memory?:boolean}) {
+  const projection=companionProjection({work:companionWork(),approval:confirmations.current()});
+  return {...projection,phone:phoneUpdates.snapshot(),scope:currentScope(),...(request?.memory?{memory:companionMemory(currentScope(),request.query??'')}:{})};
+}
+async function phoneUpdateCommand(intent:'start'|'stop'):Promise<string> {
+  if(intent==='stop')return phoneUpdates.stop().message;
+  if(!captureAllowed())return 'This conversation is private or memory capture is off. Phone updates remain off.';
+  if(phoneUpdates.snapshot().active)return 'I’m already sending important updates to your phone. Say “stop sending updates to my phone” to stop.';
+  const inventory=await phoneUpdateInventory();
+  if(!inventory)return 'I couldn’t reach Echo Phone. Check the Mac connection and try again.';
+  const state=phoneUpdates.begin(inventory,readCompanion().work);
+  void phoneUpdates.flush(sendPhoneUpdate).catch(error=>console.error("[phone updates] delivery deferred",error instanceof Error?error.message:"Delivery failed"));
+  return `${state.message} I’ll send progress, results and questions for 24 hours. Keep this Mac awake with Echo running.`;
+}
+
 function controlRuntime(): ControlRuntime {
   const provider = ((brain?.provider ?? cfg.brain) as Provider);
   const configured = loadMcpConfig();
@@ -2218,6 +2255,36 @@ function makeFleetBrain() {
 async function handleControlAction(action: ControlAction): Promise<{ ok: boolean; message?: string; data?: Record<string, unknown> }> {
   if (shuttingDown) return {ok: false, message: "Echo is shutting down."};
   switch (action.type) {
+    case 'phone-updates': {
+      if(action.enabled!==true&&action.enabled!==false)return {ok:false,message:'Choose Start or Stop.'};
+      return {ok:true,message:await phoneUpdateCommand(action.enabled?'start':'stop')};
+    }
+    case 'memory-save':
+      if(!action.id&&action.projectId!==(currentScope().projectId??''))return {ok:false,message:'The current project changed. Refresh Second Brain before saving.'};
+      saveCompanionMemory(action,currentScope()); return {ok:true,message:'Saved to Second Brain.'};
+    case 'memory-forget':
+      {const receipt=forgetCompanionMemory(action,currentScope()); return {ok:true,message:receipt.failures.length?'Forgot the memory; some linked copies could not be removed. Check local diagnostics.':'Forgot that memory and removed its linked recall copies.'};}
+    case 'answer-approval': {
+      if(typeof action.id!=='string'||typeof action.approved!=='boolean')return {ok:false,message:'Invalid decision.'};
+      const ok=confirmations.settle(action.id,action.approved,'answered from control panel');
+      return {ok,message:ok?(action.approved?'Approved.':'Denied.'):'That approval ended. Refresh Needs You.'};
+    }
+    case 'answer-project': {
+      const project=listCodingProjects().find(p=>p.id===action.id);
+      if(!project||project.revision!==action.revision||!project.question||project.question.id!==action.questionId||project.question.answer)return {ok:false,message:'This question changed. Refresh Needs You.'};
+      const answer=String(action.text??'').trim();if(!answer||answer.length>2000)return {ok:false,message:'Write an answer in up to 2,000 characters.'};
+      const answered=await answerBuildQuestion(project.id,project.question.id,answer);
+      await startProjectBuild(answered.id,`Continue after the user’s answer: ${answer}`,cfg);
+      return {ok:true,message:'Answer saved. Echo is continuing the project.'};
+    }
+    case 'retry-work': {
+      if(confirmations.isWaiting||['thinking','acting','confirming'].includes(lastBrainStatus)||brain?.currentTaskState&&['running','waiting','verifying'].includes(brain.currentTaskState.status))return {ok:false,message:'Resolve or stop the current work before continuing another task.'};
+      const row=readCompanion().work.find(w=>w.id===action.id&&w.kind===action.kind);
+      if(!row||row.revision!==action.revision||!(['failed','blocked','partial','cancelled','stopped','waiting'].includes(row.status)||row.live===false&&['running','working','queued','pending','clarifying','planning','implementing','verifying','deploying','previewing'].includes(row.status)))return {ok:false,message:'This work changed. Refresh before continuing it.'};
+      if(row.kind==='project'){await startProjectBuild(row.id,'Inspect saved state, blockers and existing effects before continuing. Do not repeat completed actions or publication.',cfg);}
+      else handleTypedInput(`Continue my saved ${row.kind} ${row.id}: ${row.title}. Previous status: ${row.status}. Summary: ${row.summary}. Inspect existing state and effects before taking action; never repeat a completed external action just because the previous turn failed.`);
+      return {ok:true,message:'Echo will inspect the saved state and continue.'};
+    }
     case "command": {
       const command = String(action.text ?? "").trim();
       if (!command) return { ok: false, message: "Enter a command first." };
@@ -2765,7 +2832,8 @@ app.whenReady().then(async () => {
   mainTimers.every(4000, drainHeldSpeech);
   wireConfirmations();
   wireIpc();
-  wireControlPanel({ runtime: controlRuntime, action: handleControlAction });
+  wireControlPanel({ runtime: controlRuntime, action: handleControlAction, companion:readCompanion });
+  mainTimers.every(5000,async()=>{if(!phoneUpdates.snapshot().active||!captureAllowed())return;if(Date.now()-lastPhoneInventoryCheck>60000){lastPhoneInventoryCheck=Date.now();const inventory=await phoneUpdateInventory();if(inventory)phoneUpdates.reconcile(inventory);if(!phoneUpdates.snapshot().active)return;}const view=readCompanion();phoneUpdates.observe(view.work,view.work.some(w=>w.privateMode&&['running','working','waiting','verifying','waiting-for-input'].includes(w.status))?null:view.approval);await phoneUpdates.flush(sendPhoneUpdate);},error=>console.error("[phone updates]",error instanceof Error?error.message:"Update failed"));
   wireShortcuts();
 
   // Give the renderer a beat to attach listeners before we start emitting.

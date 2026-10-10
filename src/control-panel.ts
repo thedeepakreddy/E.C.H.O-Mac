@@ -15,7 +15,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export type ControlTaskStatus = "working" | "queued" | "done" | "failed" | "stopped";
 export interface ControlTask {
   id: string; title: string; status: ControlTaskStatus; agent: string;
-  startedAt: number; finishedAt?: number;
+  startedAt: number; finishedAt?: number; privateMode?: boolean;
 }
 export interface ControlLog { id: number; at: number; kind: string; text: string }
 export interface ControlSettings {
@@ -39,13 +39,14 @@ export interface ControlSettings {
   configPath: string;
 }
 export interface ControlAction {
-  type: "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
+  type: "phone-updates" | "memory-save" | "memory-forget" | "answer-approval" | "answer-project" | "retry-work" | "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
     "refresh-connections" | "switch-model" | "spawn-agent" | "assign-agent" | "api-keys" | "save-settings" |
     "save-api-keys" | "run-board" | "run-fleet-agent" | "stop-mission" | "stop-mission-task" |
     "delete-mission" |
     "save-agent" | "remove-agent" | "shutdown" |
     "chatgpt-sign-in" | "chatgpt-cancel-sign-in" | "chatgpt-sign-out" |
     "openrouter-sign-in" | "openrouter-sign-out" | "openrouter-set-model";
+  projectId?:string; id?:string; revision?:number; questionId?:string; approved?:boolean; enabled?:boolean; kind?:string;
   text?: string; goal?: string; provider?: string; name?: string;
   settings?: Partial<ControlSettings>;
   /** For save-api-keys: env var name -> new value. A blank/omitted value leaves that key unchanged. */
@@ -140,10 +141,10 @@ export class ControlTelemetry {
   connectionActivity(name: string): number | undefined {
     return this.mcpActivity.get(name.replace(/[^a-zA-Z0-9_]/g, "_"));
   }
-  beginTask(title: string, agent = "Echo"): string {
+  beginTask(title: string, agent = "Echo", privateMode = false): string {
     this.taskRevision++;
     const id = `session-${++this.taskSequence}`;
-    this.tasks.push({ id, title: title.slice(0, 2000), agent, startedAt: Date.now(),
+    this.tasks.push({ id, title: title.slice(0, 2000), agent, privateMode, startedAt: Date.now(),
       status: this.tasks.some((task) => task.agent === agent && task.status === "working") ? "queued" : "working" });
     // Retain active work, and the most recent sixty finished turns.
     const finished = this.tasks.filter((task) => task.finishedAt);
@@ -247,6 +248,7 @@ function authorized(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
 export function wireControlPanel(deps: {
   runtime: () => ControlRuntime;
   action: (action: ControlAction) => Promise<ControlResult>;
+  companion?: (request?:{query?:string;memory?:boolean})=>unknown;
 }): void {
   runtime = deps.runtime;
   const { ipcMain } = nodeRequire("electron") as typeof import("electron");
@@ -271,6 +273,11 @@ export function wireControlPanel(deps: {
   ipcMain.handle("control:weather", (event, request?: ControlWeatherRequest) => {
     if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
     return getControlWeather(request);
+  });
+  ipcMain.handle('control:companion',(event,request?:{query?:string;memory?:boolean})=>{
+    if(!authorized(event))throw new Error('Untrusted control-panel sender.');
+    if(request && (typeof request!=='object'||Array.isArray(request)||request.memory!==undefined&&typeof request.memory!=='boolean'||request.query!==undefined&&typeof request.query!=='string'||request.query&&request.query.length>500))throw new Error('Invalid search.');
+    return deps.companion?.(request)??null;
   });
   ipcMain.handle("control:world", (event) => {
     if (!authorized(event)) throw new Error("Untrusted control-panel sender.");
