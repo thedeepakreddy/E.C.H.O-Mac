@@ -320,10 +320,18 @@ export class OpenAIBrain extends Brain {
   }
 
   private joinQueued(): boolean {
+    const updates=this.takeTaskUpdates();
+    for(const u of updates){this.appendUser([{type:'input_text',text:u.text}]);u.applied();}
     const joined = this.queue.takeForRunningLoop();
     for (const q of joined) this.appendUser(q.content);
-    return joined.length > 0;
+    return joined.length > 0 || updates.length > 0;
   }
+
+  queueTaskUpdate(text:string,applied:()=>void):boolean {
+    if(!this.busy||this.aborted)return false;
+    this.taskUpdates.push({text,applied});return true;
+  }
+  readonly supportsTaskUpdates:boolean = true;
 
   /** After a stop, queued messages are the next request; after a failure, recovery carries them. */
   private drainQueue() {

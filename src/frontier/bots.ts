@@ -13,7 +13,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const LEGACY_RUN = /^(?:board-\d{10,16}|solo-[a-z][a-z0-9-]{0,23}-\d{10,16})$/;
 export const isBotRunId = (id:string) => /^bot-[a-f0-9-]{36}$/.test(id) || LEGACY_RUN.test(id);
 export interface BotRequest {name?:string;goal?:string;requestId?:string;botRevision?:string;parentId?:string;agentIds?:string[]}
-type Host = Pick<SwarmManager,'getMission'|'listMissions'|'isMissionLive'|'submitMission'|'cancelMission'>;
+type Host = Pick<SwarmManager,'getMission'|'listMissions'|'isMissionLive'|'submitMission'|'cancelMission'|'controlMissionTask'|'taskControlSupported'>;
 const profileIds = (m:MissionState) => [...new Set(Object.values(m.tasks).map(t=>t.profile).filter((p):p is string=>!!p))].sort();
 const own = (m:MissionState) => m.id.startsWith('bot-') && m.scope.echoBot===true || LEGACY_RUN.test(m.id) && Object.values(m.tasks).length>0 && Object.values(m.tasks).every(t=>typeof t.profile==='string');
 const same = (a:unknown,b:unknown) => JSON.stringify(a)===JSON.stringify(b);
@@ -35,7 +35,8 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
    if(result)result.artifacts=[...new Map(result.artifacts.map(a=>[JSON.stringify([a.kind,a.label,a.value]),a])).values()];
    return {id:m.id,botId:team?TEAM_BOT_ID:String(m.scope.botId??ids[0]??''),botName:team?'Team of specialists':String(m.scope.botName??getFleetMember(ids[0])?.name??ids[0]??'Specialist'),agentIds:ids.filter(id=>id!=='lead'),goal:m.goal,status:m.status==='running'&&!host.isMissionLive(m.id)?'interrupted':m.status,createdAt:m.createdAt,updatedAt:m.updatedAt,result,steps:Object.values(m.tasks).map(t=>({id:t.id,name:t.actorName??getFleetMember(t.profile??'')?.name??t.profile??t.id,goal:t.goal,status:t.status,result:bounded(t.result)})),live:host.isMissionLive(m.id)};
   });
-  return {bots,jobs};
+  for(const job of jobs){const mission=host.getMission(job.id);if(!mission)continue;for(const step of job.steps){const task=mission.tasks[step.id];if(!task)continue;Object.assign(step,{name:task.profile==='lead'?'Echo':step.name,profile:task.profile,attempt:task.attempt??1,commands:task.updates??[],dependsOn:task.dependsOn??[],activity:task.activity,updateSupported:host.taskControlSupported(mission.id,task.id)});}}
+  return {bots,jobs,coordinator:{id:'lead',name:'Echo',role:'Coordinates your team and combines specialist reports.'}};
  }
  function run(b:BotRequest) {
   if(!UUID.test(b.requestId??'')||typeof b.goal!=='string'||!b.goal.trim()||b.goal.length>4000||typeof b.name!=='string'||typeof b.botRevision!=='string'||(b.agentIds!==undefined&&(!Array.isArray(b.agentIds)||b.agentIds.length>12||b.agentIds.some(id=>typeof id!=='string'))))return {ok:false,message:'Choose a specialist or team and enter a task in up to 4,000 characters.'};
@@ -82,7 +83,13 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
   return run({name,goal:b.goal,botRevision:rev,requestId,parentId:b.parentId,...(name===TEAM_BOT_ID?{agentIds:ids.filter(p=>p!=='lead')}:{})});
  }
  function stop(id:string) {const m=host.getMission(id);if(!m||!own(m))return {ok:false,message:'That task no longer exists.'};return host.cancelMission(id)?{ok:true,message:'Task stopped. Review any changes already made.'}:{ok:false,message:'That task is no longer running.'};}
- return {list,run,legacy,revision,stop};
+ function control(b:{missionId?:string;taskId?:string;attempt?:number;requestId?:string;operation?:string;text?:string}) {
+  if(typeof b.missionId!=='string'||!isBotRunId(b.missionId)||typeof b.taskId!=='string'||!/^[a-zA-Z0-9_.-]{1,64}$/.test(b.taskId)||!Number.isInteger(b.attempt)||Number(b.attempt)<1||!UUID.test(b.requestId??'')||!['update','stop','revise'].includes(b.operation??'')||(b.operation!=='stop'&&(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000)))return {ok:false,message:'Choose an agent task and provide valid instructions.'};
+  const m=host.getMission(b.missionId);if(!m||!own(m))return {ok:false,message:'This bot task no longer exists.'};
+  const r=host.controlMissionTask({missionId:b.missionId,taskId:b.taskId,attempt:b.attempt!,requestId:b.requestId!,operation:b.operation as 'update'|'stop'|'revise',text:b.text});
+  return {ok:r.ok,message:r.message,data:{command:r.command}};
+ }
+ return {list,run,legacy,revision,stop,control};
 }
 /** Only explicit commands, never quoted or hypothetical requests. */
 export function botIntent(text:string):{name:string;goal:string}|null {

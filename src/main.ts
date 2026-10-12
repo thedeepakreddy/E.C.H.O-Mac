@@ -2440,6 +2440,7 @@ async function handleControlAction(action: ControlAction): Promise<{ ok: boolean
     case "run-board": return action.agentIds?.length ? macBots.legacy({goal:action.goal,agentIds:action.agentIds,requestId:action.requestId}) : {ok:false,message:"Choose specialists in Bots before starting a team task."};
     case "run-fleet-agent": return macBots.legacy({name:action.name,goal:action.goal,requestId:action.requestId});
     case "run-bot": return macBots.run(action);
+    case "control-bot": return macBots.control(action);
     case "stop-bot": return macBots.stop(String(action.missionId??""));
     case "stop-mission":
       if(String(action.missionId ?? '').startsWith('supervised.') && supervisor.inspect(String(action.missionId))) {await supervisor.cancel(String(action.missionId));return {ok:true,message:'Supervised task stopped.'};}
@@ -3182,7 +3183,7 @@ setActionHandler(async (action) => {
   let result: { ok: boolean; message?: string };
   if (action.type === "switch-model") result = await handleControlAction({ type: "switch-model", provider: action.provider });
   else if (action.type === "set-voice") result = await handleControlAction({ type: "save-settings", settings: { voice: { [action.key]: action.value } } as any });
-  else if (action.type === "run-bot" || action.type === "stop-bot") result = await handleControlAction(action);
+  else if (action.type === "run-bot" || action.type === "stop-bot" || action.type === "control-bot") result = await handleControlAction(action);
   else if (action.type === "open-neural") result = await handleControlAction({ type: "neural" });
   // Face ID was checked by the remote before this is reached.
   else if (action.type === "power-off") result = await handleControlAction({ type: "shutdown" });
