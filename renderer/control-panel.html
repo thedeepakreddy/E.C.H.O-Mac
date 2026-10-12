@@ -210,14 +210,14 @@
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
-<button class="active" type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Bots</span></button></aside>
-        <section class="companion-main"><header class="section-title"><h1>Bots</h1><button type="button" class="secondary-button" id="bots-refresh">Refresh</button></header>
+<button class="active" type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents &amp; Bots</span></button></aside>
+        <section class="companion-main"><header class="section-title"><h1>Agents &amp; Bots</h1><button type="button" class="secondary-button" id="bots-refresh" hidden>Refresh</button></header>
           <div class="companion-scroll">
             <section id="agent-office" aria-label="Live agent workspace"></section>
-            <section class="companion-card"><h2>Give your bot a task</h2><p class="companion-muted">Choose one specialist to do work, or a team to prepare reports and a combined answer. Echo coordinates the team. Agents manages the same specialists and inspects these same runs. One bot task runs at a time on your Mac.</p>
+            <dialog id="bots-assignment" class="office-dialog" aria-labelledby="bots-assignment-title"><div class="office-dialog-heading"><h2 id="bots-assignment-title">Assign task</h2><button type="button" id="bots-assignment-close" class="office-button">Close</button></div><p class="companion-muted">Choose an agent or team. One bot task runs at a time on your Mac.</p>
               <form id="bots-run"><label for="bots-member">Specialist or team</label><select id="bots-member" required></select><p id="bots-role" class="companion-muted"></p><div id="bots-team" hidden><p class="companion-muted">Choose the specialists. They use reading tools; Review checks their reports and Lead combines the answer. Team tasks use several model runs.</p><div id="bots-team-members"></div></div><label for="bots-goal">What should it do?</label><textarea id="bots-goal" rows="3" maxlength="4000" required placeholder="Research three options and prepare a useful comparison"></textarea><p id="bots-followup" class="companion-muted" hidden></p><div class="companion-actions"><button class="primary-button" type="submit">Start task</button><button type="button" class="secondary-button" id="bots-fresh" hidden>New task</button><button type="button" class="secondary-button" id="bots-manage">Manage agents</button></div></form>
-              <p id="bots-status" role="status" class="companion-muted"></p>
-            </section><section class="companion-card"><h2>Runs &amp; results</h2><div id="bots-jobs"></div></section>
+              <p id="bots-dialog-status" role="status" class="companion-muted"></p>
+            </dialog><p id="bots-status" role="status" class="companion-muted"></p><details id="bots-history" class="office-history"><summary>Runs &amp; results</summary><div id="bots-jobs"></div></details>
           </div>
         </section>
       </section>
