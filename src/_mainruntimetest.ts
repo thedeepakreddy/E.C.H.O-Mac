@@ -11,6 +11,8 @@ import {RuntimeTimers} from './runtime/timers.js';
 import {controlSettingsFor, normalizeControlSettings} from './runtime/control-settings.js';
 import {AutomaticTaskRouter,needsTaskDispatch} from './tasks/automatic.js';
 import type {SupervisedState} from './tasks/supervisor.js';
+import {phoneUpdateIntent} from './control-companion.js';
+import {botIntent} from './frontier/bots.js';
 
 let passed = 0;
 async function test(name: string, body: () => unknown): Promise<void> {
@@ -140,7 +142,7 @@ function runtime(names: string[], additions: Record<string, unknown> = {}) {
     voiceSession: {noteBrainDone() {}}, remoteRecord() {}, endAutoReflex() {}, finishTurn() {}, publishControlUpdate() {},
     maybeAutoListen() {}, send() {}, tts: {say() {}}, shuttingDown: false, inputRevision: 0,
     telegram: undefined, chatIdle() {}, automaticTasks: {control:()=>null,handle:()=>null},
-    currentScope:()=>({}), captureAllowed:()=>true, ...additions,
+    currentScope:()=>({}), captureAllowed:()=>true, phoneUpdateIntent, botIntent, ...additions,
   };
   const functions = names.map(name => declaration('src/main.ts', name)).join('\n');
   const code = `${declaration('src/control-panel.ts', 'ControlTelemetry')}\n${functions}\n`;
