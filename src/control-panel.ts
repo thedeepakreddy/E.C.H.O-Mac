@@ -39,7 +39,7 @@ export interface ControlSettings {
   configPath: string;
 }
 export interface ControlAction {
-  type: "run-bot" | "stop-bot" | "phone-updates" | "memory-save" | "memory-forget" | "answer-approval" | "answer-project" | "retry-work" | "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
+  type: "control-bot" | "run-bot" | "stop-bot" | "phone-updates" | "memory-save" | "memory-forget" | "answer-approval" | "answer-project" | "retry-work" | "command" | "listen" | "interrupt" | "toggle-voice" | "settings" | "neural" | "osiris" |
     "refresh-connections" | "switch-model" | "spawn-agent" | "assign-agent" | "api-keys" | "save-settings" |
     "save-api-keys" | "run-board" | "run-fleet-agent" | "stop-mission" | "stop-mission-task" |
     "delete-mission" |
@@ -47,6 +47,7 @@ export interface ControlAction {
     "chatgpt-sign-in" | "chatgpt-cancel-sign-in" | "chatgpt-sign-out" |
     "openrouter-sign-in" | "openrouter-sign-out" | "openrouter-set-model";
   requestId?:string; botRevision?:string; parentId?:string;
+  taskId?:string;attempt?:number;operation?:'update'|'stop'|'revise';
   projectId?:string; id?:string; revision?:number; questionId?:string; approved?:boolean; enabled?:boolean; kind?:string;
   text?: string; goal?: string; provider?: string; name?: string;
   settings?: Partial<ControlSettings>;

@@ -7,6 +7,7 @@
     <title>ECHO | Desktop Intelligence</title>
     <link rel="stylesheet" href="synapse/synapse-field.css" />
     <link rel="stylesheet" href="control-panel.css" />
+    <link rel="stylesheet" href="agent-office.css" />
   <link rel="stylesheet" href="markdown.css">
 </head>
   <body data-status="idle">
@@ -155,7 +156,7 @@
             <div class="ops-subnav" role="tablist" aria-label="Agent view">
               <button type="button" class="ops-tab active" data-ops-view="board" role="tab" aria-selected="true">Board</button>
               <button type="button" class="ops-tab" data-ops-view="missions" role="tab" aria-selected="false">Missions</button>
-              <button type="button" class="ops-tab" data-view="bots">Bots</button>
+              <button type="button" class="ops-tab" data-view="bots">Agent office</button>
             </div>
             <div class="zoom-control" role="group" aria-label="Zoom agents panel">
               <button type="button" id="agents-zoom-out" title="Zoom out" aria-label="Zoom out"><svg><use href="#icon-minus" /></svg></button>
@@ -212,7 +213,8 @@
 <button class="active" type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Bots</span></button></aside>
         <section class="companion-main"><header class="section-title"><h1>Bots</h1><button type="button" class="secondary-button" id="bots-refresh">Refresh</button></header>
           <div class="companion-scroll">
-            <section class="companion-card"><h2>Give your bot a task</h2><p class="companion-muted">Choose one specialist to do work, or a team to prepare reports and a combined answer. Agents manages the same specialists and inspects these same runs. Your paired phone can follow them.</p>
+            <section id="agent-office" aria-label="Live agent workspace"></section>
+            <section class="companion-card"><h2>Give your bot a task</h2><p class="companion-muted">Choose one specialist to do work, or a team to prepare reports and a combined answer. Echo coordinates the team. Agents manages the same specialists and inspects these same runs. One bot task runs at a time on your Mac.</p>
               <form id="bots-run"><label for="bots-member">Specialist or team</label><select id="bots-member" required></select><p id="bots-role" class="companion-muted"></p><div id="bots-team" hidden><p class="companion-muted">Choose the specialists. They use reading tools; Review checks their reports and Lead combines the answer. Team tasks use several model runs.</p><div id="bots-team-members"></div></div><label for="bots-goal">What should it do?</label><textarea id="bots-goal" rows="3" maxlength="4000" required placeholder="Research three options and prepare a useful comparison"></textarea><p id="bots-followup" class="companion-muted" hidden></p><div class="companion-actions"><button class="primary-button" type="submit">Start task</button><button type="button" class="secondary-button" id="bots-fresh" hidden>New task</button><button type="button" class="secondary-button" id="bots-manage">Manage agents</button></div></form>
               <p id="bots-status" role="status" class="companion-muted"></p>
             </section><section class="companion-card"><h2>Runs &amp; results</h2><div id="bots-jobs"></div></section>
@@ -535,6 +537,7 @@
     <script src="synapse/synapse-field.js"></script>
     <script src="control-panel.js"></script>
     <script src="control-companion.js"></script>
+    <script src="agent-office.js"></script>
     <script src="control-bots.js"></script>
   </body>
 </html>

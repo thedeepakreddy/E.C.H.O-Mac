@@ -122,10 +122,18 @@ export class OllamaBrain extends Brain {
 
   /** Take in what was said while this loop was working. True if anything was. */
   private joinQueued(): boolean {
+    const updates=this.takeTaskUpdates();
+    for(const u of updates){this.messages.push({role:'user',content:u.text});u.applied();}
     const joined = this.queue.takeForRunningLoop();
     for (const text of joined) this.messages.push({ role: "user", content: text });
-    return joined.length > 0;
+    return joined.length > 0 || updates.length > 0;
   }
+
+  queueTaskUpdate(text:string,applied:()=>void):boolean {
+    if(!this.busy||this.aborted)return false;
+    this.taskUpdates.push({text,applied});return true;
+  }
+  readonly supportsTaskUpdates:boolean = true;
 
   /** After a stop, queued messages are the next request; after a failure, recovery carries them. */
   private drainQueue() {

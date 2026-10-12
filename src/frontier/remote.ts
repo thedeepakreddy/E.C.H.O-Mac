@@ -350,6 +350,7 @@ export function setStatusProvider(fn: StatusProvider) {
  * picked up by someone else while it is still signed in.
  */
 export type RemoteAction =
+  | {type:'control-bot';missionId:string;taskId:string;attempt:number;requestId:string;operation:'update'|'stop'|'revise';text?:string}
   | {type:"run-bot";name:string;goal:string;requestId:string;botRevision:string;parentId?:string;agentIds?:string[]}
   | {type:"stop-bot";missionId:string}
   | { type: "switch-model"; provider: string }
@@ -367,6 +368,7 @@ export function setActionHandler(fn: ActionHandler) {
 /** Validate a phone's action against the allowlist; anything else is null. */
 export function parseRemoteAction(body: any): RemoteAction | null {
   const type = body?.type;
+  if(type==='control-bot'&&typeof body.missionId==='string'&&isBotRunId(body.missionId)&&typeof body.taskId==='string'&&/^[a-zA-Z0-9_.-]{1,64}$/.test(body.taskId)&&Number.isInteger(body.attempt)&&body.attempt>=1&&typeof body.requestId==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId)&&['update','stop','revise'].includes(body.operation)&&(body.operation==='stop'||typeof body.text==='string'&&body.text.trim()&&body.text.length<=4000))return {type,missionId:body.missionId,taskId:body.taskId,attempt:body.attempt,requestId:body.requestId,operation:body.operation,...(body.operation!=='stop'?{text:body.text}:{})};
   if(type==='run-bot' && typeof body.name==='string' && (body.name===TEAM_BOT_ID||/^[a-z][a-z0-9-]{0,23}$/.test(body.name)) && typeof body.goal==='string' && body.goal.trim() && body.goal.length<=4000 && typeof body.requestId==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId) && typeof body.botRevision==='string' && /^[a-f0-9]{24}$/.test(body.botRevision) && (body.parentId===undefined||typeof body.parentId==='string'&&isBotRunId(body.parentId)) && (body.agentIds===undefined||body.name===TEAM_BOT_ID&&Array.isArray(body.agentIds)&&body.agentIds.length>0&&body.agentIds.length<=12&&body.agentIds.every((id:unknown)=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,23}$/.test(id))))return {type,name:body.name,goal:body.goal,requestId:body.requestId,botRevision:body.botRevision,parentId:body.parentId,...(body.agentIds?{agentIds:[...new Set<string>(body.agentIds)]}:{})};
   if(type==='stop-bot' && typeof body.missionId==='string' && isBotRunId(body.missionId))return {type,missionId:body.missionId};
   if (type === "switch-model" && typeof body.provider === "string" && /^[a-z]{2,20}$/.test(body.provider)) {

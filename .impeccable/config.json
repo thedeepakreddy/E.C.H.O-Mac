@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "renderer/control-panel.html"
+        ],
+        "createdAt": "2026-10-12T15:24:44.139Z",
+        "reason": "User confirmed existing Echo layered liquid glass design and luminous lighting; preserve its intentional glow."
+      }
+    ]
+  }
+}

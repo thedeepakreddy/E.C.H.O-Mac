@@ -346,10 +346,18 @@ export class GeminiBrain extends Brain {
 
   /** Take in what was said while this loop was working. True if anything was. */
   private joinQueued(): boolean {
+    const updates=this.takeTaskUpdates();
+    for(const u of updates){this.appendUser([{text:u.text}],false);u.applied();}
     const joined = this.queue.takeForRunningLoop();
     for (const q of joined) this.appendUser(q.parts, q.audio);
-    return joined.length > 0;
+    return joined.length > 0 || updates.length > 0;
   }
+
+  queueTaskUpdate(text:string,applied:()=>void):boolean {
+    if(!this.busy||this.aborted)return false;
+    this.taskUpdates.push({text,applied});return true;
+  }
+  readonly supportsTaskUpdates:boolean = true;
 
   /**
    * Forget the recording once it has been heard.

@@ -263,6 +263,14 @@ export abstract class Brain extends EventEmitter {
    */
   abstract send(userText: string, audio?: AudioTurn, opts?: SendOptions): void;
 
+  /** Task updates are consumed by supported providers at a model-turn boundary. */
+  protected taskUpdates: Array<{text:string;applied:()=>void}> = [];
+  readonly supportsTaskUpdates:boolean = false;
+  queueTaskUpdate(_text:string,_applied:()=>void):boolean { return false; }
+  protected takeTaskUpdates(): Array<{text:string;applied:()=>void}> {
+    return this.taskUpdates.splice(0);
+  }
+
   /**
    * Whether this brain listens to the turn itself rather than only its text.
    *

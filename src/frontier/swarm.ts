@@ -73,6 +73,10 @@ export interface MissionSpec {
 export type MissionTaskStatus = "pending" | "working" | TaskResultStatus;
 
 export interface MissionTaskState extends AgentTaskSpec {
+  attempt?:number;
+  updates?:Array<{id:string;operation:string;text:string;attempt:number;status:'queued'|'applied'|'not-applied';createdAt:number;appliedAt?:number}>;
+  previousAttempts?:Array<{attempt:number;goal:string;result?:TaskResult}>;
+  activity?:{kind:string;text:string;at:number};
   lane: AgentTaskLane;
   budget: AgentTaskBudget;
   status: MissionTaskStatus;
@@ -113,7 +117,9 @@ export interface SwarmClone {
 
 /** The slice of a brain a clone needs. Structural, so a fake satisfies it in tests. */
 export interface CloneBrain {
-  on(event: "text" | "turnEnd" | "error", cb: (arg?: any) => void): unknown;
+  readonly supportsTaskUpdates?:boolean;
+  queueTaskUpdate?(text:string,applied:()=>void):boolean;
+  on(event: "text" | "turnEnd" | "error" | "tool", cb: (arg?: any) => void): unknown;
   send(text: string, audio?: unknown, opts?: Record<string, unknown>): void;
   interrupt?(): void;
   stop?(): Promise<void>;
@@ -453,11 +459,52 @@ export class SwarmManager {
     return true;
   }
 
+  taskControlSupported(missionId:string,taskId:string):boolean {
+    const task=this.missions.get(missionId)?.tasks[taskId];
+    return task?.status==='pending'||!!(task?.actorId&&this.brains.get(task.actorId)?.supportsTaskUpdates);
+  }
+
+  /** Exact task and attempt routing; profile names never select a brain. */
+  controlMissionTask(input:{missionId:string;taskId:string;attempt:number;requestId:string;operation:'update'|'stop'|'revise';text?:string}):{ok:boolean;message:string;command?:unknown} {
+    const m=this.missions.get(input.missionId),deps=this.missionDeps.get(input.missionId),task=m?.tasks[input.taskId];
+    if(!m||!task||!deps)return {ok:false,message:'This task is no longer connected. Refresh before controlling it.'};
+    const text=input.text?.trim()??'',commands=task.updates??=[];
+    const old=commands.find(c=>c.id===input.requestId);
+    if(old)return old.operation===input.operation&&old.text===text&&old.attempt===input.attempt?{ok:true,message:old.status==='queued'?'Update queued.':'This command was already accepted.',command:old}:{ok:false,message:'This command ID belongs to another instruction.'};
+    if((task.attempt??1)!==input.attempt)return {ok:false,message:'This agent attempt changed. Refresh before controlling it.'};
+    if(m.status!=='running'||resultStatus(task.status))return {ok:false,message:'This agent already ended. Use Follow up.'};
+    if(commands.length>=40)return {ok:false,message:'This task has reached its update limit.'};
+    const coordinator=deps.coordinator??taskCoordinator,now=deps.now??Date.now;
+    const c={id:input.requestId,operation:input.operation,text,attempt:input.attempt,status:'queued' as 'queued'|'applied'|'not-applied',createdAt:now(),appliedAt:undefined as number|undefined};
+    if(input.operation==='update'){
+      if(!text)return {ok:false,message:'Enter an update for this agent.'};
+      const applied=()=>{if(m.tasks[input.taskId]!==task||task.status!=='working'){c.status='not-applied';return;}c.status='applied';c.appliedAt=now();m.updatedAt=now();this.persistMission(m,coordinator);};
+      if(task.status==='pending'){task.acceptanceCriteria=[...(task.acceptanceCriteria??[]),`User update: ${text}`];}
+      else if(!task.actorId||!this.brains.get(task.actorId)?.queueTaskUpdate?.(`User update for this agent task: ${text}`,applied))return {ok:false,message:'This provider cannot accept a live update. Use Interrupt & revise.'};
+      commands.push(c);m.updatedAt=now();this.persistMission(m,coordinator);
+      return {ok:true,message:'Update queued for the next agent turn.',command:c};
+    }
+    if(input.operation==='stop'){
+      commands.push(c);this.cancelMissionTask(m.id,task.id);c.status='applied';this.persistMission(m,coordinator);
+      return {ok:true,message:'Agent stopped. An action already in progress may finish. Dependent reports are blocked.',command:c};
+    }
+    if(!text)return {ok:false,message:'Enter revised instructions.'};
+    const descendants=new Set<string>();let changed=true;
+    while(changed){changed=false;for(const t of Object.values(m.tasks))if(!descendants.has(t.id)&&(t.dependsOn??[]).some(id=>id===task.id||descendants.has(id))){descendants.add(t.id);changed=true;}}
+    if([...descendants].some(id=>m.tasks[id].status!=='pending'))return {ok:false,message:'Another agent already consumed this report. Stop the team and follow up to revise the affected reports together.'};
+    commands.push(c);this.cancelOneTask(task,coordinator,'Interrupted for revised instructions');
+    const previous={attempt:task.attempt??1,goal:task.goal,result:task.result};
+    const replacement:MissionTaskState={...task,goal:`${task.goal}\n\nRevised instruction: ${text}`,attempt:input.attempt+1,status:'pending',taskId:undefined,actorId:undefined,actorName:undefined,startedAt:undefined,result:undefined,activity:undefined,recoveryAttempts:0,updates:commands,previousAttempts:[...(task.previousAttempts??[]),previous]};
+    m.tasks[task.id]=replacement;c.status='applied';m.updatedAt=now();this.persistMission(m,coordinator);this.scheduleAll();
+    return {ok:true,message:'Revised agent attempt started. Dependent reports wait for its result.',command:c};
+  }
+
   /** The cleanup one Agent Task needs when it is cut short — shared by both cancel paths above. */
   private cancelOneTask(task: MissionTaskState, coordinator: TaskCoordinator, summary: string): void {
     if (resultStatus(task.status)) return;
     if (task.taskId && coordinator.get(task.taskId)?.status !== "cancelled") coordinator.cancel(task.taskId);
     task.status = "cancelled";
+    for(const c of task.updates??[])if(c.status==='queued')c.status='not-applied';
     task.result = {
       status: "cancelled",
       summary,
@@ -642,8 +689,9 @@ export class SwarmManager {
     const root = loopLogRoot();
     const next = root ? nextCloneNumber(root) : this.counter + 1;
     this.counter = Math.max(this.counter + 1, next);
-    const taskId = `${mission.taskId}.${safePart(task.id, "task")}`;
-    const actorId = `${safePart(mission.id, "mission")}.${safePart(task.id, "task")}`;
+    const suffix=(task.attempt??1)>1?`.attempt-${task.attempt}`:'';
+    const taskId = `${mission.taskId}.${safePart(task.id, "task")}${suffix}`;
+    const actorId = `${safePart(mission.id, "mission")}.${safePart(task.id, "task")}${suffix}`;
     // Names are presentation only. Brain ownership and routing use actorId.
     const fleetMember = task.profile ? getFleetMember(task.profile) : null;
     const actorName = fleetMember?.name || task.profile?.trim() || `Echo Agent ${this.counter}`;
@@ -667,6 +715,7 @@ export class SwarmManager {
       coordinator.submitResult(taskId, actorId, {status: "failed", summary: String(error instanceof Error ? error.message : error), artifacts: [], verificationRefs: [], blockers: ["agent:initialization"]});
       task.result = coordinator.get(taskId)?.result;
       task.status = "failed";
+      for(const c of task.updates??[])if(c.status==='queued')c.status='not-applied';
       this.persistMission(mission, coordinator);
       this.broadcast(deps);
       return;
@@ -678,6 +727,8 @@ export class SwarmManager {
       brain.send(this.missionPrompt(mission, task, actorName), undefined, {
         taskId, parentTaskId: mission.taskId, scope: mission.scope, modality: "text",
       });
+      for(const c of task.updates??[])if(c.status==='queued'){c.status='applied';c.appliedAt=now();}
+      this.persistMission(mission,coordinator);
     } catch (error) {
       this.taskErrors.set(taskId, String(error instanceof Error ? error.message : error));
       this.finishMissionTask(mission.id, task.id);
@@ -712,15 +763,23 @@ export class SwarmManager {
     });
     this.brains.set(actorId, brain);
     brain.on("text", (text) => {
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
       const clone = this.clones.get(actorId);
       if (clone && text) clone.progress = String(text).slice(0, 200);
       console.log(`[${actorName}] ${text ?? ""}`);
       this.broadcast(deps);
     });
     brain.on("error", (error) => {
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
       this.taskErrors.set(taskId, String(error ?? "Agent failed"));
     });
-    brain.on("turnEnd", () => this.finishMissionTask(mission.id, task.id));
+    brain.on("turnEnd", () => {if(mission.tasks[task.id]?.actorId===actorId)this.finishMissionTask(mission.id, task.id);});
+    brain.on('tool',(value:{name:string;summary:string})=>{
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      const name=String(value?.name??'tool').slice(0,120);
+      task.activity={kind:'tool',text:`Using · ${name}`,at:(deps.now??Date.now)()};
+      mission.updatedAt=(deps.now??Date.now)();this.persistMission(mission,deps.coordinator??taskCoordinator);
+    });
     const elapsed = Math.max(0, (deps.now ?? Date.now)() - task.startedAt);
     const remaining = Math.max(1, task.budget.timeoutMs - elapsed);
     const timer = setTimeout(() => this.timeoutMissionTask(mission.id, task.id), remaining);
@@ -745,6 +804,7 @@ export class SwarmManager {
       `Execution lane: ${task.lane}\n` +
       `Acceptance criteria:\n${criteria}\n\n` +
       `Dependency Results:\n${JSON.stringify(dependencies, null, 2)}\n\n` +
+      (task.previousAttempts?.length?`Previous interrupted attempts (context only; do not replay external effects):\n${JSON.stringify(task.previousAttempts).slice(0,12000)}\n\n`:'')+
       `Budget: ${task.budget.maxIterations} model iterations, ${task.budget.maxRecoveryAttempts} recovery attempts, ` +
       `${task.budget.timeoutMs}ms wall time. A normal text reply or turnEnd is NOT completion. ` +
       `Do not create another Mission or spawn another agent; this Agent Task is your complete scope.`;
@@ -769,6 +829,7 @@ export class SwarmManager {
     const result = coordinator.get(task.taskId)?.result!;
     task.result = result;
     task.status = result.status;
+    for(const c of task.updates??[])if(c.status==='queued')c.status='not-applied';
     mission.updatedAt = (deps.now ?? Date.now)();
     this.cleanupMissionTask(task);
     this.persistMission(mission, coordinator);
