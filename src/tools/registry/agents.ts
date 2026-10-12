@@ -278,10 +278,10 @@ export const AGENT_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (a) => {
-      const { loadConfig } = await import("../../config.js");
+      const { activeConfig } = await import("../../config.js");
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { swarm } = await import("../../frontier/swarm.js");
-      const cfg = loadConfig(appRoot());
+      const cfg = activeConfig(appRoot());
       const goal = `${a.taskDescription}\nRequested worker label: ${a.agentName}`;
       const result = swarm.spawn(goal, {
         makeBrain: makeFleetBrain(cfg),
@@ -312,10 +312,10 @@ export const AGENT_TOOLS: ToolDef[] = [
     schema: { goals: z.array(z.string()).describe("A list of detailed instructions, one for each sub-agent you wish to spawn.") },
     readOnly: false,
     handler: async (a) => {
-      const { loadConfig } = await import("../../config.js");
+      const { activeConfig } = await import("../../config.js");
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { swarm } = await import("../../frontier/swarm.js");
-      const cfg = loadConfig(appRoot());
+      const cfg = activeConfig(appRoot());
 
       const goals = (Array.isArray(a.goals) ? a.goals : [a.goals]).filter(Boolean);
       let spawned = 0;
@@ -346,7 +346,7 @@ export const AGENT_TOOLS: ToolDef[] = [
         dependsOn: z.array(z.string()).default([]),
         lane: z.enum(["knowledge", "gui"]).default("knowledge"),
         acceptanceCriteria: z.array(z.string()).default([]),
-        profile: z.string().optional().describe("A fleet agent id — lead, research, plan, write, review, analyse, or one of the user's own agents. It sets that agent's brief, model tier and tool limits; any other text is only a display name."),
+        profile: z.string().optional().describe("A fleet agent id — lead, research, plan, write, review, analyse, or one of the user's own agents. It sets that agent's brief and tool limits. Every agent uses Echo's active brain and model; any other text is only a display name."),
         timeoutMs: z.number().int().min(1_000).max(3_600_000).default(600_000),
         maxIterations: z.number().int().min(1).max(200).default(50),
         maxRecoveryAttempts: z.number().int().min(0).max(5).default(2),
@@ -354,10 +354,10 @@ export const AGENT_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (args) => {
-      const { loadConfig } = await import("../../config.js");
+      const { activeConfig } = await import("../../config.js");
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { swarm } = await import("../../frontier/swarm.js");
-      const cfg = loadConfig(appRoot());
+      const cfg = activeConfig(appRoot());
       const result = swarm.submitMission({
         goal: args.goal,
         scope: { ...(await memoryScope()) },
@@ -474,9 +474,8 @@ export const AGENT_TOOLS: ToolDef[] = [
       const g = global as any;
       if (!g.__activeCrons) g.__activeCrons = new Map<number, NodeJS.Timeout>();
       
-      const { createBrain } = await import("../../brain/index.js");
-      const { loadConfig } = await import("../../config.js");
-      const cfg = loadConfig(appRoot());
+      const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
+      const { activeConfig } = await import("../../config.js");
 
       const cronId = Date.now();
       const intervalMs = Math.max(1000, a.intervalSeconds * 1000);
@@ -487,8 +486,12 @@ export const AGENT_TOOLS: ToolDef[] = [
           name: `Echo Scheduled ${cronId}`,
           kind: "scheduled" as const,
         };
-        const { brain: subBrain } = createBrain(cfg, { identity });
-        subBrain.send(`[SYSTEM: CRON TRIGGER] Your recurring task is: ${a.goal}. When finished, remember to save results.`);
+        try {
+          const subBrain = makeFleetBrain(activeConfig(appRoot()))(identity);
+          subBrain.send(`[SYSTEM: CRON TRIGGER] Your recurring task is: ${a.goal}. When finished, remember to save results.`);
+        } catch(error) {
+          console.error('[scheduler] Agent could not start on Echo’s active brain:', error instanceof Error ? error.message : 'Brain unavailable.');
+        }
       }, intervalMs);
       
       g.__activeCrons.set(cronId, timer);

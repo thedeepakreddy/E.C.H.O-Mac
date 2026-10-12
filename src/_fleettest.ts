@@ -90,21 +90,35 @@ ok(listFleet().filter((m) => m.custom).length === MAX_CUSTOM - 1, "the count dro
 // persona but ran on the default brain with every tool, write tools included.
 const { makeFleetBrain } = await import("./frontier/fleet-brain.js");
 addFleetMember({ id: "reader", name: "Reader", description: "", brief: "b", tier: "fast", tools: [grantable[0]] });
-const built: Array<{ brain: string; allowed?: ReadonlySet<string> }> = [];
+const built: Array<{ brain: string; allowed?: ReadonlySet<string>; fallback?: boolean; config: any }> = [];
 const fakeCreate = ((cfg: any, opts: any) => {
-  built.push({ brain: cfg.brain, allowed: opts?.limits?.allowedTools });
+  built.push({ brain: cfg.brain, allowed: opts?.limits?.allowedTools, fallback: opts?.allowProviderFallback, config: cfg });
   return { brain: {}, provider: cfg.brain };
 }) as any;
 const make = makeFleetBrain({ brain: "gemini" } as any, fakeCreate);
 const budget = { timeoutMs: 1000, maxIterations: 5, maxRecoveryAttempts: 0 };
 const identity = { id: "t", name: "T", kind: "clone" } as any;
 make(identity, { profile: "reader", budget } as any);
-ok(built[0].brain === "ollama", `a fast-tier custom agent runs on ollama (got ${built[0].brain})`);
+ok(built[0].brain === "gemini", `a fast-tier custom agent follows Echo's brain (got ${built[0].brain})`);
 ok(!!built[0].allowed && built[0].allowed.size === 2 && built[0].allowed.has(grantable[0]) && built[0].allowed.has('submit_agent_result'), "its grants include only the requested read plus actor-owned Result submission");
 make(identity, { profile: "review", budget } as any);
-ok(built[1].brain === "claude" && built[1].allowed === undefined, "a deep-tier built-in runs on claude with no tool limit");
+ok(built[1].brain === "gemini" && built[1].allowed === undefined, "a deep-tier built-in follows Echo's brain with no tool limit");
 make(identity, { budget } as any);
 ok(built[2].brain === "gemini" && built[2].allowed === undefined, "a task with no profile keeps the default brain and every tool");
+const activeConfig:any={brain:'gemini',gemini:{model:'first'},claude:{model:'claude-choice'},openai:{model:'openai-choice'},openrouter:{model:'router-choice'},nvidia:{model:'nvidia-choice'},ollama:{model:'local-choice'}};
+const liveFactory=makeFleetBrain(activeConfig,fakeCreate);
+for(const provider of ['gemini','claude','openai','openrouter','nvidia','ollama']){
+ activeConfig.brain=provider;
+ for(const profile of ['research','plan','write','review','analyse','lead','reader']){
+  liveFactory(identity,{profile,budget} as any);const last=built.at(-1)!;
+  ok(last.brain===provider,`${profile} follows active ${provider}`);
+  ok(last.config[provider].model===activeConfig[provider].model,`${profile} preserves ${provider}'s selected model`);
+  ok(last.fallback===false,`${profile} cannot silently fall back to a different provider`);
+ }
+}
+activeConfig.brain='gemini';liveFactory(identity,{profile:'research',budget} as any);const oldConfig=built.at(-1)!.config;activeConfig.gemini.model='second';activeConfig.brain='openai';
+ok(oldConfig.brain==='gemini'&&oldConfig.gemini.model==='first','a running agent configuration is isolated from subsequent brain/model switches');
+liveFactory(identity,{profile:'review',budget} as any);ok(built.at(-1)!.brain==='openai','a later queued specialist uses Echo’s newly active brain');
 removeFleetMember("reader");
 
 _resetForTests();

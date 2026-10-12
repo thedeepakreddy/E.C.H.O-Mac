@@ -20,9 +20,9 @@ export { LOOP_CAPS } from "./types.js";
 export type CreateBrainOptions = Pick<
   RecordingBrainOptions,
   "identity" | "autoResume" | "maxRecoveryAttempts" | "recoveryDelayMs"
-> & { limits?: BrainExecutionLimits };
+> & { limits?: BrainExecutionLimits; allowProviderFallback?: boolean };
 
-/** Build the brain named in config, falling back to Claude if a key is missing. */
+/** Build the configured brain. Agent launches opt out of legacy Claude fallback. */
 export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {}): { brain: Brain; provider: Provider } {
   setCliclickBin(cfg.control.cliclickBin);
 
@@ -41,7 +41,7 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
   let selected: Brain;
   let provider: Provider;
   if (requestedProvider === "gemini") {
-    const key = process.env[cfg.gemini.apiKeyEnv];
+    const key = process.env[cfg.gemini.apiKeyEnv]?.trim();
     if (key || replayDir) {
       // The client constructor requires a key-shaped value, but `recordLLM`
       // returns before the SDK sends a request during replay.
@@ -52,6 +52,7 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
         provider,
       };
     }
+    if(options.allowProviderFallback===false)throw new Error(`Echo's Gemini brain is unavailable: ${cfg.gemini.apiKeyEnv} isn't set. Reconnect it or switch Echo's brain before starting this agent.`);
     console.warn(
       `[brain] config selects gemini but ${cfg.gemini.apiKeyEnv} is not set — falling back to Claude.`
     );
@@ -70,6 +71,7 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
         provider,
       };
     }
+    if(options.allowProviderFallback===false)throw new Error(`Echo's OpenAI brain can't run (${openAIUnavailableReason(cfg)}). Reconnect it or switch Echo's brain before starting this agent.`);
     console.warn(
       `[brain] config selects openai but it can't run (${openAIUnavailableReason(cfg)}) — falling back to Claude.`
     );
@@ -104,6 +106,7 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
         provider,
       };
     }
+    if(options.allowProviderFallback===false)throw new Error(`Echo's OpenRouter brain is unavailable: ${cfg.openrouter?.apiKeyEnv ?? "OPENROUTER_API_KEY"} isn't set. Reconnect it or switch Echo's brain before starting this agent.`);
     console.warn(
       `[brain] config selects openrouter but ${cfg.openrouter?.apiKeyEnv ?? "OPENROUTER_API_KEY"} is not set — falling back to Claude.`
     );

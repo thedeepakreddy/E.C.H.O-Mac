@@ -27,14 +27,8 @@ import { atomicWrite, dataRoot } from "../memory/paths.js";
 
 export type Tier = "fast" | "balanced" | "deep";
 
-/** Which brain a tier actually runs on. Echo's own multi-provider answer to
- *  Aira's priced model tiers: free-and-local, the user's own default, or the
- *  strongest reasoner — a real axis here, not a billing category. */
-export const TIER_PROVIDER: Record<Tier, "ollama" | null | "claude"> = {
-  fast: "ollama",
-  balanced: null, // null = whatever the user has as their default brain right now
-  deep: "claude",
-};
+// Legacy tiers remain readable in saved rosters. They do not select providers:
+// all specialists use Echo's active brain through fleet-brain.ts.
 
 export interface FleetMember {
   id: string;
