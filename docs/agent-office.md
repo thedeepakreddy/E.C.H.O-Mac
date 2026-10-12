@@ -12,6 +12,16 @@ The Bots page and the Agents → Agent office link open one workspace backed by 
 
 ## Commands
 
+### Background execution boundary (local increment)
+
+Mac standing specialists, including the internal report compiler and custom agents, now receive an explicit reviewed background-read capability set. Public research uses the isolated hidden browser, never the signed-in foreground browser. They can inspect permitted saved data/projects and produce reports, but cannot use mouse/keyboard tools, current-screen observers, arbitrary commands, skills/workflow execution, external MCP tools or visible application/preview controls. A tool being labeled read-only is not sufficient to grant it. The shared execution gate enforces these grants, including nested dispatch and provider-native tool attempts; this is not just a prompt restriction. Office tasks use the knowledge lane regardless of words such as website, app or click in the goal. Office narration no longer updates Echo’s foreground HUD. Echo’s non-fleet supervised worker/inspector keeps its existing authority.
+
+Desktop or external-write requirements must be reported as blocked remaining steps for Echo to review. Automatic delegation to Echo and automatic spoken delivery are not implemented by this increment. Changed capability policy invalidates stale assignment/retry revisions rather than silently widening saved task grants. Existing running workers need to be stopped and Echo restarted to receive the new capability set.
+
+LCU remains intended only for Echo’s foreground computer-control path, not these specialists. Echo has not switched controllers. LCU 0.11.2 was checksum-verified and prepared under an isolated temporary prefix without registering an agent or changing Codex settings. Original MCP initialization, JavaScript execution, native application inventory and the matching turn cleanup passed against installed app 26.1002.52244 / CUA 0.0.29. All permission requests were cancelled; no app was selected and no clicks, typing or screenshots were performed. Desktop-action approval and effect verification still require testing before cutover.
+
+The [documented macOS socket-path limit](https://github.com/amontlabs/lcu/blob/main/docs/INSTALLATION.md#macos) is 103 bytes; this account’s default helper path is 104 bytes. Contrary to the documented warning, the existing socket accepted a connection and the LCU inventory probe succeeded on this installed runtime. Treat that as a compatibility warning, not a reproduced startup failure; cold-start resilience is still unverified. No account/home change, helper modification or permission bypass was performed. Background boundary verification: 121/121 Mac offline checks and production build passed; the pre-existing duplicate researchtest warning remains unrelated.
+
 | Control | Runtime behavior |
 | --- | --- |
 | Send update | Queued for the exact run/task/attempt. Applied is acknowledged only when the provider consumes it at a safe turn boundary. |

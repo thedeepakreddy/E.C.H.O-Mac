@@ -7,8 +7,9 @@ import {PROVENANCE_GUIDANCE} from '../vendor/openbot/bot-prompt.js';
 export const TEAM_BOT_ID = 'echo:team'; // Cannot collide with a saved fleet id.
 export const DEFAULT_TEAM = ['research','plan','review'];
 const hash = (value:unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const botRevision = (b:FleetMember) => hash(b).slice(0,24);
-export const teamRevision = () => hash(listFleet().sort((a,b)=>a.id.localeCompare(b.id))).slice(0,24);
+const OFFICE_POLICY = 'background-reads-v1';
+export const botRevision = (b:FleetMember) => hash({policy:OFFICE_POLICY,member:b}).slice(0,24);
+export const teamRevision = () => hash({policy:OFFICE_POLICY,members:listFleet().sort((a,b)=>a.id.localeCompare(b.id))}).slice(0,24);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const LEGACY_RUN = /^(?:board-\d{10,16}|solo-[a-z][a-z0-9-]{0,23}-\d{10,16})$/;
 export const isBotRunId = (id:string) => /^bot-[a-f0-9-]{36}$/.test(id) || LEGACY_RUN.test(id);
@@ -25,7 +26,7 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
  function revision(name:string) {return name===TEAM_BOT_ID?teamRevision():getFleetMember(name)?botRevision(getFleetMember(name)!):'';}
  function list() {
   const fleet=listFleet();
-  const bots=fleet.filter(b=>b.id!=='lead').map(b=>({id:b.id,name:b.name,role:b.brief,description:b.description,revision:botRevision(b),custom:b.custom,mode:b.custom?'read tools':'native tools',team:false,defaultAgentIds:[] as string[]}));
+  const bots=fleet.filter(b=>b.id!=='lead').map(b=>({id:b.id,name:b.name,role:b.brief,description:b.description,revision:botRevision(b),custom:b.custom,mode:'background · read tools',team:false,defaultAgentIds:[] as string[]}));
   bots.push({id:TEAM_BOT_ID,name:'Team of specialists',role:'Selected specialists prepare reports. Lead combines them after they finish.',description:'Several perspectives and one combined report; reading tools only.',revision:teamRevision(),custom:false,mode:'team · read tools',team:true,defaultAgentIds:[...DEFAULT_TEAM]});
   const jobs=host.listMissions().filter(own).slice(0,12).map(m=>{
    const ids=profileIds(m),team=m.scope.botId===TEAM_BOT_ID||ids.length>1;
@@ -66,7 +67,7 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
   const history=toProviderMessages({guidance:PROVENANCE_GUIDANCE,messages:parent?[{role:'user',content:parent.goal},{role:'assistant',content:JSON.stringify({status:parent.status,result:parent.result,steps:Object.values(parent.tasks).map(t=>t.result??{status:t.status})}).slice(0,16000)}]:[]});
   const tasks:AgentTaskSpec[]=taskIds.map(profile=>{
    const candidates=profile==='lead'?ids:profile==='review'?ids.filter(p=>p!=='review'):profile==='write'?ids.filter(p=>['research','analyse','plan'].includes(p)):profile==='plan'?ids.filter(p=>['research','analyse'].includes(p)):[];
-   return {id:profile,goal,profile,runtime:'openbot',botRevision:botRevision(getFleetMember(profile)!),readOnly:team,dependsOn:team?candidates:[],lane:!team&&/\b(browser|screen|click|website|app|desktop)\b/i.test(goal)?'gui':'knowledge',acceptanceCriteria:[team?'Use reading tools to prepare your role’s report. Do not perform external changes. Cite evidence and report blockers. For current research use search_research and read_browser_page under your grants, cite actual retrieved sources and name specific access gaps. Use readable Markdown; retain source/author/license credits for relevant pictures from image_search.':'Deliver the requested work with evidence. For current research use search_research and read_browser_page under your grants; cite retrieved sources, not guessed trends. Use readable Markdown and, when helpful for public research, image_search with credited relevant illustrations. Report remaining blockers; prepared actions are not executed actions.'],budget:{timeoutMs:team?Math.floor(10*60_000/taskIds.length):10*60_000,maxIterations:40,maxRecoveryAttempts:2}};
+   return {id:profile,goal,profile,runtime:'openbot',botRevision:botRevision(getFleetMember(profile)!),readOnly:true,dependsOn:team?candidates:[],lane:'knowledge',acceptanceCriteria:[team?'Use reading tools to prepare your role’s report. Do not perform external changes. Cite evidence and report blockers. For current research use search_research and read_browser_page under your grants, cite actual retrieved sources and name specific access gaps. Use readable Markdown; retain source/author/license credits for relevant pictures from image_search.':'Deliver the requested background report with evidence. Use only granted reads; desktop actions and external writes must be reported as remaining blocked steps for Echo, never performed or claimed complete. For current research use search_research and read_browser_page under your grants; cite retrieved sources, not guessed trends. Use readable Markdown and, when helpful for public research, image_search with credited relevant illustrations.'],budget:{timeoutMs:team?Math.floor(10*60_000/taskIds.length):10*60_000,maxIterations:40,maxRecoveryAttempts:2}};
   });
   const submitted=host.submitMission({id,goal,scope:{...currentScope,echoBot:true,echoTeam:team,botId:b.name,botName:team?'Team of specialists':getFleetMember(b.name)!.name,botRevision:b.botRevision,botRequestHash:requestHash,botParentId:b.parentId??null,botContext:history},tasks},deps());
   return submitted.ok?{ok:true,message:team?'Team task started. Specialists report first; Lead combines the results.':`${getFleetMember(b.name)!.name} started.`,data:{missionId:submitted.missionId,repeated:false}}:{ok:false,message:submitted.reason??'The task could not start.'};

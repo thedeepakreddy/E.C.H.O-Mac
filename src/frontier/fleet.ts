@@ -15,11 +15,10 @@ import { atomicWrite, dataRoot } from "../memory/paths.js";
  * Two things carried over deliberately from Aira's own design, because they
  * are the reason its editor is trustworthy rather than merely convenient:
  *
- *   The tool list a custom agent may hold comes from the registry's own
- *   `readOnly` flag, never a second hand-maintained list here that could drift
- *   and offer something the brain-construction boundary (brain/types.ts's
+ *   Custom grants must be both registry-declared read-only and reviewed as
+ *   background-safe. The brain-construction boundary (brain/types.ts's
  *   `allowedTools`, enforced by the shared execution gate and by Claude's
- *   canUseTool hook for SDK-native tools) would then refuse.
+ *   canUseTool hook for SDK-native tools) is the hard execution limit.
  *
  *   A built-in agent cannot be edited or removed, so a mistake in the roster
  *   can never leave the fleet without a working member.
@@ -37,7 +36,7 @@ export interface FleetMember {
   /** Standing instructions — this agent's persona, sent with every task it runs. */
   brief: string;
   tier: Tier;
-  /** Tool names this agent may use. Built-ins ignore this (see allowedToolsFor). */
+  /** Custom grants are intersected with the reviewed background capability set. */
   tools: string[];
   /** False for the six that ship with Echo; they cannot be edited or removed. */
   custom: boolean;
@@ -55,22 +54,34 @@ const FILE = () => join(dir(), "fleet.json");
 /** At most this many of the user's own agents, matching Aira's bounded roster. */
 export const MAX_CUSTOM = 6;
 
-/**
- * Every read-only tool in the registry, computed fresh rather than hand-kept —
- * the actual security boundary lives in classify()/readOnly, and a second copy
- * here would only ever be able to disagree with it, never correct it.
- */
+// Positive capability list: a read-only flag alone says nothing about desktop
+// access, visible windows, plugin execution or arbitrary subprocesses. New
+// tools require review before an office specialist can discover or invoke them.
+const BACKGROUND_READS = new Set([
+  'search_research', 'image_search', 'read_browser_page', 'web_search',
+  'morning_brief', 'read_research_brief', 'list_research_queue',
+  'conversation_history', 'recall', 'memory_status', 'inspect_memory', 'tool_memory',
+  'search_my_files', 'file_index_status', 'search_long_term_memory', 'recall_scan',
+  'read_local_file', 'read_changelog',
+  'inspect_project', 'inspect_project_recovery', 'inspect_project_diagnostics',
+  'inspect_project_recipe', 'search_project', 'read_project_file', 'project_diff',
+  'read_process', 'project_git_status',
+  'list_skills', 'list_workflows', 'preview_workflow', 'find_routines',
+  'inspect_task', 'read_tool_result', 'inspect_agent_mission', 'check_agents',
+]);
+
+export const BACKGROUND_AGENT_GUIDANCE = 'You are a background office specialist, not Echo’s desktop controller. Use only your granted background reads and produce your written deliverable. Never move the cursor, type into applications, capture the current screen, open visible windows, run commands, invoke plugins or change Echo’s settings. Public pages are read through the isolated hidden browser, not the user’s signed-in browser. If completing the goal requires a desktop or external write action, submit a blocked result naming the exact remaining step and evidence for Echo to review; do not claim the action happened or start another worker. There is no automatic desktop handoff in this version.';
+
+/** Reviewed background reads; execution still passes the shared risk gate. */
 export function grantableTools(): string[] {
-  return TOOLS.filter((t) => t.readOnly).map((t) => t.name);
+  return TOOLS.filter((t) => t.readOnly && BACKGROUND_READS.has(t.name)).map((t) => t.name);
 }
 
 /**
  * Six specialists, matching Aira's own cast and colour role so the ported
  * canvas UI has somewhere real to point its Lead/Research/Plan/Write/Review/
- * Analyse icons. Built-in agents are NOT tool-restricted — the fleet's tool
- * allowlist exists to bound what a USER can grant a new agent, not to limit
- * what Echo's own shipped specialists can do; they already go through the
- * same risk gate as every other tool call.
+ * Analyse icons. Every standing specialist is background-only. Echo owns
+ * foreground control; the main/supervised Echo worker is not a fleet profile.
  */
 const BUILT_IN: FleetMember[] = [
   {
@@ -87,7 +98,7 @@ const BUILT_IN: FleetMember[] = [
     id: "research", name: "Research", tier: "balanced", custom: false, tools: [],
     description: "Gathers facts, context, and prior art before anything is written.",
     brief:
-      "You are Research. Find and verify the facts the task needs — search memory, the screen, the web, " +
+      "You are Research. Find and verify the facts the task needs — search granted memory and the public web, " +
       "and any tool that can confirm rather than guess. Report what you found, where it came from, and how " +
       "confident you are. Flag anything you could not verify instead of stating it as fact.",
   },
@@ -196,11 +207,11 @@ export function removeFleetMember(id: string): void {
 
 /**
  * What a spawned brain for this agent may use, for `BrainExecutionLimits.allowedTools`.
- * `null` for a built-in agent means no restriction at all.
+ * Built-ins get the reviewed background reads; custom members get a subset.
  */
-export function allowedToolsFor(member: FleetMember): Set<string> | null {
-  if (!member.custom && BUILT_IN.some(builtin => builtin.id === member.id)) return null;
+export function allowedToolsFor(member: FleetMember): Set<string> {
   const grantable = new Set(grantableTools());
+  if (!member.custom && BUILT_IN.some(builtin => builtin.id === member.id)) return grantable;
   return new Set(member.tools.filter((t) => grantable.has(t)));
 }
 

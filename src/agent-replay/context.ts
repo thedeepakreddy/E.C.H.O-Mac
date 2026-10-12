@@ -7,6 +7,8 @@ export interface AgentIdentity {
   id: string;
   name: string;
   kind: "main" | "clone" | "scheduled" | "research" | "rehearsal";
+  /** Host-set office identity; progress stays in its inspector, not Echo's HUD. */
+  background?: boolean;
   parentTaskId?: string;
 }
 

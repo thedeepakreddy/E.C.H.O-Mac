@@ -28,7 +28,7 @@ const builtIns = listFleet();
 ok(builtIns.length === 6, `six built-in agents (got ${builtIns.length})`);
 ok(builtIns.every((m) => !m.custom), "every built-in is marked non-custom");
 ok(["lead", "research", "plan", "write", "review", "analyse"].every((id) => builtIns.some((m) => m.id === id)), "the expected six ids are present");
-ok(allowedToolsFor(builtIns[0]) === null, "a built-in agent has no tool restriction at all");
+ok(allowedToolsFor(builtIns[0]).has('web_search') && !allowedToolsFor(builtIns[0]).has('click'), "a built-in agent has background research grants, never desktop input");
 
 // ---- adding a custom agent -----------------------------------------------------
 const grantable = grantableTools();
@@ -102,7 +102,7 @@ make(identity, { profile: "reader", budget } as any);
 ok(built[0].brain === "gemini", `a fast-tier custom agent follows Echo's brain (got ${built[0].brain})`);
 ok(!!built[0].allowed && built[0].allowed.size === 2 && built[0].allowed.has(grantable[0]) && built[0].allowed.has('submit_agent_result'), "its grants include only the requested read plus actor-owned Result submission");
 make(identity, { profile: "review", budget } as any);
-ok(built[1].brain === "gemini" && built[1].allowed === undefined, "a deep-tier built-in follows Echo's brain with no tool limit");
+ok(built[1].brain === "gemini" && !!built[1].allowed?.has('web_search') && !built[1].allowed?.has('click'), "a deep-tier built-in follows Echo's brain with background-only grants");
 make(identity, { budget } as any);
 ok(built[2].brain === "gemini" && built[2].allowed === undefined, "a task with no profile keeps the default brain and every tool");
 const activeConfig:any={brain:'gemini',gemini:{model:'first'},claude:{model:'claude-choice'},openai:{model:'openai-choice'},openrouter:{model:'router-choice'},nvidia:{model:'nvidia-choice'},ollama:{model:'local-choice'}};

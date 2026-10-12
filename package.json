@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
+    "officebackgroundtest": "esbuild src/_officebackgroundtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_officebackgroundtest.js --log-level=error && ECHO_MCP=0 node dist/_officebackgroundtest.js",
     "agentretrytest": "esbuild src/_agentretrytest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_agentretrytest.js --log-level=error && ECHO_MCP=0 node dist/_agentretrytest.js",
     "agentbrainroutingtest": "esbuild src/_agentbrainroutingtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_agentbrainroutingtest.js --log-level=error && ECHO_MCP=0 node dist/_agentbrainroutingtest.js",
     "office-navigationtest": "node scripts/agent-office-navigation-test.mjs",

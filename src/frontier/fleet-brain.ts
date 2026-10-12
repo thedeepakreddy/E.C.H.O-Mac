@@ -2,7 +2,8 @@ import {botRevision} from "./bots.js";
 import { createBrain } from "../brain/index.js";
 import type { JarvisConfig } from "../config.js";
 import type { SwarmDeps } from "./swarm.js";
-import { allowedToolsFor, grantableTools, getFleetMember } from "./fleet.js";
+import { allowedToolsFor, getFleetMember } from "./fleet.js";
+import {TOOLS} from '../tools/registry.js';
 
 /** The project detected for the current turn; main.ts refreshes it, every brain built here reads it. */
 export const brainProjectHint: { value?: string } = {};
@@ -20,9 +21,9 @@ export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDe
     if (task?.profile && !member) throw new Error(`Unknown agent profile "${task.profile}". Select an existing fleet member.`);
     if(member && task?.runtime === "openbot" && task.botRevision !== botRevision(member))throw new Error("This bot changed after its task was queued. Refresh and start a new run.");
     const profileGrants = member ? allowedToolsFor(member) : null;
-    const allowed = task?.readOnly ? new Set(grantableTools().filter(tool=>profileGrants===null||profileGrants.has(tool))) : profileGrants;
+    const allowed = task?.readOnly ? new Set(TOOLS.filter(tool=>tool.readOnly&&(profileGrants===null||profileGrants.has(tool.name))).map(tool=>tool.name)) : profileGrants;
     const clone = create(structuredClone(cfg), {
-      identity,
+      identity: member ? {...identity, background:true} : identity,
       allowProviderFallback: false,
       maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
       // Result submission is an actor-owned lifecycle operation, not a user
