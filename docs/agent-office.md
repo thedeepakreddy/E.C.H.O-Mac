@@ -28,6 +28,8 @@ Mac Gemini, OpenAI and Ollama support safe live updates. Claude currently suppor
 
 Mac: `npm run typecheck`, `npm run botstest`, `npm run agentcontroltest`, scheduler/mission/interjection regressions, `npm run test:panel-bots`, `npm run test:panel-office` and the application build. Dedicated controls tests cover exact-agent routing, acknowledgements, pending updates, retries, revision attempts, late-result fences and per-agent interruption. Desktop UI tests cover the restricted IPC bridge, provider capabilities, draft retention, responsive layouts, lighting, paused animation and offline controls.
 
+The finishing review resolved the narrow Mac layout, visible face framing, dirty state renders while motion is paused, and restoring all labels in 2D fallback. A narrow detector exception retains the user-confirmed existing glass glow. New office controls and text were checked on the rendered dark surfaces; legacy small labels elsewhere in the shell were left unchanged. Documentation screenshots embed their automated-fixture provenance and contain no production task data.
+
 Phone: `npm test` (145 tests), `npm run test:ui:bots` in Chromium and WebKit, and `npm run test:ui:office` in Chromium. The office test runs a real isolated relay/model fixture through task → lit screen → queued update → consumed update → result, verifies zero working light after completion, target isolation, reduced motion and 320–1280px layouts. Browser scripts accept `ECHO_BROWSER_DEPENDENCIES` when Playwright is provided by a shared development runtime. No production user tasks or model spending are used by these fixtures.
 
 ## Direction contract
