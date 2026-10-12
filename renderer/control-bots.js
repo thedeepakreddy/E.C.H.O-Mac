@@ -3,11 +3,14 @@
  let data=null,timer=null,loading=null,version=0,parentId=null,pending=null,loadError=false,teamIds=null;
  const visible=()=>activeView==='bots'&&!document.hidden;
  const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls||'';if(text!=null)n.textContent=String(text);return n;};
- const status=t=>byId('bots-status').textContent=t;
+ const status=t=>{for(const id of ['bots-status','bots-dialog-status'])byId(id).textContent=t;};
+ const assignment=byId('bots-assignment');
+ function openAssignment(){if(!assignment.open)assignment.showModal();byId('bots-goal').focus();}
+ byId('bots-assignment-close').onclick=()=>assignment.close();
  const office=window.EchoAgentOffice.mount(byId('agent-office'),{target:'mac',visible,
-  assign(id){fresh();if(data?.bots.some(b=>b.id===id))byId('bots-member').value=id;else if(data?.bots.some(b=>b.team))byId('bots-member').value=data.bots.find(b=>b.team).id;teamIds=null;role();byId('bots-goal').focus();byId('bots-run').scrollIntoView({block:'center',behavior:'smooth'});},
+  assign(id){fresh();if(data?.bots.some(b=>b.id===id))byId('bots-member').value=id;else if(data?.bots.some(b=>b.team))byId('bots-member').value=data.bots.find(b=>b.team).id;teamIds=null;role();openAssignment();},
   manage(){byId('bots-manage').click();},
-  follow(j,a,text){parentId=j.id;pending=null;byId('bots-member').value=j.botId;teamIds=j.agentIds?new Set(j.agentIds):null;role();byId('bots-followup').hidden=false;byId('bots-followup').textContent=`Continuing: ${j.goal}. Saved reports are context; past effects will not replay.`;byId('bots-fresh').hidden=false;if(text)byId('bots-goal').value=text;byId('bots-goal').focus();},
+  follow(j,a,text){parentId=j.id;pending=null;byId('bots-member').value=j.botId;teamIds=j.agentIds?new Set(j.agentIds):null;role();byId('bots-followup').hidden=false;byId('bots-followup').textContent=`Continuing: ${j.goal}. Saved reports are context; past effects will not replay.`;byId('bots-fresh').hidden=false;byId('bots-goal').value=text||'';openAssignment();},
   control(b){return act({type:'control-bot',missionId:b.runId,taskId:b.taskId,attempt:b.attempt,requestId:b.requestId,operation:b.operation,...(b.text?{text:b.text}:{})});},
   async stopTeam(j){const r=await act({type:'stop-bot',missionId:j.id});if(r.ok===false)throw Error(r.message);},refresh:()=>load()
  });
@@ -26,7 +29,7 @@
    if(j.result?.verificationRefs?.length)row.append(node('p','companion-muted',`Evidence: ${j.result.verificationRefs.join(' · ')}`));
    for(const b of j.result?.blockers||[])row.append(node('p','companion-copy',`Needs attention: ${b}`));
    if(j.live){const stop=node('button','secondary-button','Stop');stop.onclick=async()=>{stop.disabled=true;try{const r=await act({type:'stop-bot',missionId:j.id});status(r.message||'');await load();}finally{stop.disabled=false;}};row.append(stop);}
-   else {const follow=node('button','secondary-button','Follow up');follow.disabled=!d.bots.some(b=>b.id===j.botId);follow.onclick=()=>{parentId=j.id;byId('bots-member').value=j.botId;teamIds=j.agentIds?new Set(j.agentIds):null;role();byId('bots-followup').hidden=false;byId('bots-followup').textContent=`Continuing: ${j.goal}. Saved results will be supplied as context.`;byId('bots-fresh').hidden=false;byId('bots-goal').focus();};row.append(follow);}
+   else {const follow=node('button','secondary-button','Follow up');follow.disabled=!d.bots.some(b=>b.id===j.botId);follow.onclick=()=>{parentId=j.id;byId('bots-member').value=j.botId;teamIds=j.agentIds?new Set(j.agentIds):null;role();byId('bots-followup').hidden=false;byId('bots-followup').textContent=`Continuing: ${j.goal}. Saved results will be supplied as context.`;byId('bots-fresh').hidden=false;byId('bots-goal').value='';openAssignment();};row.append(follow);}
    const inspect=node('button','secondary-button','Inspect in Agents');inspect.onclick=()=>window.echoAgentsUI?.inspect(j.id);row.append(inspect);list.append(row);
   }
  }
@@ -34,10 +37,10 @@
  function sync(){version++;clearTimeout(timer);office.sync();if(loading)loading.finally(()=>{if(visible())void load();});else void load();}
  function fresh(){parentId=null;pending=null;byId('bots-followup').hidden=true;byId('bots-fresh').hidden=true;}
  byId('bots-fresh').onclick=fresh;byId('bots-member').onchange=()=>{fresh();teamIds=null;role();};byId('bots-refresh').onclick=()=>{delete byId('bots-jobs').dataset.signature;sync();};
- byId('bots-manage').onclick=()=>{setView('tasks');byId('board-manage')?.click();};
+ byId('bots-manage').onclick=()=>{assignment.close();byId('board-manage')?.click();};
  byId('bots-run').onsubmit=async e=>{e.preventDefault();const bot=data?.bots.find(b=>b.id===byId('bots-member').value),goal=byId('bots-goal').value.trim();if(!bot||!goal)return;const button=e.currentTarget.querySelector('button[type=submit]');if(button.disabled)return;
   const agentIds=bot.team?[...(teamIds||new Set(bot.defaultAgentIds||[]))].sort():undefined;if(bot.team&&!agentIds.length){status('Choose at least one specialist. Lead will combine its reports.');return;}const key=JSON.stringify([bot.id,bot.revision,goal,parentId,agentIds]);if(pending?.key!==key)pending={key,id:crypto.randomUUID()};button.disabled=true;status('Starting…');
-  try{const r=await act({type:'run-bot',name:bot.id,botRevision:bot.revision,goal,requestId:pending.id,...(agentIds?{agentIds}:{}),...(parentId?{parentId}:{})});status(r.message||'');if(r.ok){if(byId('bots-goal').value.trim()===goal)byId('bots-goal').value='';fresh();}await load();}catch{status('Couldn’t reach Echo. Retry keeps the same request ID.');}finally{button.disabled=false;}
+  try{const r=await act({type:'run-bot',name:bot.id,botRevision:bot.revision,goal,requestId:pending.id,...(agentIds?{agentIds}:{}),...(parentId?{parentId}:{})});status(r.message||'');if(r.ok){if(byId('bots-goal').value.trim()===goal)byId('bots-goal').value='';fresh();assignment.close();}await load();if(r.ok)office.selectRun(r.data?.missionId);}catch{status('Couldn’t reach Echo. Retry keeps the same request ID.');}finally{button.disabled=false;}
  };
- document.addEventListener('visibilitychange',sync);window.addEventListener('pagehide',()=>{version++;clearTimeout(timer);});window.echoBotsUI={sync,load,async prefill({name,goal,agentIds}={}){setView('bots');await load();if(!data)await load();if(name&&data?.bots.some(b=>b.id===name)){byId('bots-member').value=name;fresh();teamIds=agentIds?new Set(agentIds):null;role();}if(typeof goal==='string')byId('bots-goal').value=goal;byId('bots-goal').focus();}};
+ document.addEventListener('visibilitychange',sync);window.addEventListener('pagehide',()=>{version++;clearTimeout(timer);});window.echoBotsUI={sync,load,async prefill({name,goal,agentIds}={}){setView('bots');await load();if(!data)await load();if(name&&data?.bots.some(b=>b.id===name)){byId('bots-member').value=name;fresh();teamIds=agentIds?new Set(agentIds):null;role();}if(typeof goal==='string')byId('bots-goal').value=goal;openAssignment();}};
 })();
