@@ -47,7 +47,7 @@ export interface ControlAction {
     "chatgpt-sign-in" | "chatgpt-cancel-sign-in" | "chatgpt-sign-out" |
     "openrouter-sign-in" | "openrouter-sign-out" | "openrouter-set-model";
   requestId?:string; botRevision?:string; parentId?:string;
-  taskId?:string;attempt?:number;operation?:'update'|'stop'|'revise';
+  taskId?:string;attempt?:number;operation?:'update'|'stop'|'revise'|'retry';
   projectId?:string; id?:string; revision?:number; questionId?:string; approved?:boolean; enabled?:boolean; kind?:string;
   text?: string; goal?: string; provider?: string; name?: string;
   settings?: Partial<ControlSettings>;

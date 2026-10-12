@@ -382,6 +382,20 @@ async function runAuthorizedTool(def: ToolDef, args: Record<string, unknown>, ct
   try { invocation = createInvocation(run.taskId, run.identity.id, def.name, args, ctx.workingDir); }
   catch (error: any) { return { text: error.message, status: "cancelled", error: { category: "task_unavailable", message: error.message } }; }
   return runInInvocation(invocation, async () => {
+    taskCoordinator.assertInvocation(invocation);
+    const sources=taskCoordinator.get(run.taskId)?.bindings.retrySourceTaskIds;
+    if(!def.readOnly&&!INTERNAL_TOOLS.has(def.name)&&Array.isArray(sources)){
+      for(const source of sources){
+        if(typeof source!=='string')continue;
+        const completed=Object.values(taskCoordinator.get(source)?.calls??{}).find(c=>c.tool===def.name&&c.inputHash===invocation.inputHash&&c.status==='success'&&c.effect==='action');
+        if(!completed)continue;
+        const saved=taskCoordinator.readCallResult(source,completed.callId);
+        taskCoordinator.startCall(invocation,def.name,'internal');
+        if(!saved){const denied={status:'denied' as const,verification:'unverified' as const,text:'This action already completed, but its saved outcome is unavailable. Check the existing change before starting new work; Retry will not repeat it.',callId:invocation.callId,taskId:run.taskId};taskCoordinator.endCall(invocation,denied);return denied;}
+        const out={...normalizeToolOutput(saved),callId:invocation.callId,taskId:run.taskId};taskCoordinator.endCall(invocation,out);
+        return out;
+      }
+    }
     taskCoordinator.startCall(invocation, def.name, INTERNAL_TOOLS.has(def.name) ? 'internal' : def.readOnly ? 'observation' : 'action');
     const lease = taskCoordinator.acquireResources(invocation);
     let out: ToolOutput;

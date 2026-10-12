@@ -35,7 +35,7 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
    if(result)result.artifacts=[...new Map(result.artifacts.map(a=>[JSON.stringify([a.kind,a.label,a.value]),a])).values()];
    return {id:m.id,botId:team?TEAM_BOT_ID:String(m.scope.botId??ids[0]??''),botName:team?'Team of specialists':String(m.scope.botName??getFleetMember(ids[0])?.name??ids[0]??'Specialist'),agentIds:ids.filter(id=>id!=='lead'),goal:m.goal,status:m.status==='running'&&!host.isMissionLive(m.id)?'interrupted':m.status,createdAt:m.createdAt,updatedAt:m.updatedAt,result,steps:Object.values(m.tasks).map(t=>({id:t.id,name:t.actorName??getFleetMember(t.profile??'')?.name??t.profile??t.id,goal:t.goal,status:t.status,result:bounded(t.result)})),live:host.isMissionLive(m.id)};
   });
-  for(const job of jobs){const mission=host.getMission(job.id);if(!mission)continue;for(const step of job.steps){const task=mission.tasks[step.id];if(!task)continue;Object.assign(step,{name:task.profile==='lead'?'Echo':step.name,profile:task.profile,attempt:task.attempt??1,commands:task.updates??[],dependsOn:task.dependsOn??[],activity:task.activity,updateSupported:host.taskControlSupported(mission.id,task.id)});}}
+  for(const job of jobs){const mission=host.getMission(job.id);if(!mission)continue;for(const step of job.steps){const task=mission.tasks[step.id];if(!task)continue;Object.assign(step,{name:task.profile==='lead'?'Echo':step.name,profile:task.profile,attempt:task.attempt??1,commands:task.updates??[],dependsOn:task.dependsOn??[],activity:task.activity,draft:task.draft,updateSupported:host.taskControlSupported(mission.id,task.id)});}}
   return {bots,jobs,coordinator:{id:'lead',name:'Echo',role:'Coordinates your team and combines specialist reports.'}};
  }
  function run(b:BotRequest) {
@@ -84,9 +84,13 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
  }
  function stop(id:string) {const m=host.getMission(id);if(!m||!own(m))return {ok:false,message:'That task no longer exists.'};return host.cancelMission(id)?{ok:true,message:'Task stopped. Review any changes already made.'}:{ok:false,message:'That task is no longer running.'};}
  function control(b:{missionId?:string;taskId?:string;attempt?:number;requestId?:string;operation?:string;text?:string}) {
-  if(typeof b.missionId!=='string'||!isBotRunId(b.missionId)||typeof b.taskId!=='string'||!/^[a-zA-Z0-9_.-]{1,64}$/.test(b.taskId)||!Number.isInteger(b.attempt)||Number(b.attempt)<1||!UUID.test(b.requestId??'')||!['update','stop','revise'].includes(b.operation??'')||(b.operation!=='stop'&&(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000)))return {ok:false,message:'Choose an agent task and provide valid instructions.'};
+  if(typeof b.missionId!=='string'||!isBotRunId(b.missionId)||typeof b.taskId!=='string'||!/^[a-zA-Z0-9_.-]{1,64}$/.test(b.taskId)||!Number.isInteger(b.attempt)||Number(b.attempt)<1||!UUID.test(b.requestId??'')||!['update','stop','revise','retry'].includes(b.operation??'')||(!['stop','retry'].includes(b.operation??'')&&(typeof b.text!=='string'||!b.text.trim()||b.text.length>4000)))return {ok:false,message:'Choose an agent task and provide valid instructions.'};
   const m=host.getMission(b.missionId);if(!m||!own(m))return {ok:false,message:'This bot task no longer exists.'};
-  const r=host.controlMissionTask({missionId:b.missionId,taskId:b.taskId,attempt:b.attempt!,requestId:b.requestId!,operation:b.operation as 'update'|'stop'|'revise',text:b.text});
+  if(b.operation==='retry'){
+   if(!capture())return {ok:false,message:'Turn off private mode before retrying a saved task.'};
+   const task=m.tasks[b.taskId];if(!task?.profile||task.botRevision!==revision(task.profile))return {ok:false,message:'This agent changed. Review its role and start a fresh task.'};
+  }
+  const r=host.controlMissionTask({missionId:b.missionId,taskId:b.taskId,attempt:b.attempt!,requestId:b.requestId!,operation:b.operation as 'update'|'stop'|'revise'|'retry',text:['retry','stop'].includes(b.operation??'')?undefined:b.text},b.operation==='retry'?deps():undefined);
   return {ok:r.ok,message:r.message,data:{command:r.command}};
  }
  return {list,run,legacy,revision,stop,control};
