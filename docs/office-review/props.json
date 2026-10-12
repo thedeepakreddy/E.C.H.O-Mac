@@ -1,0 +1,16 @@
+{
+  "schema": "game-room.prop-manifest.v1",
+  "roomId": "echo-agent-office",
+  "generation": {
+    "provider": "none-original-cc0",
+    "apiModel": "none",
+    "submissionEnabled": false,
+    "notes": "No paid generation. Original CC0 data assets only. Template's Meshy-specific validator intentionally remains unsatisfied; no gate approval or final export is claimed.",
+    "pricingSource": "https://docs.meshy.ai/en/api/pricing",
+    "pricingVerifiedAt": "",
+    "creditsPerTexturedTask": 15,
+    "hardCreditCeiling": 0,
+    "maxChargedAttemptsPerAsset": 2
+  },
+  "assets": []
+}

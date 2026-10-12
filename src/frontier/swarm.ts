@@ -119,7 +119,7 @@ export interface SwarmClone {
 export interface CloneBrain {
   readonly supportsTaskUpdates?:boolean;
   queueTaskUpdate?(text:string,applied:()=>void):boolean;
-  on(event: "text" | "turnEnd" | "error" | "tool", cb: (arg?: any) => void): unknown;
+  on(event: "text" | "textDelta" | "textDone" | "status" | "turnEnd" | "error" | "tool" | "toolEnd", cb: (arg?: any) => void): unknown;
   send(text: string, audio?: unknown, opts?: Record<string, unknown>): void;
   interrupt?(): void;
   stop?(): Promise<void>;
@@ -762,6 +762,15 @@ export class SwarmManager {
       lane: task.lane,
     });
     this.brains.set(actorId, brain);
+    const activity=(kind:string,text:string)=>{
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      const at=(deps.now??Date.now)();
+      if(task.activity?.kind===kind&&task.activity.text===text&&at-task.activity.at<1500)return;
+      task.activity={kind,text,at};mission.updatedAt=at;this.persistMission(mission,deps.coordinator??taskCoordinator);
+    };
+    brain.on('textDelta',()=>activity('writing','Writing the response'));
+    brain.on('textDone',()=>activity('working','Preparing the next step'));
+    brain.on('status',status=>{if(status==='thinking')activity('working','Preparing the next step');});
     brain.on("text", (text) => {
       if(mission.tasks[task.id]!==task||task.status!=='working')return;
       const clone = this.clones.get(actorId);
@@ -774,11 +783,18 @@ export class SwarmManager {
       this.taskErrors.set(taskId, String(error ?? "Agent failed"));
     });
     brain.on("turnEnd", () => {if(mission.tasks[task.id]?.actorId===actorId)this.finishMissionTask(mission.id, task.id);});
-    brain.on('tool',(value:{name:string;summary:string})=>{
+    const runningTools=new Map<string,{count:number,kind:string}>();
+    brain.on('tool',(value:{name:string;summary:string;readOnly?:boolean})=>{
       if(mission.tasks[task.id]!==task||task.status!=='working')return;
       const name=String(value?.name??'tool').slice(0,120);
-      task.activity={kind:'tool',text:`Using · ${name}`,at:(deps.now??Date.now)()};
-      mission.updatedAt=(deps.now??Date.now)();this.persistMission(mission,deps.coordinator??taskCoordinator);
+      const kind=value.readOnly===true||/^(web_search|web_fetch|read_|get_|list_|search_|browse|fetch_|inspect_)/.test(name)?'reading':'tool';
+      runningTools.set(name,{count:(runningTools.get(name)?.count??0)+1,kind});
+      activity(kind,`Using · ${name}`);
+    });
+    brain.on('toolEnd',(value:{name:string})=>{
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      const tool=runningTools.get(value.name);if(tool?.count&&tool.count>1)tool.count--;else runningTools.delete(value.name);
+      const remaining=[...runningTools.entries()].at(-1);activity(remaining?.[1].kind??'working',remaining?`Using · ${remaining[0]}`:'Preparing the next step');
     });
     const elapsed = Math.max(0, (deps.now ?? Date.now)() - task.startedAt);
     const remaining = Math.max(1, task.budget.timeoutMs - elapsed);

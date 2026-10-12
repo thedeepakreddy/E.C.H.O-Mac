@@ -1,0 +1,16 @@
+{
+  "schema": "game-room.room-brief.v1",
+  "roomId": "echo-agent-office",
+  "family": "custom",
+  "purpose": "Local animated activity prototype for Echo's user-approved A: Office + Inspector layout. No publication until the user reviews the actual moving scene.",
+  "runtimeSurface": "Electron Mac renderer and responsive Phone browser; existing agent runner remains authoritative.",
+  "boundsMeters": [14, 3.8, 14],
+  "hero": {"id": "selected-specialist", "role": "Seated articulated character responding to actual task events", "reservedBoundsMeters": [1.45, 1.6, 1.3]},
+  "symmetry": {"mode": "none", "order": 1, "appliesTo": [], "exceptions": []},
+  "circulation": {"description": "", "minimumClearanceMeters": 0},
+  "productionCamera": {"viewport": [1440, 900], "location": [-1.65, 1.58, 4.1], "target": [0.2, 1.11, 0.1], "verticalFovDegrees": 39},
+  "performanceBudget": {"maxSceneTriangles": 250000, "maxVLowBytes": 5000000, "maxHighTextureBytes": 12000000},
+  "creditBudget": {"maximumCredits": 0, "approvalRequired": true},
+  "environment": {"type": "none", "identity": "", "source": "", "assignmentKey": ""},
+  "artifacts": {"floorPlan": "", "reflectedCeilingPlan": "", "planMetadata": "plan-metadata.json", "wallElevations": [], "visualTarget": "", "openingContactSheet": ""}
+}

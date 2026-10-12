@@ -102,7 +102,9 @@ export interface BrainEventMap {
   textDelta: [{ text: string; turnId?: string }];
   /** The block the deltas belonged to has finished. */
   textDone: [{ text: string; turnId?: string }];
-  tool: [{ name: string; summary: string }];
+  tool: [{ name: string; summary: string; readOnly?:boolean }];
+  /** Completion of the shared tool gate, including denial or failure. */
+  toolEnd: [{name:string}];
   /** Emitted before every tool runs, carrying its risk assessment. */
   risk: [{ tool: string; tier: string; reason: string }];
   turnEnd: [];

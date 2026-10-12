@@ -72,7 +72,7 @@ await test('switches coalesce and conflicting requests report busy', async () =>
 await test('all current brain events route once; retired events and errors are isolated', async () => {
   const counts = new Map<string, number>();
   const payloads: BrainEventMap = {status: ['thinking'], text: ['hello'], textDelta: [{text: 'hel'}],
-    textDone: [{text: 'hello'}], tool: [{name: 'read', summary: 'reading'}], risk: [{tool: 'read', tier: 'low', reason: 'fixture'}],
+    textDone: [{text: 'hello'}], tool: [{name: 'read', summary: 'reading'}], toolEnd: [{name:'read'}], risk: [{tool: 'read', tier: 'low', reason: 'fixture'}],
     turnEnd: [], error: ['fixture error'], progress: ['working']};
   const handlers = Object.fromEntries(Object.keys(payloads).map(event => [event, () => counts.set(event, (counts.get(event) ?? 0) + 1)])) as BrainHandlers;
   const f = fixture({handlers: () => handlers});

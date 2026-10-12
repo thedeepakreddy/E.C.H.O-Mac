@@ -6,6 +6,7 @@
   "main": "dist/main.js",
   "scripts": {
     "agentbrainroutingtest": "esbuild src/_agentbrainroutingtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_agentbrainroutingtest.js --log-level=error && ECHO_MCP=0 node dist/_agentbrainroutingtest.js",
+    "office-navigationtest": "node scripts/agent-office-navigation-test.mjs",
     "test:panel-world": "npm run build && electron scripts/control_panel_world_test.mjs",
     "test:panel-routes": "npm run build && electron scripts/control_panel_routes_test.mjs",
     "test:panel-performance": "npm run build && electron scripts/control_panel_perf.mjs",

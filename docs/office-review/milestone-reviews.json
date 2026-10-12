@@ -1,0 +1,7 @@
+{
+  "schema": "game-room.milestone-reviews.v1",
+  "roomId": "echo-agent-office",
+  "function": {"status": "pending", "approvedBy": "", "approvedAt": "", "evidence": [], "strangestElement": "The supplied reference is a photorealistic still, not a rigged asset.", "notes": "A: Office + Inspector layout was approved earlier; the new real moving geometry has not been approved. Validator is not satisfied; no gates are being crossed. No paid Meshy work or final asset export."},
+  "form": {"status": "pending", "approvedBy": "", "approvedAt": "", "evidence": [], "strangestElement": "Prototype character fidelity remains below the reference.", "notes": "Local prototype only. Human visual review requested before further release work."},
+  "runtime": {"status": "pending", "approvedBy": "", "approvedAt": "", "evidence": [], "strangestElement": "Original source textures and detailed plants exceed the initial optimization budget.", "notes": "Routing/state tests pass, but this does not constitute human visual or performance approval. Nothing pushed or redeployed."}
+}

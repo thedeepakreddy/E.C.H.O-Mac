@@ -544,6 +544,7 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
   let toolDetail: string | undefined;
   const finishTool = () => {
     if (callId) log?.toolEnd(callId, def.name, toolStartedAt, toolFailed, toolDetail);
+    ctx.emit?.('toolEnd',{name:def.name});
   };
 
   if (isReplaying()) {
@@ -554,7 +555,7 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     // tape faithful without creating a side effect.
     agentNow();
     const assessment = classify(def.name, args ?? {}, { workingDir: ctx.workingDir });
-    ctx.emit?.("tool", { name: def.name, summary: bareToolName(def.name) });
+    ctx.emit?.("tool", { name: def.name, summary: bareToolName(def.name),readOnly:def.readOnly });
     ctx.emit?.("risk", { tool: bareToolName(def.name), ...assessment });
     const replayed = await takeReplayedTool<ToolOutput>(def.name, args ?? {}, true);
     if (replayed.handled) {
@@ -566,7 +567,7 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     }
   }
 
-  ctx.emit?.("tool", { name: def.name, summary: bareToolName(def.name) });
+  ctx.emit?.("tool", { name: def.name, summary: bareToolName(def.name),readOnly:def.readOnly });
 
   // Before the risk decision: there is no sense asking the user to approve an
   // action whose arguments cannot describe a real action.
