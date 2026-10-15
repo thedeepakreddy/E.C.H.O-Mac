@@ -205,6 +205,7 @@ console.log("\n  the audio and transcript events the rest of Echo listens for");
 
 console.log("\n  and a closed session cannot still act");
 {
+  const before = harmlessRan;
   const { session, sent, drive } = makeSession();
   await session.connect();
   session.close();
@@ -212,6 +213,18 @@ console.log("\n  and a closed session cannot still act");
   drive({ toolCall: { functionCalls: [{ id: "c5", name: "_rt_harmless", args: {} }] } });
   await new Promise((r) => setTimeout(r, 300));
   ok(sent.length === 0, "nothing is sent to a closed session");
+  ok(harmlessRan === before, "late tool calls cannot execute after session close");
+}
+
+{
+  let release:()=>void=()=>{},started=false,nextRan=0;
+  TOOL_MAP.set('_rt_held',{name:'_rt_held',description:'inert held fixture',schema:{},readOnly:true,handler:async()=>{started=true;await new Promise<void>(resolve=>release=resolve);return {text:'fixture'};}} as any);
+  TOOL_MAP.set('_rt_next',{name:'_rt_next',description:'inert successor fixture',schema:{},readOnly:true,handler:async()=>{nextRan++;return {text:'fixture'};}} as any);
+  const {session,drive}=makeSession();await session.connect();
+  drive({toolCall:{functionCalls:[{id:'held',name:'_rt_held',args:{}},{id:'next',name:'_rt_next',args:{}}]}});
+  ok(await until(()=>started),'held fixture started');session.close();release();
+  await new Promise(resolve=>setTimeout(resolve,100));
+  ok(nextRan===0,'close during a tool prevents later calls in the same batch');
 }
 
 console.log(`\n${pass}/${pass + fail} realtime cases passed`);

@@ -19,11 +19,12 @@ import { TOOLS, ToolDef } from "../tools/registry.js";
 import { selectToolNames } from "./tool-router.js";
 import { INTERNAL_TOOLS } from '../memory/read-cache.js';
 import { modelToolResult } from "../memory/tool-context.js";
+import {computerImageEntries,computerImageLabel} from '../tools/lcu-evidence.js';
 import { ExternalToolCatalog } from "./external-tool-catalog.js";
 import { currentAgentRunContext } from "../agent-replay/context.js";
 import { runGated } from "../safety/gate.js";
 import { trimGeminiHistory } from "./history.js";
-import { modelHealth } from "./model-health.js";
+import { scopedModelHealth } from "./model-health.js";
 import { recordLLM, approxTokens } from "../agent-replay/runtime.js";
 import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
 import { resolveToolName } from "./localtools.js";
@@ -117,12 +118,15 @@ export function geminiFallbackReason(
   error: unknown
 ): "quota" | "not found" | "temporarily overloaded" | "stalled" | null {
   const text = String((error as any)?.message ?? error ?? "");
+  const status=(error as any)?.status;
+  const code=(error as any)?.code;
   if ((error as any)?.code==='ECHO_STREAM_STALLED' || /model request timed out|Model stream made no progress/.test(text)) return 'stalled';
-  if (text.includes("429") || text.includes("Quota exceeded") || text.includes("RESOURCE_EXHAUSTED")) return "quota";
-  if (text.includes("404") || text.includes("NOT_FOUND") || text.includes("no longer available")) return "not found";
+  if (status===429 || text.includes("429") || text.includes("Quota exceeded") || text.includes("RESOURCE_EXHAUSTED")) return "quota";
+  if (status===404 || ['model_not_found','unknown_model','invalid_model'].includes(code)
+    || text.includes("404") || text.includes("NOT_FOUND") || text.includes("no longer available")) return "not found";
   // A 503/UNAVAILABLE is normally a short-lived capacity spike. Move to the next
   // fast model so a spoken command remains responsive.
-  if (text.includes("503") || text.includes("UNAVAILABLE") || text.includes("high demand")) return "temporarily overloaded";
+  if (status===503 || text.includes("503") || text.includes("UNAVAILABLE") || text.includes("high demand")) return "temporarily overloaded";
   return null;
 }
 
@@ -202,9 +206,12 @@ export class GeminiBrain extends Brain {
    */
   private systemPrompt = JARVIS_PERSONA;
   private externalCatalog: ExternalToolCatalog | null = null;
+  private readonly modelHealth:ReturnType<typeof scopedModelHealth>;
 
   constructor(private cfg: JarvisConfig, apiKey: string, private readonly limits: BrainExecutionLimits = {}) {
     super();
+    this.modelHealth=scopedModelHealth({provider:'gemini',account:apiKey,
+      environment:cfg.gemini.apiKeyEnv,endpoint:'generativelanguage:v1beta'});
     this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
     this.ai = new GoogleGenAI({ apiKey });
     this.memory.configure(cfg.context);
@@ -534,10 +541,10 @@ export class GeminiBrain extends Brain {
       // models this key has already been told it cannot use. Without that
       // filter every exhausted turn re-ran the whole ladder: four 404s for
       // models retired weeks ago, then the same 429 as last turn.
-      const FALLBACK_MODELS = modelHealth.ladder([this.cfg.gemini.model, ...GEMINI_MODEL_FALLBACKS]);
+      const FALLBACK_MODELS = this.modelHealth.ladder([this.cfg.gemini.model, ...GEMINI_MODEL_FALLBACKS]);
       if (!FALLBACK_MODELS.length) {
         throw new Error(
-          `No Gemini model is usable right now — ${modelHealth.explain([this.cfg.gemini.model, ...GEMINI_MODEL_FALLBACKS])}. ` +
+          `No Gemini model is usable right now — ${this.modelHealth.explain([this.cfg.gemini.model, ...GEMINI_MODEL_FALLBACKS])}. ` +
           `Switch brains (Claude or the local model) or add quota.`
         );
       }
@@ -547,6 +554,10 @@ export class GeminiBrain extends Brain {
       // the user doesn't have to keep saying "finish it".
       let autoContinues = 0;
       let successfulModelIndex = 0;
+      const nextUsableModel=(start:number)=>{
+        const index=FALLBACK_MODELS.findIndex((model,index)=>index>=start&&this.modelHealth.usable(model));
+        return index<0?FALLBACK_MODELS.length:index;
+      };
       let didAnyToolCall = false;
       const MAX_ITERATIONS = this.limits.maxIterations ?? LOOP_CAPS.gemini.maxIterations;
       const AUTO_CONTINUE_LIMIT = LOOP_CAPS.gemini.autoContinueLimit;
@@ -567,7 +578,7 @@ export class GeminiBrain extends Brain {
         log?.iterationStart(i, this.contents.length, approxTokens(this.contents));
 
         let res;
-        let attempt = successfulModelIndex;
+        let attempt = nextUsableModel(successfulModelIndex);
         let turnStartedAt = Date.now();
         let currentModel = FALLBACK_MODELS[attempt];
         
@@ -608,11 +619,12 @@ export class GeminiBrain extends Brain {
               // increment and test against the ladder's length.
               {
                 willRetry: (error) =>
-                  geminiFallbackReason(error) !== null && attempt + 1 < FALLBACK_MODELS.length,
+                  geminiFallbackReason(error) !== null && nextUsableModel(attempt + 1) < FALLBACK_MODELS.length,
               }
             );
             // If it succeeded, persist the successful model for the next turn
             this.cfg.gemini.model = currentModel;
+            this.emitEvent('progress',`Using Gemini model ${currentModel}.`);
             successfulModelIndex = attempt;
             break;
           } catch (err: any) {
@@ -625,19 +637,19 @@ export class GeminiBrain extends Brain {
               // Remember it, so the next turn does not pay for this discovery
               // again. A 404 means this key has lost the model for good; a 429
               // means its quota window has to pass first.
-              if (reason === "not found") modelHealth.markDead(currentModel, errStr);
-              else if (reason === "quota") modelHealth.markExhausted(currentModel, errStr);
-              else modelHealth.markUnavailable(currentModel,reason);
+              if (reason === "not found") this.modelHealth.markDead(currentModel, errStr);
+              else if (reason === "quota") this.modelHealth.markExhausted(currentModel, errStr);
+              else this.modelHealth.markUnavailable(currentModel,reason);
 
               const from = currentModel;
-              attempt++;
+              attempt=nextUsableModel(attempt+1);
               // Straight down the ladder. It used to wrap back to the first
               // model when it ran off the end, so the last thing a doomed turn
               // did was re-ask the model that had already failed it.
               const next = FALLBACK_MODELS[attempt];
               console.warn(`[gemini] ${from} failed (${reason})${next ? `; trying ${next}` : ""}`);
               log?.note("llm.model_fallback", { from, to: next ?? null, reason, attempt });
-              this.emitEvent('progress',`The model ${reason==='stalled'?'stopped responding':'is unavailable'}. ${next?'Trying another model; saved work is preserved.':'No fallback is available; the task is not finished.'}`);
+              this.emitEvent('progress',`Gemini model ${from} ${reason==='stalled'?'stopped responding':'is unavailable'}. ${next?`Trying Gemini model ${next}; saved work is preserved.`:'No fallback is available; the task is not finished.'}`);
               if (!next) {
                 throw new Error(
                   `Gemini has no model left to try (${FALLBACK_MODELS.join(", ")}). Last error: ${errStr}`
@@ -811,11 +823,7 @@ export class GeminiBrain extends Brain {
               parts.push({
                 functionResponse: { name: call.name, response: modelToolResult(out) },
               });
-              if (out.image) {
-                parts.push({
-                  inlineData: { mimeType: out.image.mimeType, data: out.image.data },
-                });
-              }
+              for(const entry of computerImageEntries(out)){parts.push({text:computerImageLabel(entry,out,call.id)});parts.push({inlineData:entry.image});}
             }
           } catch (err: any) {
             // tool.start / tool.end come from runGated, the one path every brain
@@ -861,12 +869,14 @@ export class GeminiBrain extends Brain {
           responseParts.push(...(await runOneCall(call)));
         }
         log?.enterState("reflecting", "trimming history");
-        this.contents.push({ role: "user", parts: responseParts });
 
         // Free the bytes of older screenshots before the next request. Without
         // this the conversation grows by 1-3 MB per screenshot and is re-sent
         // whole on every step — which is what drove this machine into swap.
+        // Prune only already-delivered observations; every new image must reach
+        // the model once, even when this batch exceeds the history image limit.
         const freed = trimGeminiHistory(this.contents);
+        this.contents.push({ role: "user", parts: responseParts });
         if (freed > 1_000_000) {
           console.log(`[gemini] released ${(freed / 1_048_576).toFixed(1)} MB of old screenshots from context`);
         }

@@ -326,6 +326,7 @@ export class RealtimeVoiceSession extends EventEmitter {
   }
 
   private onMessage(m: any): void {
+    if(this.closed)return;
     const sc = m.serverContent;
     if (sc?.inputTranscription?.text) { this.heardText += sc.inputTranscription.text; this.emit("heard", sc.inputTranscription.text); }
     if (sc?.outputTranscription?.text) { this.saidText += sc.outputTranscription.text; this.emit("said", sc.outputTranscription.text); }
@@ -339,6 +340,7 @@ export class RealtimeVoiceSession extends EventEmitter {
     // machinery is for the pipeline; here the model has already stopped, so all
     // that is left is to drop whatever audio is still queued for the speaker.
     if (sc?.interrupted) { this.recordTurn(true); this.emit("interrupted"); }
+    if(this.closed)return; // An interruption listener may have revoked ownership.
     if (sc?.turnComplete) { this.recordTurn(); this.emit("turnComplete"); }
 
     const calls = m.toolCall?.functionCalls;
@@ -354,10 +356,12 @@ export class RealtimeVoiceSession extends EventEmitter {
    * the text loop.
    */
   private async runTools(calls: Array<{ id?: string; name: string; args?: Record<string, unknown> }>): Promise<void> {
+    if(this.closed)return;
     const responses: any[] = [];
     const context = this.ensureTask();
     if (context.payloadRecording && captureAllowed()) context.recorder.emit({type: 'session.toolrequest', callsRef: context.recorder.blob(calls)});
     for (const call of calls) {
+      if(this.closed)break;
       this.inflight++;
       // One shared adapter, so an outside tool is gated here exactly as it
       // would be on any of the text brains.

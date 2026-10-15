@@ -22,6 +22,9 @@ import type { FrameSource } from "./listener.js";
  */
 export interface AudioPlayer extends EventEmitter {
   readonly name: string;
+  /** Opt-in: drained is truthful playback completion (or carries a failed
+   * outcome), and cancelled playback cannot drain a later reservation. */
+  readonly supportsPlaybackAcknowledgment?: boolean;
   /** Frames from `frameSource` are echo-cancelled (Echo's own voice removed). */
   readonly aec: boolean;
   start(): Promise<void>;
@@ -39,6 +42,11 @@ export interface AudioPlayer extends EventEmitter {
   dispose(): void;
 }
 
+export interface PlaybackDrainOutcome {
+  generation: number;
+  status: 'completed' | 'failed';
+}
+
 // ---- voiceio -------------------------------------------------------------------
 
 const T_PCM_IN = 0x01;
@@ -48,6 +56,7 @@ const T_EVENT = 0x20;
 
 export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
   readonly name = "voiceio";
+  readonly supportsPlaybackAcknowledgment = true;
   private proc: ChildProcess | null = null;
   private inbuf: Buffer = Buffer.alloc(0);
   private rate = 0;
@@ -374,18 +383,33 @@ export class VoiceIoPlayer extends EventEmitter implements AudioPlayer {
 
 // ---- afplay fallback -----------------------------------------------------------
 
+export interface AfplayProcess {
+  on(event: string, listener: (...args: any[]) => void): unknown;
+  kill(signal?: NodeJS.Signals): unknown;
+}
+let afplayFileSequence = 0;
+
 /** The old way, one process per sentence. Kept so speech works without the helper. */
 export class AfplayPlayer extends EventEmitter implements AudioPlayer {
   readonly name = "afplay";
+  readonly supportsPlaybackAcknowledgment = true;
   readonly aec = false;
   readonly frameSource = null;
   playing = false;
   playedMs = 0;
   private pending = new Map<number, { chunks: Buffer[]; rate: number }>();
   private queue: string[] = [];
-  private current: ChildProcess | null = null;
+  private current: AfplayProcess | null = null;
   private running = false;
   private startedAt = 0;
+  private generation = 0;
+  private failed = false;
+
+  constructor(private readonly io: {
+    spawn?: (bin: string, args: string[]) => AfplayProcess;
+    writeFile?: (path: string, wav: Buffer) => void;
+    removeFile?: (path: string) => void;
+  } = {}) { super(); }
 
   async start(): Promise<void> {
     /* nothing persistent */
@@ -403,8 +427,18 @@ export class AfplayPlayer extends EventEmitter implements AudioPlayer {
     this.pending.delete(sentence);
     const pcm = Buffer.concat(p.chunks);
     if (!pcm.length) return;
-    const path = join(tmpdir(), `echo-play-${process.pid}-${Date.now()}-${sentence}.wav`);
-    writeFileSync(path, wavOf(pcm, p.rate));
+    const gen = this.generation;
+    const path = join(tmpdir(), `echo-play-${process.pid}-${Date.now()}-${afplayFileSequence++}.wav`);
+    if (!this.running) this.failed = false;
+    try {
+      if (this.io.writeFile) this.io.writeFile(path, wavOf(pcm, p.rate));
+      else writeFileSync(path, wavOf(pcm, p.rate), { flag: 'wx', mode: 0o600 });
+    } catch (err) {
+      this.failed = true;
+      this.emit('error', err instanceof Error ? err.message : String(err));
+      if (gen === this.generation && !this.running) this.emit('drained', { generation: gen, status: 'failed' } satisfies PlaybackDrainOutcome);
+      return;
+    }
     this.queue.push(path);
     void this.pump();
   }
@@ -412,33 +446,53 @@ export class AfplayPlayer extends EventEmitter implements AudioPlayer {
   private async pump(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    const gen = this.generation;
     try {
-      while (this.queue.length) {
+      while (this.queue.length && gen === this.generation) {
         const path = this.queue.shift()!;
         this.playing = true;
         this.startedAt = performance.now();
-        this.emit("started");
-        await new Promise<void>((resolve) => {
-          this.current = spawn("/usr/bin/afplay", [path]);
-          this.current.on("exit", () => resolve());
-          this.current.on("error", () => resolve());
+        const result = await new Promise<{ code?: number | null; signal?: string | null; error?: unknown }>((resolve) => {
+          try {
+            const child = (this.io.spawn ?? spawn)("/usr/bin/afplay", [path]);
+            this.current = child;
+            child.on('exit', (code: number | null, signal: string | null) => resolve({ code, signal }));
+            child.on('error', error => resolve({ error }));
+            // Listeners and ownership must exist before a callback can Stop.
+            this.emit('started');
+          } catch (error) { resolve({ error }); }
         });
+        this.removeFile(path);
+        if (gen !== this.generation) return;
         this.current = null;
-        this.playedMs = Math.round(performance.now() - this.startedAt);
-        try {
-          unlinkSync(path);
-        } catch {
-          /* ignore */
+        if (result.error || result.code !== 0 || result.signal) {
+          this.failed = true;
+          const message = result.error instanceof Error ? result.error.message
+            : result.error ? String(result.error) : `afplay exited (${result.code}, ${result.signal ?? 'no signal'})`;
+          this.emit('error', message);
+          // exit denotes unexpected termination, not a successful file boundary.
+          if (!result.error && gen === this.generation) this.emit('exit', result.code, result.signal);
+        } else {
+          this.playedMs = Math.round(performance.now() - this.startedAt);
         }
       }
     } finally {
       this.running = false;
-      this.playing = false;
-      this.emit("drained");
+      if (gen === this.generation) {
+        this.playing = false;
+        this.emit('drained', { generation: gen, status: this.failed ? 'failed' : 'completed' } satisfies PlaybackDrainOutcome);
+      } else if (this.queue.length) {
+        // Wait for the killed child to settle before starting new sound. Its
+        // completion cannot clear the new lane or certify its queued files.
+        void this.pump();
+      }
     }
   }
 
   stop(): void {
+    this.generation++;
+    this.failed = false;
+    for (const path of this.queue) this.removeFile(path);
     this.queue = [];
     this.pending.clear();
     try {
@@ -449,6 +503,10 @@ export class AfplayPlayer extends EventEmitter implements AudioPlayer {
     this.current = null;
     this.playing = false;
     this.emit("stopped");
+  }
+
+  private removeFile(path: string): void {
+    try { (this.io.removeFile ?? unlinkSync)(path); } catch { /* best-effort owned WAV cleanup */ }
   }
 
   dispose(): void {

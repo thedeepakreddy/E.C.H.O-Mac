@@ -43,6 +43,7 @@ export function speakable(cmd: string, max = 80): string {
 
 /** Tools that only observe. Nothing here can alter the machine. */
 export const READ_ONLY = new Set([
+  'inspect_app','verify_app_state','ask_app_question',
   "read_creator_project",
   'read_browser_page','inspect_supervised_task','read_supervised_evidence','submit_task_review','show_task_report',
   "inspect_vercel_connection", "inspect_coding_tools", "inspect_project_recovery", "prepare_vercel_deployment", "inspect_vercel_deployment", "inspect_project_diagnostics", "inspect_project_preview", "inspect_project_recipe", "inspect_project", "search_project", "read_project_file", "project_diff", "read_process", "project_git_status",
@@ -113,6 +114,7 @@ export const READ_ONLY = new Set([
 
 /** Tools that act on the UI but stay local and are trivially recoverable. */
 export const UI_ACTIONS = new Set([
+  'click_in_app','type_in_app','press_app_key','scroll_in_app','drag_in_app','set_app_value','move_echo_cursor',
   'cancel_supervised_task',
   "move_mouse",
   "scroll",
@@ -647,6 +649,11 @@ export function classify(
   }
 
   // ---- GUI ---------------------------------------------------------------
+  // An index/coordinate reveals no trustworthy label. Treat arbitrary native
+  // clicks and submit-capable key chords as high risk here. The shared gate may
+  // replace this context-free fallback only with the active owner's original
+  // native observation assessment; model labels never downgrade Send/Delete.
+  if(tool==='click_in_app'||tool==='press_app_key'||tool==='press_keys')return {tier:'high',reason:`${tool==='click_in_app'?'click a native control':'press a key chord'} in ${String(input.app??'the approved frontmost app')} — it may submit, send or delete`,detail:JSON.stringify(input)};
   if (UI_ACTIONS.has(tool)) {
     if (tool === "open_url") {
       const url = firstString(input, ["url"]) ?? "";

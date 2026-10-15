@@ -141,6 +141,8 @@ function runtime(names: string[], additions: Record<string, unknown> = {}) {
     brain: {provider: 'ollama'}, ollamaFailureStreak: 0, lastAssistantText: '', lastBrainStatus: 'idle', expectAnswer: false,
     voiceSession: {noteBrainDone() {}}, remoteRecord() {}, endAutoReflex() {}, finishTurn() {}, publishControlUpdate() {},
     maybeAutoListen() {}, send() {}, tts: {say() {}}, shuttingDown: false, inputRevision: 0,
+    officeReportSpeaking: undefined, cancelOfficeReports() {},
+    realtimeTurn:null, stopRealtimeVoice() {},
     telegram: undefined, chatIdle() {}, automaticTasks: {control:()=>null,handle:()=>null},
     currentScope:()=>({}), captureAllowed:()=>true, phoneUpdateIntent, botIntent, ...additions,
   };
@@ -191,6 +193,38 @@ await test('stopping or replacing a brain discards delayed build dispatch result
     if (change === 'replace') context.brain = {provider: 'openai'};
     if (change === 'shutdown') context.shuttingDown = true;
     held.resolve(); await new Promise(resolve => setImmediate(resolve)); assert.equal(sent, 0);
+  }
+});
+await test('local phone and bot commands bypass model and supervised-task dispatch', async () => {
+  for (const [text, expected] of [
+    ['Send me updates to my phone', 'start'],
+    ['Stop sending updates to my phone', 'stop'],
+    ['Ask research bot to compare test fixtures', 'research'],
+  ]) {
+    const calls: string[] = []; let spoken = '';
+    const context = runtime(['dispatchToBrain'], {
+      brainLifecycle: undefined,
+      phoneUpdateCommand: async (intent: string) => {calls.push(intent); return 'Local command handled';},
+      botRequestId: () => '00000000-0000-4000-8000-000000000001',
+      macBots: {
+        revision: () => 'fixture-revision',
+        run: (request: any) => {
+          assert.equal(request.goal, 'compare test fixtures');
+          assert.equal(request.requestId, '00000000-0000-4000-8000-000000000001');
+          assert.equal(request.botRevision, 'fixture-revision');
+          calls.push(request.name); return {message: 'Local command handled'};
+        },
+      },
+      handleBuildInput: () => {throw Error('Local commands must not enter a build');},
+      automaticTasks: {control: () => null, handle: () => {throw Error('Local commands must not start supervision');}},
+      dispatchToBrainUnchecked: () => {throw Error('Local commands must not call a model');},
+      speech: undefined,
+      voiceSession: {noteBrainSend() {}, noteBrainText() {}, noteBrainDone() {}},
+      tts: {say: (message: string) => {spoken = message;}}, finishLocalTurn() {},
+    });
+    context.dispatchToBrain(text, undefined, null, 'text');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, [expected]); assert.equal(spoken, 'Local command handled');
   }
 });
 await test('natural long tasks enter supervision once on every foreground provider and input modality', async () => {

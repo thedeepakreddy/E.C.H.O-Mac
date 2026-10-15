@@ -47,7 +47,7 @@ const pool = [
   { name: "get_mouse_position", description: "Get the mouse position" },
   { name: "frontmost_app", description: "Get the frontmost app" },
 ];
-const poolKeep = await selectToolNames("open safari", 3, undefined, pool);
+const poolKeep = await selectToolNames("open safari", 1, undefined, pool);
 if (poolKeep) {
   ok([...poolKeep].every((n) => pool.some((p) => p.name === n)), "a custom pool is never exceeded — nothing outside it is ever returned");
   ok(poolKeep.has("open_app"), "the relevant tool from the custom pool is kept");

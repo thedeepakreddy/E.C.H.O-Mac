@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {withHumanComputerControl,isHumanComputerControl} from './tools/human-control.js';
+import {acquireDesktopTask,releaseDesktopTask,currentDesktopTask} from './tasks/desktop-lane.js';
+let release!:()=>void;const paused=new Promise<void>(resolve=>release=resolve);const order:string[]=[];
+const first=withHumanComputerControl(async()=>{assert.equal(isHumanComputerControl(),true);order.push('first-start');await paused;order.push('first-end');});
+await Promise.resolve();
+const second=withHumanComputerControl(async()=>{assert.equal(isHumanComputerControl(),true);order.push('second');});
+release();await first;await second;
+assert.deepEqual(order,['first-start','first-end','second'],'Human inputs serialize instead of interleaving or falsely reporting that Echo owns the desktop');
+assert.equal(currentDesktopTask(),undefined);
+acquireDesktopTask('echo-task');await assert.rejects(Promise.resolve().then(()=>withHumanComputerControl(()=>order.push('forbidden'))),/Echo owns/);releaseDesktopTask('echo-task');
+assert.equal(order.includes('forbidden'),false);
+console.log('PASS human-input serialization, authority propagation, lease release and Echo exclusion without device calls');

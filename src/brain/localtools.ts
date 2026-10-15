@@ -160,11 +160,12 @@ export function resolveToolName(called: string): string | null {
  * commands, and they leave the model a short enough list to choose from.
  */
 export const LOCAL_TOOL_NAMES = [
+  'inspect_app','click_in_app','type_in_app','press_app_key','scroll_in_app','drag_in_app','set_app_value','move_echo_cursor','verify_app_state','ask_app_question',
   "inspect_coding_tools", "invoke_coding_tool", ...CODING_TOOL_NAMES,
   // seeing
   "screenshot", "read_screen_text", "list_ui_elements", "frontmost_app",
   // pointing and typing
-  "click", "click_ui_element", "click_text", "type_text", "press_keys", "scroll",
+  "type_text", "press_keys",
   // apps
   "open_app", "open_url", "run_shortcut", "list_shortcuts", "show_creator_page", "read_creator_project", "show_creator_project",
   // the switches people ask for by voice

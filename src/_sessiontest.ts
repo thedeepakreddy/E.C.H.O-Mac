@@ -56,6 +56,7 @@ const aborted = new Promise<boolean>((res) => t2.abort.signal.addEventListener("
 s.cancel("bargein", "user spoke");
 ok(s.generation === gen + 1, "a cancel moves the generation on");
 ok(!s.brainOutputIsLive(), "brain output from before the cancel is no longer live");
+ok(!s.brainTurnActive, "a cancelled or obsolete brain turn does not keep the voice lane busy");
 ok(cancelled[0]?.[0] === "bargein", "cancel event names the kind");
 ok(await Promise.race([aborted, new Promise<boolean>((r) => setTimeout(() => r(false), 50))]), "the turn's abort signal fires");
 ok(t2.cancelled, "the turn is marked cancelled");

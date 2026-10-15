@@ -46,11 +46,11 @@ const benign: Step[] = [
   { kind: "click", target: "Inbox" },
   { kind: "open", app: "Safari" },
   { kind: "wait", seconds: 1 },
-  { kind: "keys", modifiers: ["cmd"], key: "l" },
 ];
 for (const s of benign) {
   ok(tierOf(s) !== "high", `replaying ${s.kind} -> ${tierOf(s)} (no prompt)`);
 }
+ok(tierOf({kind:'keys',modifiers:['cmd'],key:'l'})==='high','cached keys retain confirmation: a chord alone cannot prove the focused target or effect');
 
 console.log(`\n${pass}/${pass + fail} reflex-safety checks passed\n`);
 process.exit(fail ? 1 : 0);

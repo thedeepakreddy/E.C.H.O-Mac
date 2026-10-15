@@ -4,6 +4,21 @@ import { readFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { run, osascript } from "./shell.js";
+import {executeEchoComputerAction} from './lcu-control.js';
+import {isHumanComputerControl} from './human-control.js';
+import type {LcuAction,LcuResult} from './lcu-session.js';
+import {resolveLaunchTarget} from './app-launch.js';
+
+/** Explicit, approved app-window actions. No implicit global coordinate conversion. */
+export function echoAppAction(app:string,action:LcuAction):Promise<LcuResult>{return executeEchoComputerAction(app,action);}
+function resultText(result:LcuResult):string{return result.content.filter(c=>c.type==='text').map(c=>c.text??'').join('\n');}
+async function echoFrontAction(action:LcuAction):Promise<string>{
+ const app=await frontmostApp();
+ if(!app||app==='unknown')throw Error('Cannot identify the target app. Use inspect_app with an explicit app first.');
+ const result=await echoAppAction(app,action);
+ if(result.lcuActionStatus==='observation_required')throw Error('No input was sent: inspect this newly selected or changed app, then choose a fresh target.');
+ return resultText(result);
+}
 
 let CLICLICK = "/opt/homebrew/bin/cliclick";
 export function setCliclickBin(path: string) {
@@ -139,6 +154,7 @@ function clampCoords(x: number, y: number): [string, string] {
 
 export async function moveMouse(x: number, y: number): Promise<string> {
   const [cx, cy] = clampCoords(x, y);
+  if(!isHumanComputerControl())return echoFrontAction({kind:'move',to:[Number(cx),Number(cy)]});
   const result = await run(CLICLICK, [`m:${cx},${cy}`]);
   if (result.code !== 0) throw new Error(`cliclick move failed: ${result.stderr || result.stdout}`);
 
@@ -170,6 +186,8 @@ export async function moveMouse(x: number, y: number): Promise<string> {
  * verified like moveMouse: the next drag step corrects any shortfall.
  */
 export async function moveMouseBy(dx: number, dy: number): Promise<void> {
+  if(!isHumanComputerControl())throw Error('Relative pointer movement is reserved for host-authenticated human controls. Echo uses guarded absolute movement.');
+  if(!Number.isFinite(dx)||!Number.isFinite(dy))throw Error('Human pointer offsets must be finite.');
   const rel = (n: number) => `${n >= 0 ? "+" : "-"}${Math.abs(Math.round(n))}`;
   const result = await run(CLICLICK, [`m:${rel(dx)},${rel(dy)}`]);
   if (result.code !== 0) throw new Error(`cliclick move failed: ${result.stderr || result.stdout}`);
@@ -177,6 +195,7 @@ export async function moveMouseBy(dx: number, dy: number): Promise<void> {
 
 /** Click wherever the cursor already is ("." is cliclick's current position). */
 export async function clickHere(button: "left" | "right" | "double" = "left"): Promise<void> {
+  if(!isHumanComputerControl())throw Error('Click-at-current-pointer is reserved for human controls. Echo must use an observed app target.');
   const cmd = button === "right" ? "rc" : button === "double" ? "dc" : "c";
   const result = await run(CLICLICK, [`${cmd}:.`]);
   if (result.code !== 0) throw new Error(`cliclick click failed: ${result.stderr || result.stdout}`);
@@ -188,6 +207,7 @@ export async function click(
   button: "left" | "right" | "double" = "left"
 ): Promise<string> {
   const [cx, cy] = clampCoords(x, y);
+  if(!isHumanComputerControl())throw Error('Legacy global-desktop click coordinates cannot be used as LCU app-window coordinates. Use inspect_app, then click_in_app with a fresh app target. No input was sent.');
   const cmd = button === "right" ? "rc" : button === "double" ? "dc" : "c";
   const result = await run(CLICLICK, [`${cmd}:${cx},${cy}`]);
   if (result.code !== 0) throw new Error(`cliclick click failed: ${result.stderr || result.stdout}`);
@@ -202,11 +222,14 @@ export async function dragTo(
 ): Promise<string> {
   const [fx, fy] = clampCoords(fromX, fromY);
   const [tx, ty] = clampCoords(toX, toY);
-  await run(CLICLICK, ["-w", "10", `dd:${fx},${fy}`, `du:${tx},${ty}`]);
+  if(!isHumanComputerControl())throw Error('Legacy global drag coordinates are not LCU app-window coordinates. Use drag_in_app after inspecting the app. No input was sent.');
+  const result=await run(CLICLICK, ["-w", "10", `dd:${fx},${fy}`, `du:${tx},${ty}`]);
+  if(result.code!==0)throw Error('Human drag failed: '+(result.stderr||result.stdout));
   return `dragged ${fx},${fy} -> ${tx},${ty}`;
 }
 
 export async function typeText(text: string): Promise<string> {
+  if(!isHumanComputerControl())return echoFrontAction({kind:'type',text});
   // Interleave literal segments with return key-presses so newlines work.
   const args: string[] = ["-w", "15"];
   const lines = text.split("\n");
@@ -215,7 +238,8 @@ export async function typeText(text: string): Promise<string> {
     if (i < lines.length - 1) args.push("kp:return");
   });
   if (args.length === 2) return "nothing to type";
-  await run(CLICLICK, args, 60000);
+  const result=await run(CLICLICK, args, 60000);
+  if(result.code!==0)throw Error('Human typing failed: '+(result.stderr||result.stdout));
   return `typed ${text.length} characters`;
 }
 
@@ -228,6 +252,16 @@ const MODIFIERS = new Set(["cmd", "alt", "ctrl", "shift", "fn"]);
  * (return, tab, esc, arrow-left, space, delete, f1…) go through cliclick's kp:.
  */
 export async function hotkey(modifiers: string[], key: string, repeat = 1): Promise<string> {
+  if(!isHumanComputerControl()){
+    const aliases:Record<string,string>={cmd:'super',command:'super',alt:'alt',option:'alt',ctrl:'ctrl',control:'ctrl',shift:'shift'};
+    if(!modifiers.every(m=>aliases[m.toLowerCase()]))throw Error('Unsupported LCU modifier. No legacy input was sent.');
+    // Original App.pressKey uses xdotool-style keysyms, not cliclick kp names.
+    const keys:Record<string,string>={'arrow-left':'Left','arrow-right':'Right','arrow-up':'Up','arrow-down':'Down',return:'Return',esc:'Escape',escape:'Escape',delete:'BackSpace','forward-delete':'Delete','page-up':'Page_Up','page-down':'Page_Down',space:'space',tab:'Tab'};
+    const chord=[...modifiers.map(m=>aliases[m.toLowerCase()]),keys[key.toLowerCase()]??key].join('+');
+    if(!Number.isSafeInteger(repeat)||repeat<1||repeat>200)throw Error('Key repeat must be an integer from 1 to 200.');
+    let text='';for(let i=0;i<repeat;i++)text=await echoFrontAction({kind:'press',key:chord});
+    return text;
+  }
   const mods = modifiers.map((m) => m.toLowerCase()).filter((m) => MODIFIERS.has(m));
   const reps = Math.max(1, Math.min(200, Math.round(repeat)));
   const token = key.length === 1 ? `t:${key}` : `kp:${key}`;
@@ -235,7 +269,8 @@ export async function hotkey(modifiers: string[], key: string, repeat = 1): Prom
   for (const m of mods) args.push(`kd:${m}`);
   for (let i = 0; i < reps; i++) args.push(token);
   for (const m of [...mods].reverse()) args.push(`ku:${m}`);
-  await run(CLICLICK, args, 60000);
+  const result=await run(CLICLICK, args, 60000);
+  if(result.code!==0)throw Error('Human key chord failed: '+(result.stderr||result.stdout));
   return `pressed ${[...mods, key].join("+")}${reps > 1 ? ` x${reps}` : ""}`;
 }
 
@@ -249,6 +284,7 @@ export async function scroll(
   x?: number,
   y?: number
 ): Promise<string> {
+  if(!isHumanComputerControl())throw Error('Legacy scroll uses desktop coordinates and key simulation. Use scroll_in_app with a fresh LCU target and pages. No input was sent.');
   if (x != null && y != null) {
     const [cx, cy] = clampCoords(x, y);
     await run(CLICLICK, [`m:${cx},${cy}`]);
@@ -270,6 +306,7 @@ export async function scroll(
  * value box) to a precise number instead of nudging it.
  */
 export async function setValueAt(x: number, y: number, value: string): Promise<string> {
+  if(!isHumanComputerControl())throw Error('Use set_app_value with a fresh LCU element index. Echo will not guess a field or implicitly press Return.');
   const [cx, cy] = clampCoords(x, y);
   await run(CLICLICK, ["-w", "15", `dc:${cx},${cy}`]);
   await run(CLICLICK, ["-w", "15", "kd:cmd", "t:a", "ku:cmd"]);
@@ -392,7 +429,15 @@ async function appIsRunning(name: string): Promise<boolean> {
  * there.
  */
 export async function openApp(name: string): Promise<string> {
-  const resolved = (await resolveAppName(name)) ?? name;
+  const human=isHumanComputerControl();
+  const resolved=human?((await resolveAppName(name))??name):await resolveLaunchTarget(name,resolveAppName);
+  if(!resolved)return `FAILED to open "${name}" — no installed application matches that name.`;
+  if(!human){
+    // Launch is serialized under the real foreground owner's desktop lease.
+    // Native access is still requested before observation or physical input.
+    const observation=await echoAppAction(resolved,{kind:'launch'});
+    return `Opened approved ${resolved}.\n`+resultText(observation);
+  }
 
   const res = await run("/usr/bin/open", ["-a", resolved]);
   if (res.code !== 0) {

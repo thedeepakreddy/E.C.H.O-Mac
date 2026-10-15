@@ -4,6 +4,18 @@
 
 This record separates source inspection, executed tests and untested behavior. It is a focused repository check, not a full code audit, independent security review or production reliability measurement.
 
+For the later October 15 local reliability work, see
+[acceptance boundaries](RELIABILITY_ACCEPTANCE.md) and
+[the current repair checklist](../tasks/audit-reliability-2026-10-14/todo.md).
+The older results below are historical, not evidence for the current dirty build.
+
+October 15 final local gate: Mac `npm run ci:offline` passed 156/156 groups
+(including typecheck) in 175 seconds, then build passed. Phone's guarded
+`ci:offline` passed 240/240 tests. Selected isolated Mac Office/report and Phone
+Office/Retry/report-Retry/trackpad browser fixtures passed. Runtime was Node
+v26.8.2. These are local dirty-checkout results, not a committed/deployed revision
+or native Calculator, audible voice, multi-display or physical-iPhone proof.
+
 ## Check performed on October 10, 2026
 
 Baseline: GitHub `main` at `4ddebf6` (`Update usage policy in README`), with the remote test fixture correction included in this documentation update. Runtime: macOS, Node.js `v26.8.2`.

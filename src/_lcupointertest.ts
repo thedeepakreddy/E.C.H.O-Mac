@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {createPointerExtension} from './tools/lcu-pointer.js';
+let count=0;let mode='ok';
+const pointer=createPointerExtension(async(args,signal)=>{count++;assert.deepEqual(args,['move','12','34','com.apple.calculator']);assert.equal(signal?.aborted,false);return {code:0,stdout:JSON.stringify({ok:true,x:mode==='ok'?12:500,y:34}),stderr:''};});
+const abort=new AbortController();
+const result=await pointer('com.apple.calculator',[12,34],abort.signal);
+assert.match(result.content[0].text!,/verified/);assert.equal(count,1);
+mode='refused';await assert.rejects(pointer('com.apple.calculator',[12,34],abort.signal),/reach|verify/i);
+abort.abort();const before=count;await assert.rejects(pointer('com.apple.calculator',[12,34],abort.signal),/cancel/i);assert.equal(count,before);
+await assert.rejects(pointer('com.apple.calculator',[NaN,34]),/finite/i);assert.equal(count,before);
+console.log('PASS pointer-only extension rejects cancelled, invalid and unverified movement');

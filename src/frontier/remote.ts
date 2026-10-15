@@ -20,6 +20,8 @@ import {
   Signalling, ConfirmRelay, normaliseCommand, type Sdp, type IceCandidate,
 } from "./remotesignal.js";
 import { moveMouseBy, clickHere, hotkey, scroll, typeText } from "../tools/computer-actions.js";
+import {withHumanComputerControl,humanComputerInputBlocked} from '../tools/human-control.js';
+import {outsideAgentContext} from '../agent-replay/context.js';
 
 /**
  * Watching a long job from your phone.
@@ -402,6 +404,10 @@ export const MAX_TYPED = 500;
  */
 let pendingMove = { dx: 0, dy: 0 };
 let moving = false;
+/** Only called after the HTTP handler has authenticated an actual Phone input.
+ * A remote opened by an agent must not lend that old agent context to users.
+ */
+function phoneHumanInput<T>(action:()=>T|Promise<T>):Promise<T>{return outsideAgentContext(()=>withHumanComputerControl(action));}
 function queueMove(dx: number, dy: number): void {
   pendingMove.dx += dx;
   pendingMove.dy += dy;
@@ -411,7 +417,7 @@ function queueMove(dx: number, dy: number): void {
     while (pendingMove.dx || pendingMove.dy) {
       const { dx: x, dy: y } = pendingMove;
       pendingMove = { dx: 0, dy: 0 };
-      await moveMouseBy(x, y).catch(() => {});
+      try{await phoneHumanInput(()=>moveMouseBy(x,y));}catch{pendingMove={dx:0,dy:0};break;}
     }
     moving = false;
   })();
@@ -687,15 +693,16 @@ export async function startRemote(opts: {
     }
     if (route === "mouse") {
       if (req.method !== "POST") return deny();
+      if(humanComputerInputBlocked())return json({ok:false,reason:'Echo owns the desktop. Stop Echo before using Phone controls.'},409);
       return readJsonBody(req, async (body) => {
         try {
           const action = body?.action;
           const step = (n: unknown) => Math.max(-400, Math.min(400, Number(n) || 0));
           if (action === "move") queueMove(step(body.dx), step(body.dy));
-          else if (action === "click") await clickHere("left");
-          else if (action === "rclick") await clickHere("right");
-          else if (action === "dclick") await clickHere("double");
-          else if (action === "scroll-up" || action === "scroll-down") await scroll(action === "scroll-up" ? "up" : "down", 3);
+          else if (action === "click") await phoneHumanInput(()=>clickHere("left"));
+          else if (action === "rclick") await phoneHumanInput(()=>clickHere("right"));
+          else if (action === "dclick") await phoneHumanInput(()=>clickHere("double"));
+          else if (action === "scroll-up" || action === "scroll-down") await phoneHumanInput(()=>scroll(action === "scroll-up" ? "up" : "down", 3));
           // The arrow pad of the old page, kept so a stale tab keeps working.
           else if (action === "up") queueMove(0, -40);
           else if (action === "down") queueMove(0, 40);
@@ -704,27 +711,28 @@ export async function startRemote(opts: {
           else return json({ ok: false }, 400);
           return json({ ok: true });
         } catch {
-          return json({ ok: false }, 500);
+          return humanComputerInputBlocked()?json({ok:false,reason:'Echo owns the desktop. Stop Echo before using Phone controls.'},409):json({ok:false,reason:'Mouse input could not be delivered to your Mac.'},500);
         }
       });
     }
     if (route === "keys") {
       if (req.method !== "POST") return deny();
+      if(humanComputerInputBlocked())return json({ok:false,reason:'Echo owns the desktop. Stop Echo before typing from Phone.'},409);
       return readJsonBody(req, async (body) => {
         try {
           if (typeof body?.text === "string") {
             const text = body.text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
             if (!text || text.length > MAX_TYPED) return json({ ok: false, reason: `Type 1–${MAX_TYPED} characters.` }, 400);
-            await typeText(text);
+            await phoneHumanInput(()=>typeText(text));
             record(`Typed ${text.length} characters on the Mac from your phone`, "go");
             return json({ ok: true });
           }
           const chord = REMOTE_KEYS[String(body?.key ?? "")];
           if (!chord) return json({ ok: false }, 400);
-          await hotkey(chord[0], chord[1]);
+          await phoneHumanInput(()=>hotkey(chord[0], chord[1]));
           return json({ ok: true });
         } catch {
-          return json({ ok: false }, 500);
+          return humanComputerInputBlocked()?json({ok:false,reason:'Echo owns the desktop. Stop Echo before typing from Phone.'},409):json({ok:false,reason:'Keyboard input could not be delivered to your Mac.'},500);
         }
       });
     }

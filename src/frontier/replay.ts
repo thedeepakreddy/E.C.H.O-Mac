@@ -1,6 +1,6 @@
-import * as ax from "../tools/ax.js";
-import * as vision from "../tools/vision.js";
-import * as act from "../tools/computer-actions.js";
+import {NativeConsumer,consumerStatus,failureNote} from './native-consumer.js';
+import type {ToolStatus} from '../memory/tool-result.js';
+import type {ToolOutput} from '../tools/registry.js';
 import type { Step, Workflow } from "./demonstrate.js";
 import { save } from "./demonstrate.js";
 
@@ -8,17 +8,10 @@ import { save } from "./demonstrate.js";
  * Replays a learned workflow, re-finding each control instead of trusting
  * coordinates.
  *
- * Every macro tool eventually breaks the same way: the app moves a button and
- * the recorded position points at nothing. Here each click is resolved fresh
- * through three escalating strategies, and a step only fails after all of them
- * miss:
- *
- *   1. the accessibility tree, matched on the control's label
- *   2. on-screen text via OCR, for apps that expose no tree (Chrome, Brave)
- *   3. give up and say which step broke, rather than clicking something wrong
- *
- * Clicking the wrong thing is far worse than stopping, so a low-confidence
- * match is treated as a miss.
+ * Each input is bound to a fresh, owner-scoped LCU app observation. Clicks
+ * require one exact native target; AX paths and global OCR coordinates are not
+ * input targets. Every nested action crosses its own risk/grant gate. Ambiguity
+ * stops the sequence and retains completed progress and original native evidence.
  */
 
 export interface StepResult {
@@ -26,73 +19,26 @@ export interface StepResult {
   ok: boolean;
   how: "accessibility" | "screen-text" | "direct" | "failed" | "skipped" | "unverified";
   note: string;
+  status?:ToolStatus;
   /** Where it resolved to, so a dry run can draw the target without clicking it. */
   at?: { x: number; y: number };
 }
 
-/**
- * Resolve a click target by meaning. Returns coordinates, or null.
- *
- * `activate` exists for dry runs. Resolution through the accessibility tree
- * normally PRESSES the control as the way of finding it, which is exactly what
- * a preview must not do — so when previewing, the same search runs but stops
- * short of pressing and reports the control's position instead.
- */
-async function locate(
-  target: string,
-  activate = true
-): Promise<{ x: number; y: number; how: StepResult["how"]; label: string } | null> {
-  // 1. accessibility tree — exact labels, works even when covered
-  const dump = await ax.dump();
-  if (dump.axAvailable && dump.elements.length) {
-    const ranked = ax.rankScored(dump.elements, target);
-    if (ranked.length && ax.criticVerdict(ranked).ok) {
-      const el = ranked[0].element;
-      if (!el.enabled) return null;
-      // Activate through the API when possible; no mouse movement at all.
-      if (el.press && activate) {
-        const pressed = await ax.press(dump.pid, el.path);
-        if (pressed.ok) {
-          return { x: -1, y: -1, how: "accessibility", label: el.label || target };
-        }
-        // The path was resolved from the just-read tree. If it already went
-        // stale, its old centre is no longer safe enough to click.
-        return null;
-      }
-      return {
-        x: el.x + Math.round(el.w / 2),
-        y: el.y + Math.round(el.h / 2),
-        how: "accessibility",
-        label: el.label || target,
-      };
-    }
-  }
-
-  // 2. on-screen text — the fallback for apps with no tree
-  const ocr = await vision.ocrAll("accurate");
-  if (!ocr.error) {
-    const matches = vision.rankText(ocr, target);
-    if (vision.textMatchIsAmbiguous(matches)) return null;
-    const hit = matches[0]?.line;
-    if (hit) return { x: hit.cx, y: hit.cy, how: "screen-text", label: hit.text };
-  }
-
-  return null;
+function keyChord(modifiers:string[],key:string):string {
+  const aliases:Record<string,string>={command:'super',cmd:'super',meta:'super',super:'super',control:'ctrl',ctrl:'ctrl',option:'alt',alt:'alt',shift:'shift'};
+  const mapped=modifiers.map(modifier=>{const value=aliases[modifier.toLowerCase()];if(!value)throw Error(`Unsupported recorded key modifier: ${modifier}`);return value;});
+  return [...mapped,key.toLowerCase()==='enter'?'Return':key].join('+');
 }
-
-async function runStep(step: Step, dry = false, afterSkip = false): Promise<StepResult> {
+async function runStep(step: Step,consumer:NativeConsumer,dry = false, afterSkip = false): Promise<StepResult> {
   switch (step.kind) {
     case "open":
-      // Opening an app is allowed even in a preview. It changes nothing you
-      // would want to undo, and without it every later step would be resolved
-      // against the wrong frontmost application — turning the whole preview
-      // into a list of things it could not find.
-      await act.openApp(step.app);
-      return { step, ok: true, how: "direct", note: `opened ${step.app}` };
+      if(dry)return {step,ok:true,how:'skipped',note:`would open ${step.app}`};
+      await consumer.open(step.app);
+      return { step, ok: true, how: "direct", note: `LCU returned ${step.app}'s native window; goal not verified` };
 
     case "wait":
       if (dry) return { step, ok: true, how: "skipped", note: `would wait ${step.seconds}s` };
-      await new Promise((r) => setTimeout(r, step.seconds * 1000));
+      await consumer.pause(step.seconds * 1000);
       return { step, ok: true, how: "direct", note: `waited ${step.seconds}s` };
 
     case "type":
@@ -100,70 +46,47 @@ async function runStep(step: Step, dry = false, afterSkip = false): Promise<Step
         const preview = step.text.length > 40 ? step.text.slice(0, 40) + "…" : step.text;
         return { step, ok: true, how: "skipped", note: `would type "${preview}"` };
       }
-      await act.typeText(step.text);
-      return { step, ok: true, how: "direct", note: `typed ${step.text.length} chars` };
+      await consumer.input('type_in_app',await consumer.inspect(),{text:step.text});
+      return { step, ok: true, how: "direct", note: `native typing returned for ${step.text.length} chars; output not verified` };
 
     case "keys": {
       const combo = [...step.modifiers, step.key].join("+");
       if (dry) return { step, ok: true, how: "skipped", note: `would press ${combo}` };
-      await act.hotkey(step.modifiers, step.key);
-      return { step, ok: true, how: "direct", note: `pressed ${combo}` };
+      await consumer.input('press_app_key',await consumer.inspect(),{key:keyChord(step.modifiers,step.key)});
+      return { step, ok: true, how: "direct", note: `native key input returned for ${combo}; output not verified` };
     }
 
     case "click": {
-      const found = await locate(step.target, !dry);
-      if (!found) {
-        // In a preview, earlier steps were deliberately not performed, so the
-        // screen is not in the state this step expects. Calling that a failure
-        // would be untrue — the step may be perfectly fine. Say what is
-        // actually known instead.
-        if (dry && afterSkip) {
-          return {
-            step,
-            ok: true,
-            how: "unverified",
-            note: `couldn't check "${step.target}" — it appears after a step I didn't perform`,
-          };
-        }
-        return {
-          step,
-          ok: false,
-          how: "failed",
-          note: `could not find "${step.target}" on screen`,
-        };
-      }
-      const repaired = found.label.toLowerCase() !== step.target.toLowerCase();
-      const named = repaired
-        ? `"${found.label}" (recorded as "${step.target}")`
-        : `"${found.label}"`;
+      if(dry&&afterSkip)return {step,ok:true,how:'unverified',note:`couldn't check "${step.target}" — it appears after a step I didn't perform`};
+      const snapshot=await consumer.inspect(),found=consumer.unique(snapshot,step.target,step.role);
+      const named=`"${found.label}"`;
 
       if (dry) {
         return {
           step,
           ok: true,
-          how: found.how,
+          how: 'accessibility',
           note: `would click ${named}`,
-          at: found.x >= 0 ? { x: found.x, y: found.y } : undefined,
         };
       }
-      // x < 0 means it was activated through the accessibility API already.
-      if (found.x >= 0) await act.click(found.x, found.y, "left");
-      return { step, ok: true, how: found.how, note: `clicked ${named}` };
+      await consumer.input('click_in_app',snapshot,{target:found.index,button:'left',count:1});
+      return { step, ok: true, how: 'accessibility', note: `native click returned for ${named}; result not verified` };
     }
   }
 }
 
-export interface ReplayReport {
+export interface ReplayReport extends Pick<ToolOutput,'computerContent'|'data'> {
   ok: boolean;
   results: StepResult[];
   repairs: number;
   summary: string;
+  status:ToolStatus;
 }
 
 export async function replay(
   wf: Workflow,
   steps: Step[],
-  opts: { dryRun?: boolean; onStep?: (r: StepResult, i: number) => void } = {}
+  opts: { dryRun?: boolean; app?:string; onStep?: (r: StepResult, i: number) => void } = {}
 ): Promise<ReplayReport> {
   const dry = opts.dryRun === true;
   const results: StepResult[] = [];
@@ -171,18 +94,17 @@ export async function replay(
   // Once a preview has declined to perform something, the screen no longer
   // matches what later steps expect.
   let skippedSomething = false;
+  const consumer=new NativeConsumer(opts.app);
 
   for (const step of steps) {
-    const r = await runStep(step, dry, skippedSomething);
+    let r:StepResult;
+    try{if(!dry&&results.length)await consumer.pause(350);r=await runStep(step,consumer,dry,skippedSomething);}
+    catch(error){r={step,ok:false,how:'failed',note:failureNote(error),status:consumerStatus(error)};}
     results.push(r);
-    opts.onStep?.(r, results.length - 1);
+    try{opts.onStep?.(r, results.length - 1);}catch{/* Reporting callbacks cannot discard completed input evidence. */}
     if (r.how === "skipped") skippedSomething = true;
     if (r.note.includes("recorded as")) repairs++;
     if (!r.ok) break; // stop at the first miss rather than compounding the error
-    // Let the interface settle; replaying faster than the app redraws is the
-    // most common cause of a step landing before its target exists.
-    // A preview only needs long enough to be watched.
-    await new Promise((res) => setTimeout(res, dry ? 500 : 350));
   }
 
   const failed = results.find((r) => !r.ok);
@@ -203,9 +125,10 @@ export async function replay(
     ? describeDryRun(results, repairs)
     : failed
       ? `Stopped at step ${results.length} — ${failed.note}. The first ${results.length - 1} step(s) completed.`
-      : `Done — ${results.length} steps${repairs ? `, and I re-found ${repairs} control(s) that had moved` : ""}.`;
+      : `Native execution returned for ${results.length} steps. This does not verify the requested goal.`;
 
-  return { ok: !failed, results, repairs, summary };
+  const status=failed?(failed.status==='uncertain'?'uncertain':results.some(result=>result.ok)?'partial':failed.status??'failed'):'success';
+  return { ok: !failed, results, repairs, summary,status,...consumer.evidence() };
 }
 
 /** Report what a preview found, without pretending it proved more than it did. */
@@ -216,7 +139,8 @@ export function describeDryRun(results: StepResult[], repairs: number): string {
   const lines = results.map((r, i) => `  ${i + 1}. ${r.note}`).join("\n");
   const parts = [`Dry run — nothing was changed.\n${lines}`];
 
-  if (failed) {
+  if(!results.length){parts.push('\nNo steps were provided.');}
+  else if (failed) {
     parts.push(`\nThis would stop at step ${results.length}: ${failed.note}`);
   } else if (unverified) {
     parts.push(

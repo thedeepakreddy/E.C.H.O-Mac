@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { run, osascript } from "../tools/shell.js";
 import * as vision from "../tools/vision.js";
+import {hotkey} from '../tools/computer-actions.js';
 
 /**
  * Knows whether you are at the desk, and reacts when you leave.
@@ -32,9 +33,9 @@ export interface PresenceOptions {
   missesBeforeAway: number;
   /** Pause playing media when you leave. */
   pauseMedia: boolean;
-  /** Lock the screen when you leave. */
+  /** Legacy away-lock request; automatic locking is currently unavailable. */
   lockScreen: boolean;
-  /** Wait this long after you leave before locking. */
+  /** Legacy delay retained for configuration compatibility. */
   lockAfterSeconds: number;
 }
 
@@ -46,9 +47,10 @@ export const DEFAULT_PRESENCE: PresenceOptions = {
   lockAfterSeconds: 120,
 };
 
+const AUTOMATIC_LOCK_UNAVAILABLE = "Automatic away-lock is unavailable: no supported host lock operation is configured. No automatic screen lock will be attempted.";
+
 export class PresenceMonitor extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
-  private lockTimer: NodeJS.Timeout | null = null;
   private misses = 0;
   private state: PresenceState = "unknown";
   private lastBrightness = 1;
@@ -56,7 +58,7 @@ export class PresenceMonitor extends EventEmitter {
 
   /**
    * @param read where readings come from. Injectable so the debounce rules —
-   * the part that decides whether to lock your screen — can be tested without
+   * the part that decides whether you left — can be tested without
    * a camera, which no automated run has access to.
    */
   constructor(
@@ -78,9 +80,7 @@ export class PresenceMonitor extends EventEmitter {
 
   stop() {
     if (this.timer) clearInterval(this.timer);
-    if (this.lockTimer) clearTimeout(this.lockTimer);
     this.timer = null;
-    this.lockTimer = null;
   }
 
   configure(patch: Partial<PresenceOptions>) {
@@ -127,23 +127,21 @@ export class PresenceMonitor extends EventEmitter {
       void this.onLeft();
     } else if (next === "present") {
       this.emit("returned");
-      if (this.lockTimer) {
-        clearTimeout(this.lockTimer);
-        this.lockTimer = null;
-      }
       void this.onReturned();
     }
   }
 
   private async onLeft() {
+    // An unattended presence transition has no approved foreground LCU owner.
+    // Disable automatic locking explicitly rather than scheduling doomed input.
+    if (this.opts.lockScreen) {
+      console.error('[echo] Automatic lock not performed:', AUTOMATIC_LOCK_UNAVAILABLE);
+    }
     if (this.opts.pauseMedia) {
       const paused = await pauseAllMedia();
       // Remember whether we were the one who paused, so returning only resumes
       // what we stopped — never something the user deliberately paused earlier.
       this.pausedByUs = paused;
-    }
-    if (this.opts.lockScreen) {
-      this.lockTimer = setTimeout(() => void lockScreen(), this.opts.lockAfterSeconds * 1000);
     }
   }
 
@@ -168,9 +166,9 @@ export class PresenceMonitor extends EventEmitter {
     const light = this.lastBrightness < 0.06 ? " (the room is very dark)" : "";
     const acting = [
       this.opts.pauseMedia ? "pause media" : null,
-      this.opts.lockScreen ? `lock after ${this.opts.lockAfterSeconds}s` : null,
     ].filter(Boolean).join(" and ");
-    return `${where}${light}. When you leave I ${acting || "do nothing"}.`;
+    const lockNotice = this.opts.lockScreen ? ` ${AUTOMATIC_LOCK_UNAVAILABLE}` : "";
+    return `${where}${light}. When you leave I ${acting || "do nothing"}.${lockNotice}`;
   }
 }
 
@@ -198,15 +196,7 @@ export async function pauseAllMedia(): Promise<boolean> {
     }
   }
 
-  // Browser video has no scripting interface, so send the media key instead —
-  // macOS routes it to whatever is currently playing, including web players.
-  if (!paused) {
-    const res = await run("/usr/bin/osascript", [
-      "-e",
-      'tell application "System Events" to key code 16 using {}', // F8 / play-pause
-    ]).catch(() => null);
-    paused = res?.code === 0;
-  }
+  // Keep actual player APIs. Do not emulate a media key after an API refusal.
   return paused;
 }
 
@@ -226,15 +216,10 @@ export async function resumeMedia(): Promise<void> {
 
 /** Lock the screen the way the keyboard shortcut does. */
 export async function lockScreen(): Promise<void> {
-  // pmset displaysleepnow sleeps the display; whether that locks depends on the
-  // "require password after sleep" setting, so ask the login session directly.
-  const r = await run("/usr/bin/osascript", [
-    "-e",
-    'tell application "System Events" to keystroke "q" using {control down, command down}',
-  ]).catch(() => null);
-  if (r?.code !== 0) {
-    await run("/usr/bin/pmset", ["displaysleepnow"]).catch(() => null);
-  }
+  // Source: https://support.apple.com/en-gb/102650 (Control-Command-Q).
+  // Requires an actual approved Echo foreground turn. Timers without that
+  // authority fail visibly, never fall back to hidden AppleScript or sleep.
+  await hotkey(['ctrl','cmd'],'q');
 }
 
 export const presenceMonitor = new PresenceMonitor();

@@ -3,9 +3,9 @@ import type { AgentRunContext } from '../agent-replay/context.js';
 import { inputFingerprint } from './tool-context.js';
 import { taskCoordinator } from './task-state.js';
 
-export const INTERNAL_TOOLS = new Set(['inspect_task', 'read_tool_result', 'update_task_plan', 'discover_tools', 'refresh_observations', 'verify_task',
+export const INTERNAL_TOOLS = new Set(['verify_app_state', 'ask_app_question', 'inspect_task', 'read_tool_result', 'update_task_plan', 'discover_tools', 'refresh_observations', 'verify_task',
   'inspect_supervised_task','read_supervised_evidence','submit_task_review','show_task_report']);
-const VOLATILE = /^(?:inspect_project_recovery|inspect_vercel_deployment|prepare_vercel_deployment|inspect_project_preview|inspect_project_diagnostics|inspect_project_recipe|inspect_project|search_project|read_project_file|project_diff|read_process|project_git_status|wait|screenshot|read_screen_text|list_ui_elements|frontmost_app|get_mouse_position|system_sitrep|check_presence|presence_status|attention_status)$/;
+const VOLATILE = /^(?:inspect_app|inspect_project_recovery|inspect_vercel_deployment|prepare_vercel_deployment|inspect_project_preview|inspect_project_diagnostics|inspect_project_recipe|inspect_project|search_project|read_project_file|project_diff|read_process|project_git_status|wait|screenshot|read_screen_text|list_ui_elements|frontmost_app|get_mouse_position|system_sitrep|check_presence|presence_status|attention_status)$/;
 const states = new WeakMap<AgentRunContext, {epoch: number; boundary: number; repeats: Map<string, number>; pending: Map<string, Promise<ToolOutput>>; fingerprints: Map<string, string>}>();
 
 /** Successful observations may be reused briefly; actions are never cached. */

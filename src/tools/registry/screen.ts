@@ -87,8 +87,9 @@ export const SCREEN_TOOLS: ToolDef[] = [
           `Screen captured at exactly ${shot.width}x${shot.height} logical pixels.${which} ` +
           `Image coordinate (0,0) maps to desktop (${shot.originX},${shot.originY}). ` +
           (displayHint
-            ? `For a point read from this image, pass display: ${displayHint} to a mouse tool; use the image x/y unchanged.`
-            : "This is the main desktop origin, so image and desktop coordinates are identical."),
+            ? `This diagnostic image belongs to display ${displayHint}. `
+            : "This diagnostic image has the main desktop origin. ")+
+          'For autonomous app input, use inspect_app and its fresh app-window targets; do not pass these global points to LCU clicks, drags or scrolls.',
         image: shot,
       };
     },
@@ -638,30 +639,36 @@ export const SCREEN_TOOLS: ToolDef[] = [
   {
     name: "extract_table",
     description:
-      "Pull structured data out of an app with no export button — legacy tools, dashboards, portals. Reads rows from the accessibility tree where available, falls back to positioned screen text, and scrolls until no new rows appear. Returns CSV.",
+      "Collect visible table rows. Scrolling is a foreground mutation: it requires an explicitly inspected LCU app and a unique native scroll view; every scroll crosses its own risk/grant gate. Optional app defaults to the actual frontmost app once. Returns bounded partial CSV and native evidence, never claims repeated rows prove the end of a list. Without scrolling, AX/OCR can remain read-only diagnostics; global coordinates are never input targets.",
     schema: {
+      app:z.string().min(1).max(512).optional().describe('Explicit approved app reference; default is the actual frontmost app, read once'),
       scroll: z.boolean().default(true).describe("Scroll to collect rows beyond the first screen"),
       maxScreens: z.number().int().min(1).max(40).default(20),
     },
-    readOnly: true,
+    readOnly: false,
     handler: async (a) => {
-      const table = a.scroll === false ? await extract.readVisible() : await extract.readAll(a.maxScreens ?? 20);
-      if (!table.rows.length) return { text: `I couldn't find tabular data on screen (${table.note}).` };
-      return { text: `${table.note}\n\n${extract.toCsv(table.rows).slice(0, 4000)}` };
+      if(a.scroll!==false){const table=await extract.readAll(a.maxScreens??20,{app:a.app});return {text:`${table.note}\n\n${extract.toCsv(table.rows).slice(0,4000)}`,status:table.status??'partial',verification:'unverified',computerContent:table.computerContent,data:table.data};}
+      const {NativeConsumer,consumerStatus,failureNote}=await import('../../frontier/native-consumer.js');
+      const consumer=new NativeConsumer(a.app);
+      try{consumer.assertActive();const snapshot=a.app?await consumer.inspect():undefined;
+        const table=await extract.readVisible(snapshot?.window.app);consumer.assertActive();
+        return {text:`${table.note}\n\n${extract.toCsv(table.rows).slice(0,4000)}`,status:table.status??'success',verification:'unverified',...consumer.evidence()};
+      }catch(error){return {text:failureNote(error),status:consumerStatus(error),verification:'unverified',...consumer.evidence()};}
     },
   },
   {
     name: "dismiss_popups",
     description:
-      "Clear banners, dialogs and overlays that are in the way — storage warnings, update prompts, cookie notices, 'try our new feature' popups. Call this whenever a page looks obstructed, before clicking something important, and again if a click seems to hit the wrong thing. Only unambiguous dismissals ('Not now', 'Close', 'No thanks', ×) are clicked; anything that decides something ('OK', 'Allow', 'Continue') is reported back to you instead of guessed at.",
+      "Dismiss only a unique enabled native LCU control with exact dismissive wording. Optional app defaults to the actual frontmost app once. Re-inspects before input and verifies the control disappears afterward. Every click crosses its own risk/grant gate, including dialogs; this macro does not approve sensitive actions. Ambiguous or unavailable native targets are reported, never replaced by AX presses or global OCR clicks.",
     schema: {
+      app:z.string().min(1).max(512).optional().describe('Explicit approved app reference; default is the actual frontmost app, read once'),
       rounds: z.number().int().min(1).max(5).default(3).describe("Dismissing one can reveal another"),
     },
     readOnly: false,
     handler: async (a) => {
-      const r = await dismissPopups(a.rounds ?? 3);
+      const r = await dismissPopups(a.rounds ?? 3,{app:a.app});
       const skipped = r.skipped.length ? ` Left alone: ${r.skipped.join("; ")}.` : "";
-      return { text: r.note + skipped };
+      return {text:r.note+skipped,status:r.status,verification:'unverified',computerContent:r.computerContent,data:r.data};
     },
   },
   {

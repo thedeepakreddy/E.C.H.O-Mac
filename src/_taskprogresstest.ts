@@ -84,6 +84,9 @@ try {
   const write = {name: 'write_local_file', readOnly: false};
   await invoke(write); await invoke(write); assert.equal(executed, 5, 'actions are never cached');
   await invoke(); assert.equal(executed, 6, 'actions invalidate saved reads');
+  const beforeAppReads=executed;
+  await invoke({name:'inspect_app',readOnly:true});await invoke({name:'inspect_app',readOnly:true});
+  assert.equal(executed,beforeAppReads+2,'LCU observations and element identities are never served from a cached read');
   assert.equal(taskCoordinator.finish(t.taskId, {status: 'completed'}).status, 'verifying', 'read evidence cannot verify a write');
   taskCoordinator.recordVerification(t.taskId, first.value.verificationRefs!);
   assert.equal(taskCoordinator.get(t.taskId)!.status, 'verifying');

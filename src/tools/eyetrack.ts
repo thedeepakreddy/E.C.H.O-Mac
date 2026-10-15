@@ -1,10 +1,12 @@
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { exec } from "node:child_process";
 import { createRequire } from "node:module";
 import { getAppPath } from "../utils/appPath.js";
 import { desktopBounds } from "./displays.js";
+import {withHumanComputerControl,humanComputerInputPending} from './human-control.js';
+import {outsideAgentContext,currentAgentRunContext} from '../agent-replay/context.js';
+import {moveMouse,click} from './computer-actions.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -17,6 +19,7 @@ let smoothY = 0;
 const ALPHA = 0.3; // Smoothing factor (lower is smoother but slower)
 
 export function toggleEyeTracking(enable: boolean) {
+  if(currentAgentRunContext()?.identity.background)throw Error('Office agents cannot enable foreground eye controls.');
   if (enable && !trackerProc) {
     let electron;
     try { electron = nodeRequire("electron"); } catch {}
@@ -39,7 +42,6 @@ export function toggleEyeTracking(enable: boolean) {
     });
     
     const rl = createInterface({ input: trackerProc.stdout });
-    const cliclick = "/opt/homebrew/bin/cliclick";
     // Span every display, so gaze can reach a second monitor rather than
     // stopping at the primary display's edge.
     const all = screen.getAllDisplays?.() ?? [screen.getPrimaryDisplay()];
@@ -75,15 +77,10 @@ export function toggleEyeTracking(enable: boolean) {
         const x = Math.round(originX + smoothX * width);
         const y = Math.round(originY + smoothY * height);
         
-        let cmd = `${cliclick} m:${x},${y}`;
-        
-        // Blink to click
-        if (data.blink && !lastBlink) {
-          cmd = `${cliclick} c:${x},${y}`;
-        }
+        const blink=data.blink&&!lastBlink;
         lastBlink = data.blink;
-        
-        exec(cmd);
+        if(humanComputerInputPending())return; // Fresh frames resume after the human command.
+        outsideAgentContext(()=>{try{void withHumanComputerControl(()=>blink?click(x,y):moveMouse(x,y)).catch(()=>{});}catch{/* Pause while Echo owns the desktop. */}});
       } catch (e) {
         // ignore
       }

@@ -34,7 +34,9 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
    const result=bounded(m.result);
    if(result && primary?.status==='completed')result.summary=primary.summary.slice(0,6000);
    if(result)result.artifacts=[...new Map(result.artifacts.map(a=>[JSON.stringify([a.kind,a.label,a.value]),a])).values()];
-   return {id:m.id,botId:team?TEAM_BOT_ID:String(m.scope.botId??ids[0]??''),botName:team?'Team of specialists':String(m.scope.botName??getFleetMember(ids[0])?.name??ids[0]??'Specialist'),agentIds:ids.filter(id=>id!=='lead'),goal:m.goal,status:m.status==='running'&&!host.isMissionLive(m.id)?'interrupted':m.status,createdAt:m.createdAt,updatedAt:m.updatedAt,result,steps:Object.values(m.tasks).map(t=>({id:t.id,name:t.actorName??getFleetMember(t.profile??'')?.name??t.profile??t.id,goal:t.goal,status:t.status,result:bounded(t.result)})),live:host.isMissionLive(m.id)};
+   const compiler=m.tasks.lead;
+   const reportRetry=team&&compiler?.status==='failed'&&Object.values(m.tasks).every(t=>t===compiler||t.status==='completed'&&!!t.result)?{taskId:compiler.id,attempt:compiler.attempt??1}:undefined;
+   return {id:m.id,botId:team?TEAM_BOT_ID:String(m.scope.botId??ids[0]??''),botName:team?'Team of specialists':String(m.scope.botName??getFleetMember(ids[0])?.name??ids[0]??'Specialist'),agentIds:ids.filter(id=>id!=='lead'),goal:m.goal,status:m.status==='running'&&!host.isMissionLive(m.id)?'interrupted':m.status,createdAt:m.createdAt,updatedAt:m.updatedAt,result,reportRetry,steps:Object.values(m.tasks).map(t=>({id:t.id,name:t.actorName??getFleetMember(t.profile??'')?.name??t.profile??t.id,goal:t.goal,status:t.status,result:bounded(t.result)})),live:host.isMissionLive(m.id)};
   });
   for(const job of jobs){const mission=host.getMission(job.id);if(!mission)continue;for(const step of job.steps){const task=mission.tasks[step.id];if(!task)continue;Object.assign(step,{name:task.profile==='lead'?'Echo':step.name,profile:task.profile,attempt:task.attempt??1,commands:task.updates??[],dependsOn:task.dependsOn??[],activity:task.activity,draft:task.draft,updateSupported:host.taskControlSupported(mission.id,task.id)});}}
   return {bots,jobs,coordinator:{id:'lead',name:'Echo',role:'Coordinates your team and combines specialist reports.'}};
@@ -98,6 +100,6 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
 }
 /** Only explicit commands, never quoted or hypothetical requests. */
 export function botIntent(text:string):{name:string;goal:string}|null {
- const m=/^(?:echo[, ]+)?(?:ask|run|tell)\s+(research|plan|write|review|analyse|lead|team)(?:\s+bot)?(?:\s+to\s+|\s*:\s*)([\s\S]{1,4000})[.!]?$/i.exec(text.trim());
+ const m=/^(?:echo[, ]+)?(?:ask|run|tell)\s+(research|plan|write|review|analyse|verify|lead|team)(?:\s+bot)?(?:\s+to\s+|\s*:\s*)([\s\S]{1,4000})[.!]?$/i.exec(text.trim());
  return m?{name:m[1].toLowerCase()==='team'?TEAM_BOT_ID:m[1].toLowerCase(),goal:m[2].trim()}:null;
 }

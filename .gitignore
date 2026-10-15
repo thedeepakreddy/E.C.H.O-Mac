@@ -2,6 +2,8 @@
 config.json
 node_modules/
 dist/
+# Built from native/echo-pointer.swift by build.mjs.
+native/echo-pointer
 venv_tts/
 venv_vision/
 .DS_Store

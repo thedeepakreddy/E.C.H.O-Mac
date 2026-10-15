@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {withComputerEvidence,retainComputerResult,computerImages} from './tools/lcu-evidence.js';
+import {modelToolResult} from './memory/tool-context.js';
+const content=[{type:'text',text:'<html>Original state</html>\n'+ 'x'.repeat(12000)},{type:'image',data:'one',mimeType:'image/png'},{type:'image',data:'two',mimeType:'image/jpeg'}];
+const raw={content,_meta:{source:'original'},isError:false};
+const [one,two]=await Promise.all([withComputerEvidence(async()=>{await Promise.resolve();retainComputerResult(raw);return {text:'Read-back, not task completion'};}),withComputerEvidence(async()=>({text:'Unrelated read'}))]);
+assert.deepEqual(one.computerContent,content);assert.equal(two.computerContent,undefined,'Concurrent tools do not receive another tool’s private app state');
+assert.deepEqual(computerImages(one),[{data:'one',mimeType:'image/png'},{data:'two',mimeType:'image/jpeg'}]);
+assert.equal((modelToolResult(one).computerContent as any[])[0].text,content[0].text,'Original runtime text is never excerpted or HTML-stripped');
+assert.equal((one.data as any).originalComputerResults[0],raw);
+const failed=await withComputerEvidence(async()=>{retainComputerResult({...raw,isError:true});throw Error('Runtime refused');});
+assert.equal(failed.status,'failed');assert.equal((failed.data as any).originalComputerResults[0].isError,true);
+assert.equal((modelToolResult(failed).computerResults as any[])[0].isError,true,'The original runtime error state reaches every provider');
+console.log('PASS full original result retention, all images, provider text fidelity, failed results and concurrent-tool isolation');

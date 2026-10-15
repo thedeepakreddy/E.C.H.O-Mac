@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import {requestedWindowClose} from '../brain/window-intent.js';
 import { basename, dirname, join } from "node:path";
 import { Brain, type AudioTurn , type SendOptions } from "../brain/types.js";
 import { Recorder, contentHash, INCOMPLETE_EXITS, type ExitReason, type ReplayEvent } from "./recorder.js";
@@ -28,6 +29,9 @@ import { consolidateTask, recordTaskStarted } from "../memory/consolidate.js";
 import { setPrivateTask } from "../memory/capture-policy.js";
 import { dataRoot } from "../memory/paths.js";
 import { conversationId, conversations, seedConversationFromRecordings } from "../memory/conversation.js";
+import {endEchoComputerTurn,echoAppCompletionProof} from '../tools/lcu-control.js';
+import {isAppOperationRequest,calculatorPostcondition} from '../brain/app-intent.js';
+import {calculatorResultMatches,isCalculatorReference} from '../tools/gui-completion-policy.js';
 import { memoryService } from "../memory/service.js";
 import { ProviderMemoryContext } from "../memory/provider-context.js";
 
@@ -210,7 +214,7 @@ export function currentRecorder(): Recorder | null {
   return currentAgentRunContext()?.recorder ?? fallbackActive;
 }
 
-function emitReplayedTool<T>(name: string, args: unknown): T {
+function emitReplayedTool<T>(name: string, args: unknown, onExecutionStart?: () => void): T {
   const session = getReplaySession();
   if (!session) throw new Error("replay session is not active");
   const exchange = session.source.nextToolExchange(name, args);
@@ -218,6 +222,10 @@ function emitReplayedTool<T>(name: string, args: unknown): T {
   if (rec) {
     const argsRef = rec.blob(args);
     rec.emit({ type: "tool.call", callId: exchange.call.callId, name, argsRef, argsHash: argsRef });
+    // A saved refusal or reused observation has no handler activity. Reproduce
+    // only the recorded execution, at the same point inside the tool boundary.
+    if (onExecutionStart && session.source.events.some(event => event.type === 'agent.tool' &&
+      event.callId === exchange.call.callId && event.seq > exchange.call.seq && event.seq < exchange.terminal.seq)) onExecutionStart();
     if (exchange.terminal.type === "tool.error") {
       rec.emit({ type: "tool.error", callId: exchange.call.callId, durationMs: Number(exchange.terminal.durationMs ?? 0), message: String(exchange.terminal.message), stack: exchange.terminal.stack });
       throw new ReplayedError(String(exchange.terminal.message), typeof exchange.terminal.stack === "string" ? exchange.terminal.stack : undefined);
@@ -236,13 +244,14 @@ function emitReplayedTool<T>(name: string, args: unknown): T {
 export async function takeReplayedTool<T>(
   name: string,
   args: unknown,
-  clockAlreadyConsumed = false
+  clockAlreadyConsumed = false,
+  onExecutionStart?: () => void
 ): Promise<{ handled: boolean; value?: T }> {
   if (!isReplaying()) return { handled: false };
   // `decide()` captures the clock before emitting a live tool call. Consume the
   // same input here without invoking any of its snapshots or confirmations.
   if (!clockAlreadyConsumed) agentNow();
-  return { handled: true, value: emitReplayedTool<T>(name, args) };
+  return { handled: true, value: emitReplayedTool<T>(name, args, onExecutionStart) };
 }
 
 function timeoutFromEnv(name: string, fallback: number): number {
@@ -263,14 +272,14 @@ function withDeadline<T>(action: () => Promise<T>, timeoutMs: number, label: str
 }
 
 /** Record one tool boundary without allowing recorder faults to affect Echo. */
-export function recordTool<T>(name: string, args: unknown, action: () => Promise<T>): Promise<T> {
+export function recordTool<T>(name: string, args: unknown, action: () => Promise<T>, executionId?: string): Promise<T> {
   if (isReplaying()) return Promise.resolve().then(() => emitReplayedTool<T>(name, args));
   const run = () => withDeadline(action, timeoutFromEnv("ECHO_TOOL_TIMEOUT_MS", DEFAULT_REQUEST_DEADLINE_MS), `tool ${name}`);
   const rec = currentRecorder();
   if (!rec || !payloadRecordingEnabled()) return run();
   let callId: string;
   try {
-    callId = currentInvocation()?.callId ?? randomUUID();
+    callId = currentInvocation()?.callId ?? executionId ?? randomUUID();
     const argsRef = rec.blob(args);
     rec.emit({ type: "tool.call", callId, name, argsRef, argsHash: argsRef });
   } catch {
@@ -524,6 +533,72 @@ export class RecordingBrain extends Brain {
   private readonly allowedTools?: ReadonlySet<string>;
   private toolAbort: AbortController | null = null;
   private privateConversationId?: string;
+  private heldAppText='';
+  // Always kept in memory, even when privacy settings omit durable prompts.
+  private appRequest='';
+  private appPause?:{context:AgentRunContext;ack:boolean;drained:boolean;failed:boolean;scheduled:boolean;timer?:NodeJS.Timeout;pending:Array<{text:string;audio?:AudioTurn;opts?:SendOptions}>};
+
+  private failAppPause(pause:NonNullable<RecordingBrain['appPause']>):void {
+    if(this.appPause!==pause||pause.failed)return;
+    pause.failed=true;if(pause.timer)clearTimeout(pause.timer);
+    const message='The provider could not confirm a safe pause. Queued instructions were not started. Restart the brain before continuing.';
+    if(this.checkpoint?.status!=='cancelled'&&this.checkpoint?.taskId===pause.context.taskId){
+      this.checkpoint.status='exhausted';this.checkpoint.lastExitReason='provider_error';
+      taskCoordinator.finish(this.checkpoint.taskId,{status:'blocked',summary:message});
+      this.persistCheckpoint(pause.context.recorder.dir,this.checkpoint);
+    }
+    this.emit('error',message);this.emitTerminal(pause.context.recorder.runId);
+  }
+  private releaseAppPause(pause:NonNullable<RecordingBrain['appPause']>):void {
+    if(this.appPause!==pause||pause.failed||!pause.ack||!pause.drained||pause.scheduled)return;
+    pause.scheduled=true;
+    // Let the original provider finish its finally/drain code before a new run.
+    queueMicrotask(()=>{
+      if(this.appPause!==pause||pause.failed)return;
+      if(pause.timer)clearTimeout(pause.timer);
+      this.appPause=undefined;
+      for(const pending of pause.pending)this.send(pending.text,pending.audio,pending.opts);
+    });
+  }
+
+  private appTaskRequiresProof():boolean {
+    return this.identity.kind==='main'&&!!this.checkpoint&&isAppOperationRequest(this.appRequest);
+  }
+  private configureAppPause(context:AgentRunContext):void {
+    if(!this.appTaskRequiresProof())return;
+    context.onAppQuestion=()=>{
+      if(this.context!==context||context.loop.hasExited||!context.appQuestion)return;
+      const abort=this.toolAbort;
+      const pause:NonNullable<RecordingBrain['appPause']>={context,ack:false,drained:false,failed:false,scheduled:false,pending:[]};
+      this.appPause=pause;
+      pause.timer=setTimeout(()=>this.failAppPause(pause),15000);pause.timer.unref();
+      // Called by the gate only after the question call result is committed.
+      context.loop.exit('completed',{detail:'Awaiting the user’s app clarification'});
+      abort?.abort();
+      void Promise.resolve().then(()=>this.inner.pauseForInput()).then(()=>{
+        pause.ack=true;this.releaseAppPause(pause);
+      },()=>this.failAppPause(pause));
+    };
+  }
+  private appTaskProved(runId:string):boolean {
+    const proof=echoAppCompletionProof(runId);if(!proof)return false;
+    const request=this.appRequest;
+    if(/\bclose\b/i.test(request)){
+      if(proof.kind!=='window_closed'||proof.condition?.kind!=='window_closed'||proof.inputCount<=0)return false;
+      return !!proof.nativeAppName&&requestedWindowClose(request,proof.condition.title,proof.nativeAppName);
+    }
+    if(/\bcalculator\b/i.test(request)&&!isCalculatorReference(proof.app))return false;
+    const arithmetic=calculatorPostcondition(request);
+    if(/\bcalculator\b/i.test(request)&&/\b(?:calculate|compute)\b/i.test(request)&&!arithmetic)return false;
+    if(arithmetic){
+      const normalize=(value:string)=>value.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\s]/g,'').replace(/×/g,'*').replace(/÷/g,'/').replace(/−/g,'-').replace(/=$/,'');
+      if(!isCalculatorReference(proof.app)||proof.kind!=='text'||proof.condition?.kind!=='text'||!proof.inputCount||!proof.expression||normalize(proof.expression)!==arithmetic.expression)return false;
+      return calculatorResultMatches(proof.condition.expected.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,''),arithmetic.value);
+    }
+    if(/\b(?:calculate|compute|type|enter|fill|click|tap|scroll|drag)\b/i.test(request))return proof.kind==='text'&&proof.inputCount>0;
+    if(/\b(?:move)\b/i.test(request))return proof.kind==='pointer';
+    return proof.kind==='visible'||proof.kind==='text';
+  }
 
   private recordConversation(role: "user" | "assistant", text: string, taskId?: string): void {
     if (isReplaying() || this.provider === "test" || this.identity.kind === "rehearsal" || !ProviderMemoryContext.enabled || this.lastSendOpts?.privateMode) return;
@@ -548,13 +623,61 @@ export class RecordingBrain extends Brain {
     this.maxRecoveryAttempts = options.maxRecoveryAttempts;
     this.recoveryDelayMs = options.recoveryDelayMs;
     this.allowedTools = options.limits?.allowedTools === undefined ? undefined : new Set(options.limits.allowedTools);
-    for (const event of ["status", "text", "textDelta", "textDone", "tool", "risk", "error", "turnEnd", "progress"] as const) {
+    this.supportsTaskUpdates = inner.supportsTaskUpdates;
+    for (const event of ["status", "text", "textDelta", "textDone", "tool", "toolEnd", "risk", "error", "turnEnd", "progress"] as const) {
       inner.on(event, (...args: any[]) => this.forward(event, args));
     }
   }
 
   private contextForEvent(): AgentRunContext | null {
     return currentAgentRunContext() ?? this.context;
+  }
+
+  readonly supportsTaskUpdates: boolean;
+  private readonly toolRuns = new Map<string, {taskId: string; actorId: string; runId: string}>();
+
+  queueTaskUpdate(text: string, applied: () => void): boolean {
+    const context = this.context;
+    if (!this.supportsTaskUpdates || !context) return false;
+    const generation = taskCoordinator.get(context.taskId)?.generation;
+    const ownsRun = () => {
+      const ambient = currentAgentRunContext();
+      const task = taskCoordinator.get(context.taskId);
+      return this.context === context && !this.stopped && !this.interrupted && !this.appPause &&
+        !context.loop.hasExited && !context.toolSignal?.aborted &&
+        context.identity.id === this.identity.id && (!ambient || ambient === context) &&
+        task?.ownerActorId === this.identity.id && task.generation === generation && task.status === 'running';
+    };
+    if (!ownsRun()) return false;
+    let accepted = false, consumed = false, acknowledged = false;
+    const acknowledge = () => {
+      if (!accepted || !consumed || acknowledged || !ownsRun()) return;
+      acknowledged = true;
+      const appUpdate = isAppOperationRequest(text);
+      if (appUpdate) {
+        this.appRequest = text;
+        this.heldAppText = '';
+        this.configureAppPause(context);
+      }
+      // Enqueue is not an applied update. Save the instruction only when the
+      // owning provider actually incorporates it at its request boundary.
+      if (this.checkpoint && context.payloadRecording) {
+        (this.checkpoint.followUpPrompts ??= []).push(text);
+        if (this.checkpoint.followUpPrompts.length > 20) this.checkpoint.followUpPrompts.shift();
+        if (appUpdate) this.checkpoint.appRequest = text;
+        this.persistCheckpoint(context.recorder.dir, this.checkpoint);
+      }
+      this.recordConversation('user', text, context.taskId);
+      applied();
+    };
+    accepted = runInAgentContext(context, () => this.inner.queueFencedTaskUpdate(text, () => {
+      consumed = true;
+      acknowledge();
+    }, ownsRun));
+    // Also support providers that consume synchronously, but never acknowledge
+    // a refusing provider even if it incorrectly called back before returning.
+    acknowledge();
+    return accepted;
   }
 
   private updateCheckpoint(event: ReplayEvent, checkpoint: RecoveryCheckpoint, runDir: string): void {
@@ -601,6 +724,29 @@ export class RecordingBrain extends Brain {
 
   private forward(event: string, args: any[]): void {
     const context = this.contextForEvent();
+    if (event === 'tool' || event === 'toolEnd') {
+      // Provider/model-supplied owner fields are not authority. Stamp the
+      // actual emitting context, never another worker's ambient context.
+      if (!context || context.identity.id !== this.identity.id) return;
+      const info = args[0] ?? {};
+      const callId = currentInvocation()?.callId ?? info.callId;
+      const owner = {taskId: context.taskId, actorId: context.identity.id, runId: context.recorder.runId};
+      if (event === 'tool') {
+        if (this.stopped || this.interrupted || context !== this.context || context.loop.hasExited) return;
+        if (typeof callId === 'string') this.toolRuns.set(callId, owner);
+      }
+      // An old handler can drain after a successor starts. Its end closes only
+      // its original call/run, even with the SDK's successor-following context.
+      const stamp = event === 'toolEnd' && typeof callId === 'string' ? this.toolRuns.get(callId) ?? owner : owner;
+      if (event === 'toolEnd' && typeof callId === 'string') this.toolRuns.delete(callId);
+      args = [{...info, ...stamp, ...(callId === undefined ? {} : {callId})}, ...args.slice(1)];
+    }
+    // Provider speech is not a proof of GUI success. Hold both streamed and
+    // whole replies until the same foreground run verifies its native result.
+    if(this.appTaskRequiresProof()&&['text','textDelta','textDone'].includes(event)){
+      if(event==='text')this.heldAppText=String(args[0]??'').slice(-12000);
+      return;
+    }
     if (event === "text" && !this.stopped) this.recordConversation("assistant", String(args[0] ?? ""), context?.taskId ?? this.checkpoint?.taskId);
     const rec = context?.recorder ?? null;
     try {
@@ -618,6 +764,7 @@ export class RecordingBrain extends Brain {
         rec.emit({
           type: "agent.tool",
           name,
+          callId: info.callId,
           summary: context?.payloadRecording ? String(info.summary ?? name).slice(0, 1000) : undefined,
         });
         if (this.checkpoint) {
@@ -651,6 +798,11 @@ export class RecordingBrain extends Brain {
     }
 
     if (event === "turnEnd") {
+      if(this.appPause){
+        const pause=this.appPause;
+        this.emitTerminal(pause.context.recorder.runId);
+        pause.drained=true;this.releaseAppPause(pause);return;
+      }
       const runId = context?.recorder.runId;
       if (context && !context.loop.hasExited) {
         context.loop.exit(this.interrupted ? "abort_signal" : "unknown_fallthrough", {
@@ -701,6 +853,11 @@ export class RecordingBrain extends Brain {
   }
 
   private cleanup(context: AgentRunContext): void {
+    // The LCU controller retains the desktop lease until cleanup is confirmed.
+    void endEchoComputerTurn(context.recorder.runId,context.toolSignal?.aborted?'Interrupt':'Stop').catch(error=>{
+      console.error('[echo:lcu] cleanup incomplete; desktop remains fenced:',error);
+      this.emit('error','Computer-control cleanup is incomplete. Further desktop input is blocked until cleanup succeeds.');
+    });
     activeRecorders.delete(context.recorder);
     clearCurrentLoop(context.loop);
     if (fallbackActive === context.recorder) fallbackActive = null;
@@ -725,6 +882,31 @@ export class RecordingBrain extends Brain {
     }
 
     if (reason === "completed") {
+      if(this.appTaskRequiresProof()){
+        const question=context.appQuestion;
+        if(question){
+          checkpoint.status='waiting';checkpoint.lastAssistantText=question;
+          taskCoordinator.finish(checkpoint.taskId,{status:'waiting',summary:question});
+          this.heldAppText='';this.recordConversation('assistant',question,checkpoint.taskId);this.emit('text',question);
+          context.recorder.emit({type:'task.waiting_for_input'});
+          this.persistCheckpoint(context.recorder.dir,checkpoint);this.cleanup(context);return;
+        }
+        if(!this.appTaskProved(context.recorder.runId)){
+          const message="I haven’t verified the requested result in the app, so this task is not complete. "+(checkpoint.restartable?'Recorded progress is preserved. ':'')+"I won’t claim success or replay uncertain input.";
+          checkpoint.status='exhausted';checkpoint.lastExitReason='model_stop_no_tool_call';checkpoint.lastExitDetail='App completion rejected: no current native postcondition';
+          this.heldAppText='';this.finalFailureMessage=message;
+          taskCoordinator.finish(checkpoint.taskId,{status:'blocked',summary:message});
+          context.recorder.emit({type:'task.completion_refused',reason:'missing_app_postcondition'});
+          this.persistCheckpoint(context.recorder.dir,checkpoint);this.cleanup(context);return;
+        }
+        const arithmetic=calculatorPostcondition(this.appRequest),condition=echoAppCompletionProof(context.recorder.runId)?.condition;
+        const text=arithmetic&&condition?.kind==='text'
+          ? `Calculator shows ${condition.expected.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,'').trim()} for ${arithmetic.expression}.`
+          :condition?.kind==='window_closed'?`Closed the “${condition.title}” window.`
+          :this.heldAppText;
+        this.heldAppText='';
+        if(text){checkpoint.lastAssistantText=text;this.recordConversation('assistant',text,checkpoint.taskId);this.emit('text',text);}
+      }
       checkpoint.status = "completed";
       this.finalizeTask(checkpoint, "completed");
       this.persistCheckpoint(context.recorder.dir, checkpoint);
@@ -799,8 +981,13 @@ export class RecordingBrain extends Brain {
   }
 
   private beginRun(userText: string, checkpoint?: RecoveryCheckpoint, audio?: AudioTurn): void {
+    this.heldAppText='';
+    this.appRequest=checkpoint?.appRequest||checkpoint?.originalPrompt|| (checkpoint ? this.appRequest : userText);
     const replay = getReplaySession();
     const root = replay ? replayOutputRoot(replay.runDir) : loopLogRoot();
+    let admission:{taskId:string;revision:number;ownerActorId:string}|undefined;
+    let pendingRecorder:Recorder|undefined;
+    let admissionOpen=true;
     try {
       installProcessHandlers();
       const privateMode = this.lastSendOpts?.privateMode === true || checkpoint?.privateMode === true;
@@ -824,6 +1011,7 @@ export class RecordingBrain extends Brain {
       task.restartable = !privateMode && fullPayload && !!task.originalPrompt;
       if (!replay) {
         const state = taskCoordinator.create({ taskId: task.taskId, parentTaskId: this.lastSendOpts?.parentTaskId ?? this.identity.parentTaskId, ownerActorId: this.identity.id, goal: userText, scope: task.scope, privateMode });
+        admission={taskId:state.taskId,revision:state.revision,ownerActorId:state.ownerActorId};
         task.taskRevision = state.revision;
         setPrivateTask(task.taskId, privateMode);
         try {
@@ -846,7 +1034,10 @@ export class RecordingBrain extends Brain {
         }
       }
       const recorder = root && !privateMode ? new Recorder(root, runIdFor(task.actor)) : ephemeralRecorder(runIdFor(task.actor));
+      pendingRecorder=recorder;
       if (!replay) taskCoordinator.recordAttempt(task.taskId, recorder.runId);
+      if (checkpoint) taskCoordinator.finish(task.taskId,{status:'running'});
+      if(admission)admission.revision=taskCoordinator.get(admission.taskId)?.revision??admission.revision;
       task.provider = this.provider;
       task.model = String(this.loopConfig.model ?? "unknown");
       const log = new LoopLog(recorder, this.provider, String(this.loopConfig.model ?? "unknown"));
@@ -870,6 +1061,7 @@ export class RecordingBrain extends Brain {
 
       this.context = context;
       this.checkpoint = task;
+      this.configureAppPause(context);
       this.interrupted = false;
       task.status = "running";
       task.lastRunId = recorder.runId;
@@ -925,10 +1117,37 @@ export class RecordingBrain extends Brain {
       if (!checkpoint && !replay && !privateMode && task.actor.kind !== "rehearsal") rememberRequest(userText);
       runInAgentContext(context, () => {
         setAgentDeps(context.deps as any);
+        pendingRecorder=undefined;admissionOpen=false;
         this.inner.send(userText, audio, this.lastSendOpts);
       });
     } catch (error) {
       console.error("[echo:log] could not start the run log:", (error as any)?.message ?? error);
+      // Admission lasts through durable checkpoint/prompt setup, until provider
+      // dispatch. A context object alone does not mean execution has started.
+      if(admissionOpen&&admission&&!replay)try{
+        const state=taskCoordinator.get(admission.taskId);
+        if(state&&state.ownerActorId===admission.ownerActorId&&state.revision===admission.revision
+          &&!state.result&&['running','waiting','verifying'].includes(state.status)){
+          const blocked=taskCoordinator.finish(state.taskId,{status:'blocked',summary:'This attempt could not start because task/diagnostic storage could not be persisted. No new action started; saved progress is unchanged. Check storage before Retry.'});
+          if(!blocked.privateMode&&this.identity.kind!=='rehearsal')consolidateTask({
+            taskId:blocked.taskId,scope:blocked.scope as any,goal:blocked.goal,
+            outcome:'failed',executionStatus:'failed',verificationRefs:blocked.verificationRefs,
+            attemptIds:blocked.attemptIds,actorId:blocked.ownerActorId,origin:'real',
+          });
+        }
+        setPrivateTask(admission.taskId,false);
+      }catch{/* Storage may also prevent the blocked state; the explicit error remains. */}
+      if(admissionOpen&&this.context&&admission?.taskId===this.context.taskId){
+        this.context.loop.stopHeartbeat();
+        if(this.checkpoint?.taskId===admission.taskId){
+          this.checkpoint.status='exhausted';this.checkpoint.lastExitReason='provider_error';
+          this.checkpoint.lastExitDetail='Startup persistence failed before provider dispatch; review storage before retrying.';
+          this.persistCheckpoint(this.context.recorder.dir,this.checkpoint);
+        }
+      }
+      try{pendingRecorder?.finish(false,'provider_error',0,'Startup persistence failed before provider dispatch.');}
+      catch{/* Preserve the original admission error if terminal recording also fails. */}
+      finally{try{pendingRecorder?.close();}catch{/* Best-effort reservation release. */}}
       if (this.context) this.cleanup(this.context);
       replaySession = null;
       resetAgentDeps();
@@ -1028,6 +1247,13 @@ export class RecordingBrain extends Brain {
   }
 
   send(userText: string, audio?: AudioTurn, opts?: SendOptions): void {
+    if(this.appPause){
+      if(this.appPause.failed)this.emit('error','Provider pause failed. Restart the brain before continuing; no instruction was started.');
+      else if(this.appPause.pending.length<20)this.appPause.pending.push({text:userText,audio,opts});
+      else this.emit('error','Too many instructions are waiting for the provider to pause. No additional instruction was queued.');
+      return;
+    }
+    const previousOptions=this.lastSendOpts;
     const scope = opts?.scope ?? {};
     if (opts?.privateMode && !this.privateConversationId) this.privateConversationId = conversationId(`${this.identity.id}:private:${randomUUID()}`, scope);
     if (!opts?.privateMode) this.privateConversationId = undefined;
@@ -1037,6 +1263,11 @@ export class RecordingBrain extends Brain {
       // A follow-up can arrive while the provider is still draining the same
       // conversation. Keep it in the owning clone's async context and tape.
       const context = this.context;
+      if(isAppOperationRequest(userText)){
+        this.appRequest=userText;this.heldAppText='';
+        if(this.checkpoint&&context.payloadRecording)this.checkpoint.appRequest=userText;
+        this.configureAppPause(context);
+      }
       this.lastSendOpts = { ...this.lastSendOpts, taskId: context.taskId, conversationId: context.conversationId, privateMode: context.privateMode, scope: context.scope };
       this.recordConversation("user", userText, context.taskId);
       if (context.payloadRecording) {
@@ -1052,12 +1283,25 @@ export class RecordingBrain extends Brain {
       return;
     }
     this.stopped = false;
+    if(this.checkpoint?.status==='waiting'){
+      const waiting=this.checkpoint;
+      const sameConversation=previousOptions?.conversationId===this.lastSendOpts.conversationId&&(previousOptions?.privateMode===true)===(this.lastSendOpts.privateMode===true);
+      if(sameConversation&&!isAppOperationRequest(userText)&& !/^(?:stop|cancel|forget|new task|instead)\b/i.test(userText.trim())){
+        if(!waiting.privateMode&&waiting.restartable)(waiting.followUpPrompts??=[]).push(userText);
+        this.recordConversation('user',userText,waiting.taskId);
+        this.beginRun(`${this.appRequest}\n\nUser answer to the clarification: ${userText}`,waiting,audio);return;
+      }
+      waiting.status='cancelled';this.finalizeTask(waiting,'cancelled');
+      const dir=waiting.runDirs.at(-1);if(dir)this.persistCheckpoint(dir,waiting);
+      this.checkpoint=null;
+    }
     this.beginRun(userText, undefined, audio);
   }
 
   /** Resume a task left `running` by a dead process. Used once during startup. */
   recoverFromCheckpoint(checkpoint: RecoveryCheckpoint): boolean {
-    if (this.context || this.stopped) return false;
+    if (this.context || this.stopped || this.appPause) return false;
+    if(checkpoint.status==='waiting')return false;
     if (checkpoint.restartable === false || !checkpoint.originalPrompt) return false;
     if (checkpoint.recoveryAttempts >= checkpoint.maxRecoveryAttempts) {
       checkpoint.status = "exhausted";
@@ -1074,7 +1318,12 @@ export class RecordingBrain extends Brain {
   }
 
   interrupt(): void {
+    if(this.appPause)this.appPause.pending=[];
     this.interrupted = true;
+    if(this.checkpoint?.status==='waiting'){
+      this.checkpoint.status='cancelled';this.finalizeTask(this.checkpoint,'cancelled');
+      const dir=this.checkpoint.runDirs.at(-1);if(dir)this.persistCheckpoint(dir,this.checkpoint);
+    }
     this.toolAbort?.abort();
     // Before the unconditional clear below, which would otherwise drop the
     // timer and leave the checkpoint behind as pending.
@@ -1087,7 +1336,12 @@ export class RecordingBrain extends Brain {
   }
 
   async stop(): Promise<void> {
+    if(this.appPause){this.appPause.pending=[];if(this.appPause.timer)clearTimeout(this.appPause.timer);this.appPause.failed=true;}
     this.stopped = true;
+    if(this.checkpoint?.status==='waiting'){
+      this.checkpoint.status='cancelled';this.finalizeTask(this.checkpoint,'cancelled');
+      const dir=this.checkpoint.runDirs.at(-1);if(dir)this.persistCheckpoint(dir,this.checkpoint);
+    }
     this.toolAbort?.abort();
     this.interrupted = true;
     // Quitting mid-backoff is the likeliest way to hit this: the loop has just
@@ -1098,6 +1352,7 @@ export class RecordingBrain extends Brain {
     const context = this.context;
     context?.loop.exit("abort_signal", { detail: "brain stopped" });
     await this.inner.stop();
+    if(context)await endEchoComputerTurn(context.recorder.runId,'Interrupt');
   }
 }
 

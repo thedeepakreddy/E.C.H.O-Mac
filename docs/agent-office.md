@@ -18,7 +18,7 @@ Mac standing specialists, including the internal report compiler and custom agen
 
 Desktop or external-write requirements must be reported as blocked remaining steps for Echo to review. Automatic delegation to Echo and automatic spoken delivery are not implemented by this increment. Changed capability policy invalidates stale assignment/retry revisions rather than silently widening saved task grants. Existing running workers need to be stopped and Echo restarted to receive the new capability set.
 
-LCU remains intended only for Echo’s foreground computer-control path, not these specialists. Echo has not switched controllers. LCU 0.11.2 was checksum-verified and prepared under an isolated temporary prefix without registering an agent or changing Codex settings. Original MCP initialization, JavaScript execution, native application inventory and the matching turn cleanup passed against installed app 26.1002.52244 / CUA 0.0.29. All permission requests were cancelled; no app was selected and no clicks, typing or screenshots were performed. Desktop-action approval and effect verification still require testing before cutover.
+LCU is implemented locally for Echo’s foreground computer-control path, not these specialists; native-action acceptance is still pending. See [the integration record](lcu-integration.md) for ownership, input routes, original permissions, preserved results, retired bypasses and compatibility limits. LCU 0.11.2 was checksum-verified and installed in Echo’s dedicated local prefix without registering an agent or changing Codex settings. The earlier isolated read-only initialization/inventory/cleanup probe passed against app 26.1002.52244 / CUA 0.0.29. A human-approved Calculator test is required before publishing or claiming native input is verified.
 
 The [documented macOS socket-path limit](https://github.com/amontlabs/lcu/blob/main/docs/INSTALLATION.md#macos) is 103 bytes; this account’s default helper path is 104 bytes. Contrary to the documented warning, the existing socket accepted a connection and the LCU inventory probe succeeded on this installed runtime. Treat that as a compatibility warning, not a reproduced startup failure; cold-start resilience is still unverified. No account/home change, helper modification or permission bypass was performed. Background boundary verification: 121/121 Mac offline checks and production build passed; the pre-existing duplicate researchtest warning remains unrelated.
 
@@ -72,5 +72,36 @@ FORM: User-selected option A, Office + Inspector, from the three preview composi
 FINISH: Review the rendered Mac and Phone layouts and document the runtime/control wiring; retain licensed asset provenance and verify the release health.
 
 ## Local viewport polish — October 12
+
+Historical validation notes below describe the October 12 state. The October 14
+reliability changes supersede its unfinished voice-handoff note.
+
+## Office reliability — October 14
+
+Mac now exposes six genuine background specialists, including Verify; the
+internal Lead compiler is not a seventh desk. Failed compilation exposes
+**Retry final report** in workspace options on both clients. It recompiles saved
+completed reports without restarting specialists. Controls bind exact task,
+attempt and stable command UUID, including transport retries.
+
+Live animation starts at actual handler execution, not model-call assembly.
+Call/attempt identities pair completions without clearing a different active
+call. RecordingBrain preserves supported live updates and acknowledges actual
+provider-boundary consumption; unsupported providers remain honestly disabled.
+
+Retry and revision retain a valid bounded evidence manifest. Explicit
+owner-authorized source task and call IDs page original evidence rather than
+silently cutting JSON or losing older sources. Uncertain effects remain blocked.
+
+Echo queues voice handoffs only from committed, host-created office missions.
+Speech waits for an idle local voice lane and matching project scope; private
+content is withheld. Durable claims precede playback and only a real playback
+acknowledgment marks delivery complete. Stop cancels queued/in-flight delivery,
+including before the queue is initialized. Unknown claimed sound after a crash
+is never automatically repeated; the report remains readable in Tasks.
+
+Local fake-provider, queue, speech and browser fixtures are verification of
+these contracts, not proof of native audio, physical iPhone or deployed Render
+behavior. Changes remain local for user review.
 
 Both isolated UI suites verify the actual task/control adapters, 36/44px targets, exact task/attempt identity, retry IDs, hidden coordinator controls, six-seat fixtures, no workspace scrolling, preserved drafts, safe Markdown, history/follow-up/management, offline targets and reduced motion. Safari regressions cover deferred ResizeObserver writes and completed output remaining visible instead of shrinking to zero. The UI still shares one authoritative runner; this sizing pass does not add a new automatic voice-delivery mechanism. Echo voice completion reporting remains separate unfinished wiring work, rather than a claimed feature of the decorative coordinator tile. No push/deploy or 12UI reference upload occurred; production appearance and asset/performance gates remain pending.

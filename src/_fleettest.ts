@@ -25,9 +25,9 @@ console.log("\nAgent fleet\n");
 _resetForTests();
 
 const builtIns = listFleet();
-ok(builtIns.length === 6, `six built-in agents (got ${builtIns.length})`);
+ok(builtIns.length === 7, `six visible specialists plus the internal compiler (got ${builtIns.length})`);
 ok(builtIns.every((m) => !m.custom), "every built-in is marked non-custom");
-ok(["lead", "research", "plan", "write", "review", "analyse"].every((id) => builtIns.some((m) => m.id === id)), "the expected six ids are present");
+ok(["lead", "research", "plan", "write", "review", "analyse", "verify"].every((id) => builtIns.some((m) => m.id === id)), "the expected compiler and six specialist ids are present");
 ok(allowedToolsFor(builtIns[0]).has('web_search') && !allowedToolsFor(builtIns[0]).has('click'), "a built-in agent has background research grants, never desktop input");
 
 // ---- adding a custom agent -----------------------------------------------------
@@ -36,13 +36,13 @@ ok(grantable.length > 0, `there are grantable (read-only) tools to offer (${gran
 
 const added = addFleetMember({ id: "tax", name: "Tax", description: "Answers about filings.", brief: "You answer tax questions.", tier: "balanced", tools: [grantable[0], "run_terminal_command"] });
 ok(added.tools.includes(grantable[0]) && !added.tools.includes("run_terminal_command"), "a non-read-only tool is silently dropped from what's granted, never a write tool");
-ok(listFleet().length === 7, "the roster now has seven agents");
+ok(listFleet().length === builtIns.length + 1, "the custom specialist is added to the built-in roster");
 const allowed = allowedToolsFor(added);
 ok(!!allowed && allowed.has(grantable[0]) && !allowed.has("run_terminal_command"), "the custom agent's allowlist matches exactly what was granted");
 
 // ---- re-adding the same id updates rather than duplicates ------------------------
 addFleetMember({ id: "tax", name: "Tax Agent", description: "d", brief: "b", tier: "fast", tools: [] });
-ok(listFleet().length === 7, "saving the same id again replaces it rather than adding a second one");
+ok(listFleet().length === builtIns.length + 1, "saving the same id again replaces it rather than adding a second one");
 ok(getFleetMember("tax")?.name === "Tax Agent", "the replacement took effect");
 
 // ---- built-ins are protected ----------------------------------------------------
@@ -109,7 +109,7 @@ const activeConfig:any={brain:'gemini',gemini:{model:'first'},claude:{model:'cla
 const liveFactory=makeFleetBrain(activeConfig,fakeCreate);
 for(const provider of ['gemini','claude','openai','openrouter','nvidia','ollama']){
  activeConfig.brain=provider;
- for(const profile of ['research','plan','write','review','analyse','lead','reader']){
+ for(const profile of ['research','plan','write','review','analyse','verify','lead','reader']){
   liveFactory(identity,{profile,budget} as any);const last=built.at(-1)!;
   ok(last.brain===provider,`${profile} follows active ${provider}`);
   ok(last.config[provider].model===activeConfig[provider].model,`${profile} preserves ${provider}'s selected model`);

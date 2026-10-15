@@ -1,7 +1,13 @@
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeFileSync, constants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { NVIDIA_KEY_SHAPE, REDACTED } from '../safety/redact.js';
+import { accountDiagnosticWrite, checkDiagnosticWrite, validateDiagnosticPath, reserveDiagnosticSpace, directoryBytes, REPLAY_BUDGET, StorageBudgetError, type DiagnosticOptions } from '../diagnostics/storage-budget.js';
+
+export interface ReplayStorageOptions extends DiagnosticOptions {
+  eventBytes?: number; blobBytes?: number; singleBlobBytes?: number; eventCount?: number;
+  terminalReserveBytes?: number; terminalEventBytes?: number;
+}
 
 /**
  * Why a run stopped.
@@ -107,13 +113,34 @@ export class Recorder {
   private seq = 0;
   private readonly started = performance.now();
   private closed = false;
+  private eventCount = 0;
+  private blobBytes = 0;
+  private storageFailure: StorageBudgetError | null = null;
+  private readonly terminals = new Set<string>();
+  private readonly budget: { [K in keyof typeof REPLAY_BUDGET]: number } & DiagnosticOptions;
+  private readonly releaseReservation: () => void;
 
   // `runId: string`, not the UUID template type randomUUID() infers: a caller
   // may supply a readable id, and a run's identity is not required to be a UUID.
-  constructor(rootDir: string, runId: string = randomUUID(), private readonly redact: Redactor = defaultRedactor) {
+  constructor(private readonly rootDir: string, runId: string = randomUUID(), private readonly redact: Redactor = defaultRedactor, options: ReplayStorageOptions = {}) {
+    this.budget = { ...REPLAY_BUDGET, ...options };
+    const b = this.budget;
+    if (!Object.values({ eventBytes:b.eventBytes, blobBytes:b.blobBytes, singleBlobBytes:b.singleBlobBytes, eventCount:b.eventCount, terminalReserveBytes:b.terminalReserveBytes, terminalEventBytes:b.terminalEventBytes }).every(n => Number.isSafeInteger(n) && n > 0) || b.terminalReserveBytes < 3*b.terminalEventBytes || b.eventBytes <= b.terminalReserveBytes) throw new StorageBudgetError('invalid-replay-limit');
+    // Existing run names are readable basenames (including spaces/Unicode).
+    // Preserve their exact identity; only path syntax can escape this store.
+    if (typeof runId !== 'string' || !runId || runId === '.' || runId === '..' || /[/\\\0]/.test(runId)) throw new StorageBudgetError('unsafe-run-path');
     this.runId = runId;
     this.dir = join(rootDir, runId);
-    mkdirSync(join(this.dir, "blobs"), { recursive: true });
+    validateDiagnosticPath(rootDir, join(this.dir, 'blobs'));
+    try {
+      const reservation = reserveDiagnosticSpace(rootDir, join(this.dir, 'events.jsonl'), b.terminalReserveBytes, { ...options, fileBytes: b.eventBytes });
+      this.releaseReservation = reservation.release;
+      this.budget.reservationOwner = reservation.owner;
+      try {
+        mkdirSync(join(this.dir, "blobs"), { recursive: true });
+        this.blobBytes = directoryBytes(join(this.dir, 'blobs'), options);
+      } catch (error) { this.releaseReservation(); throw error; }
+    } catch (error) { (options.warn ?? console.warn)('[storage] Replay admission stopped; terminal capacity could not be reserved. Manually archive diagnostics before retrying.'); throw error; }
   }
 
   /**
@@ -127,13 +154,15 @@ export class Recorder {
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(event)) {
       if (value === undefined) continue;
+      const redacted = this.redact(`$.${key}`, value);
+      if (redacted !== value) { out[key] = redacted; continue; }
       if (value === null || typeof value !== "object") {
         out[key] = value;
         continue;
       }
       let json: string;
       try {
-        json = stableJson(value, this.redact);
+        json = stableJson(value, this.redact, `$.${key}`);
       } catch {
         out[key] = "[unserializable]";
         continue;
@@ -143,39 +172,84 @@ export class Recorder {
         continue;
       }
       try {
-        out[`${key}Ref`] = this.blob(value);
+        out[`${key}Ref`] = this.writeBlob(json);
         out[`${key}Bytes`] = Buffer.byteLength(json, "utf8");
-      } catch {
-        // A full disk must cost the payload, never the event that explains the run.
-        out[`${key}Ref`] = "[blob-write-failed]";
+      } catch (error) {
+        // A missing payload must never masquerade as replayable evidence.
+        throw error;
       }
     }
     return out;
   }
 
   blob(value: unknown): string {
-    const json = stableJson(value, this.redact);
+    return this.writeBlob(stableJson(value, this.redact));
+  }
+
+  private writeBlob(json: string): string {
+    if (this.closed) throw new Error('cannot write to a closed replay recorder');
+    if (this.storageFailure) throw this.storageFailure;
     const hash = createHash("sha256").update(json).digest("hex");
     const file = join(this.dir, "blobs", hash);
-    if (!existsSync(file)) writeFileSync(file, json, { mode: 0o600 });
+    try {
+      validateDiagnosticPath(this.rootDir, file);
+      if (!existsSync(file)) {
+        const bytes = Buffer.byteLength(json);
+        if (bytes > this.budget.singleBlobBytes || this.blobBytes + bytes > this.budget.blobBytes) throw new StorageBudgetError('replay-blob-limit');
+        checkDiagnosticWrite(this.rootDir, file, bytes, { ...this.budget, reservationOwner: undefined, fileBytes: this.budget.singleBlobBytes });
+        writeFileSync(file, json, { mode: 0o600, flag: 'wx' });
+        this.blobBytes += bytes; accountDiagnosticWrite(this.rootDir, file, bytes);
+      }
+    } catch (error) { this.stopRecording(error); throw this.storageFailure; }
     return hash;
   }
 
   emit(event: Record<string, unknown> & { type: string }, critical = false): ReplayEvent {
     if (this.closed) throw new Error("cannot write to a closed replay recorder");
-    const full: ReplayEvent = {
+    const terminal = event.type === 'loop.exit' || event.type === 'run.end';
+    if (!terminal && this.storageFailure) throw this.storageFailure;
+    if (terminal && this.terminals.has(event.type)) throw new StorageBudgetError('duplicate-terminal');
+    try {
+      if (!terminal && this.eventCount >= this.budget.eventCount) throw new StorageBudgetError('replay-event-count');
+      let payload = terminal ? event : this.spill(event);
+      if (terminal && this.storageFailure) payload = { ...event, evidenceComplete: false, recordingStopped: this.storageFailure.code,
+        ...(event.type === 'loop.exit' ? { detail: `${typeof event.detail === 'string' ? event.detail + ' ' : ''}Recording incomplete: ${this.storageFailure.code}.` } : {}) };
+      let full = this.envelope(payload);
+      if (terminal && Buffer.byteLength(stableJson(full, this.redact)) + 1 > this.budget.terminalEventBytes) {
+        this.stopRecording(new StorageBudgetError('terminal-payload-limit'));
+        // Keep the actual outcome, but explicitly label omitted oversized detail.
+        full = this.envelope({ type: event.type, reason: typeof event.reason === 'string' && event.reason.length < 128 ? event.reason : undefined,
+          ok: event.ok, iteration: event.iteration, durationMs: event.durationMs, evidenceComplete: false, terminalPayloadOmitted: true,
+          detail: 'Recording incomplete: terminal payload exceeded its reserved bytes.', originalBytes: Buffer.byteLength(stableJson(event, this.redact)), originalHash: createHash('sha256').update(stableJson(event, this.redact)).digest('hex') });
+      }
+      const protectedBytes = terminal ? (1 - this.terminals.size) * this.budget.terminalEventBytes : this.budget.terminalReserveBytes;
+      this.write(full, critical || terminal, protectedBytes);
+      if (terminal) this.terminals.add(event.type); else this.eventCount++;
+      this.mirror?.(full);
+      return full;
+    } catch (error) { this.stopRecording(error); throw this.storageFailure; }
+  }
+
+  private envelope(event: Record<string, unknown>): ReplayEvent {
+    return {
       seq: this.seq++,
       ts: Date.now(),
       iso: new Date().toISOString(),
       mono: performance.now() - this.started,
       runId: this.runId,
-      ...this.spill(event),
-      type: event.type,
+      ...event,
+      type: String(event.type),
     };
+  }
+
+  private write(full: ReplayEvent, critical: boolean, protectedBytes: number): void {
     const file = join(this.dir, "events.jsonl");
-    const fd = openSync(file, "a", 0o600);
+    const line = `${stableJson(full, this.redact)}\n`;
+    checkDiagnosticWrite(this.rootDir, file, Buffer.byteLength(line), { ...this.budget, fileBytes: this.budget.eventBytes }, protectedBytes);
+    const fd = openSync(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
     try {
-      appendFileSync(fd, `${stableJson(full, this.redact)}\n`);
+      appendFileSync(fd, line);
+      accountDiagnosticWrite(this.rootDir, file, Buffer.byteLength(line));
       // The runs worth reading are the ones that died, so every line is on disk
       // before the next one is built. `critical` additionally forces the
       // platform to flush its own cache, for a hard kill rather than a crash.
@@ -183,8 +257,16 @@ export class Recorder {
     } finally {
       closeSync(fd);
     }
-    this.mirror?.(full);
-    return full;
+  }
+
+  private stopRecording(error: unknown): void {
+    if (this.storageFailure) return;
+    this.storageFailure = error instanceof StorageBudgetError ? error : new StorageBudgetError('replay-write-unavailable');
+    (this.budget.warn ?? console.warn)(`[storage] Replay recording incomplete: ${this.storageFailure.message}`);
+    try {
+      this.write(this.envelope({ type: 'storage.budget', code: this.storageFailure.code, evidenceComplete: false,
+        detail: 'Payload and ordinary event recording stopped. Existing evidence is intact; manually archive after Echo exits.' }), true, 2 * this.budget.terminalEventBytes);
+    } catch { /* Disk/permission failure can defeat the reserve; the console warning remains explicit. */ }
   }
 
   /** Watch a live run. Set by the loop logger; never used for replay fidelity. */
@@ -192,13 +274,15 @@ export class Recorder {
 
   finish(ok: boolean, reason: ExitReason, iteration: number, detail?: string): void {
     if (this.closed) return;
-    this.emit({ type: "loop.exit", reason, iteration, detail }, true);
-    this.emit({ type: "run.end", ok, durationMs: performance.now() - this.started }, true);
-    this.closed = true;
+    try {
+      this.emit({ type: "loop.exit", reason, iteration, detail }, true);
+      this.emit({ type: "run.end", ok, durationMs: performance.now() - this.started }, true);
+    } finally { this.close(); }
   }
 
   /** Close after LoopLog has written its one run.end event. */
   close(): void {
     this.closed = true;
+    this.releaseReservation();
   }
 }

@@ -1,4 +1,6 @@
-import { appendFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync } from "node:fs";
+import { randomUUID } from 'node:crypto';
+import { DiagnosticLog, validateDiagnosticPath, type DiagnosticOptions } from '../diagnostics/storage-budget.js';
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -89,22 +91,27 @@ const STAMP_EVENTS: VoiceEventType[] = [
 /** Payload keys worth showing on the console line; the rest stays in the file. */
 const SHOWN = ["state", "prev", "engine", "reason", "why", "ms", "score", "level", "bar", "text", "chars", "provider", "wake", "sentence"];
 
-class VoiceLog {
+export class VoiceLog {
   private file: string | null = null;
+  private sink: DiagnosticLog | null = null;
+  private initialized = false;
   private seq = 0;
   private marks = new Map<string, Map<string, number>>();
   private meta = new Map<string, { wake?: string; transcript?: string }>();
   private quiet = false;
 
   /** Choose the file for this launch. Safe to call more than once. */
-  init(appRoot: string, options: { quiet?: boolean } = {}): string | null {
+  init(appRoot: string, options: { quiet?: boolean; budget?: DiagnosticOptions } = {}): string | null {
     this.quiet = options.quiet ?? false;
-    if (this.file) return this.file;
+    if (this.initialized) return this.file;
+    this.initialized = true;
     try {
       const dir = join(appRoot, "runs", "voice");
+      validateDiagnosticPath(join(appRoot, 'runs'), join(dir, 'voice.jsonl'));
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      this.file = join(dir, `${stamp}.jsonl`);
+      this.file = join(dir, `${stamp}-${randomUUID()}.jsonl`);
+      this.sink = new DiagnosticLog(join(appRoot, 'runs'), this.file, options.budget);
       this.event("session.start", { pid: process.pid });
       return this.file;
     } catch (err) {
@@ -142,12 +149,9 @@ class VoiceLog {
       if (typeof payload.transcript === "string") cur.transcript = payload.transcript;
       this.meta.set(turnId, cur);
     }
-    if (this.file) {
-      try {
-        appendFileSync(this.file, JSON.stringify(ev) + "\n");
-      } catch {
-        /* a full disk must not take the voice down */
-      }
+    if (this.sink) {
+      try { if (!this.sink.append(JSON.stringify(ev) + '\n')) this.file = null; }
+      catch { this.file = null; this.sink = null; console.warn('[storage] Voice log stopped: event could not be serialized; manually archive diagnostics before restarting.'); }
     }
     if (!this.quiet && type !== "stt.partial") {
       const shown = SHOWN.filter((k) => payload[k] !== undefined)

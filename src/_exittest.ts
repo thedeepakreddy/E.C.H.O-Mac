@@ -31,7 +31,7 @@ const { GeminiBrain } = await import("./brain/gemini.js");
 const { RecordingBrain } = await import("./agent-replay/runtime.js");
 const { LOOP_CAPS } = await import("./brain/types.js");
 const { DEFAULTS_FOR_TESTS } = await import("./config.js");
-const { modelHealth } = await import("./brain/model-health.js");
+const { scopedModelHealth } = await import("./brain/model-health.js");
 
 let pass = 0;
 let fail = 0;
@@ -73,7 +73,12 @@ async function runCase(
   // failed at model selection, reporting `provider_error` for a dropped
   // connection and for a user interrupt alike. Two real exit paths went
   // untested behind those false failures.
-  modelHealth.reset();
+  scopedModelHealth({
+    provider: "gemini",
+    account: "test-key",
+    environment: cfg.gemini.apiKeyEnv,
+    endpoint: "generativelanguage:v1beta",
+  }).reset();
   const before = new Set(existsSync(root) ? readdirSync(root) : []);
   const inner = new GeminiBrain(cfg, "test-key");
   // Stub the transport, not the loop: everything under test still runs.

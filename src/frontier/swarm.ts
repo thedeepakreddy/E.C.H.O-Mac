@@ -135,6 +135,8 @@ export interface CloneBrain {
 export interface SwarmDeps {
   /** Make a fresh background brain for one clone. */
   makeBrain: (identity: AgentIdentity, task?: MissionTaskState) => CloneBrain;
+  /** Used only to reconstruct the saved attempt, never for future queued work. */
+  makeRecoveredBrain?: (identity: AgentIdentity, task?: MissionTaskState) => CloneBrain;
   coordinator?: TaskCoordinator;
   /** Push the current roster to the UI. Defaults to the overlay. */
   broadcast?: (clones: Array<{ name: string; progress: string }>) => void;
@@ -213,6 +215,10 @@ export class SwarmManager {
   private stopping = new Set<Promise<unknown>>();
   private extraRoster: () => Array<{name:string;progress:string}> = () => [];
   private reservedCapacity: () => number = () => 0;
+  private terminalListener?: (mission: MissionState) => void;
+
+  /** Host notification only, after committing the terminal Result and mission. */
+  setTerminalListener(listener: (mission: MissionState) => void): void {this.terminalListener=listener;}
 
   setExtraRoster(read: () => Array<{name:string;progress:string}>): void {this.extraRoster=read;}
   setReservedCapacity(read:()=>number):void {this.reservedCapacity=read;}
@@ -501,9 +507,10 @@ export class SwarmManager {
     const descendants=new Set<string>();let changed=true;
     while(changed){changed=false;for(const t of Object.values(m.tasks))if(!descendants.has(t.id)&&(t.dependsOn??[]).some(id=>id===task.id||descendants.has(id))){descendants.add(t.id);changed=true;}}
     if([...descendants].some(id=>m.tasks[id].status!=='pending'))return {ok:false,message:'Another agent already consumed this report. Stop the team and follow up to revise the affected reports together.'};
+    let progress:ReturnType<typeof savedAgentProgress>;try{progress=savedAgentProgress(task,coordinator);}catch(error){return {ok:false,message:(error as Error).message};}
     commands.push(c);this.cancelOneTask(task,coordinator,'Interrupted for revised instructions');
     const previous={attempt:task.attempt??1,goal:task.goal,result:task.result};
-    const replacement:MissionTaskState={...task,goal:`${task.goal}\n\nRevised instruction: ${text}`,attempt:input.attempt+1,status:'pending',taskId:undefined,actorId:undefined,actorName:undefined,startedAt:undefined,result:undefined,activity:undefined,recoveryAttempts:0,updates:commands,previousAttempts:[...(task.previousAttempts??[]),previous]};
+    const replacement:MissionTaskState={...task,goal:`${task.goal}\n\nRevised instruction: ${text}`,attempt:input.attempt+1,status:'pending',taskId:undefined,actorId:undefined,actorName:undefined,startedAt:undefined,result:undefined,activity:undefined,recoveryAttempts:0,updates:commands,retryContext:progress.context,retrySourceTaskIds:progress.sources,previousAttempts:[...(task.previousAttempts??[]),previous]};
     m.tasks[task.id]=replacement;c.status='applied';m.updatedAt=now();this.persistMission(m,coordinator);this.scheduleAll();
     return {ok:true,message:'Revised agent attempt started. Dependent reports wait for its result.',command:c};
   }
@@ -511,7 +518,7 @@ export class SwarmManager {
   /** Resume one failed specialist with trusted progress and fresh bounded execution. */
   private retryMissionTask(m:MissionState,task:MissionTaskState,input:{attempt:number;requestId:string},deps:SwarmDeps) {
     if(this.closing||task.status!=='failed')return {ok:false,message:'Retry is available only for a failed specialist.'};
-    if(task.profile==='lead')return {ok:false,message:'Retry the failed specialist; Echo will combine the recovered reports.'};
+    if(task.profile==='lead'&&Object.values(m.tasks).some(sibling=>sibling!==task&&(sibling.status!=='completed'||!sibling.result)))return {ok:false,message:'Final-report retry requires every specialist report to be completed. Retry the failed specialist first.'};
     if((task.attempt??1)>=10||(task.updates?.length??0)>=40)return {ok:false,message:'This task reached its retry limit. Review the failure and start a follow-up.'};
     const coordinator=deps.coordinator??taskCoordinator,now=deps.now??Date.now;
     if(this.persistedMissions(coordinator,Infinity).some(other=>other.id!==m.id&&this.isMissionLive(other.id)))return {ok:false,message:'Another task is working. Wait or stop it before retrying.'};
@@ -581,7 +588,7 @@ export class SwarmManager {
     const match = checkpoint.actor.name.match(/^Echo Clone (\d+)$/i);
     if (match) this.counter = Math.max(this.counter, Number(match[1]));
     let brain: CloneBrain;
-    try { brain = deps.makeBrain(checkpoint.actor); }
+    try { brain = (deps.makeRecoveredBrain??deps.makeBrain)(checkpoint.actor); }
     catch (error) { console.error('[swarm] clone recovery initialization failed', error); return false; }
     this.launch({
       id: checkpoint.actor.id,
@@ -616,7 +623,7 @@ export class SwarmManager {
     if (!task || task.status !== "working" || task.actorId !== checkpoint.actor.id || mission.taskId !== rootTaskId) return false;
     task.recoveryAttempts = Math.max(task.recoveryAttempts ?? 0, checkpoint.recoveryAttempts + 1);
     let brain: CloneBrain;
-    try { brain = deps.makeBrain(checkpoint.actor, task); }
+    try { brain = (deps.makeRecoveredBrain??deps.makeBrain)(checkpoint.actor, task); }
     catch (error) {
       if (task.taskId && task.actorId) {
         coordinator.submitResult(task.taskId, task.actorId, {status: 'failed', summary: String(error instanceof Error ? error.message : error), artifacts: [], verificationRefs: [], blockers: ['recovery:initialization']});
@@ -818,18 +825,30 @@ export class SwarmManager {
       this.taskErrors.set(taskId, String(error ?? "Agent failed"));
     });
     brain.on("turnEnd", () => {if(mission.tasks[task.id]?.actorId===actorId)this.finishMissionTask(mission.id, task.id);});
-    const runningTools=new Map<string,{count:number,kind:string}>();
-    brain.on('tool',(value:{name:string;summary:string;readOnly?:boolean})=>{
+    const runningTools=new Map<string,{name:string,kind:string}>();let legacyCallSequence=0;
+    type ToolEvent={name:string;summary?:string;readOnly?:boolean;callId?:string;taskId?:string;actorId?:string;runId?:string};
+    const matchingEvent=(value:ToolEvent)=>{
+      if(value.taskId&&value.taskId!==taskId||value.actorId&&value.actorId!==actorId)return false;
+      const latest=(deps.coordinator??taskCoordinator).get(taskId)?.attemptIds.at(-1);
+      return !value.runId||!latest||value.runId===latest;
+    };
+    brain.on('tool',(value:ToolEvent)=>{
       if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      if(!matchingEvent(value))return;
       const name=String(value?.name??'tool').slice(0,120);
       const kind=value.readOnly===true||/^(web_search|web_fetch|read_|get_|list_|search_|browse|fetch_|inspect_)/.test(name)?'reading':'tool';
-      runningTools.set(name,{count:(runningTools.get(name)?.count??0)+1,kind});
+      const callId=value.callId??`legacy:${++legacyCallSequence}`;
+      if(runningTools.has(callId))return;
+      runningTools.set(callId,{name,kind});
       activity(kind,`Using · ${name}`);
     });
-    brain.on('toolEnd',(value:{name:string})=>{
+    brain.on('toolEnd',(value:ToolEvent)=>{
       if(mission.tasks[task.id]!==task||task.status!=='working')return;
-      const tool=runningTools.get(value.name);if(tool?.count&&tool.count>1)tool.count--;else runningTools.delete(value.name);
-      const remaining=[...runningTools.entries()].at(-1);activity(remaining?.[1].kind??'working',remaining?`Using · ${remaining[0]}`:'Preparing the next step');
+      if(!matchingEvent(value))return;
+      const callId=value.callId??[...runningTools.entries()].find(([id,t])=>id.startsWith('legacy:')&&t.name===value.name)?.[0];
+      if(!callId||runningTools.get(callId)?.name!==value.name)return;
+      runningTools.delete(callId);
+      const remaining=[...runningTools.values()].at(-1);activity(remaining?.kind??'working',remaining?`Using · ${remaining.name}`:'Preparing the next step');
     });
     const elapsed = Math.max(0, (deps.now ?? Date.now)() - task.startedAt);
     const remaining = Math.max(1, task.budget.timeoutMs - elapsed);
@@ -940,6 +959,7 @@ export class SwarmManager {
     const coordinator = deps.coordinator ?? taskCoordinator;
     this.commitMissionResult(mission, coordinator);
     this.persistMission(mission, coordinator);
+    try {this.terminalListener?.(structuredClone(mission));} catch(error) {console.error('[swarm] terminal notification failed',error);}
     this.broadcast(deps);
   }
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { randomUUID } from 'node:crypto';
 import { classify, bareToolName, speakable, type RiskAssessment } from "./risk.js";
 import { capture } from "./snapshot.js";
 import { TypeSafeClient, noul } from "@typesafe-ai/sdk";
@@ -31,6 +32,9 @@ import { currentAgentRunContext } from "../agent-replay/context.js";
 import { createInvocation, currentInvocation, runInInvocation } from "../memory/invocation.js";
 import { taskCoordinator } from "../memory/task-state.js";
 import { normalizeToolOutput } from "../memory/tool-result.js";
+import {withComputerEvidence} from '../tools/lcu-evidence.js';
+import {computerInputRefusal} from './computer-input-policy.js';
+import {echoNativeInputRisk} from '../tools/lcu-control.js';
 import { noteToolOutcome } from "../memory/consolidate.js";
 import { captureAllowed } from "../memory/capture-policy.js";
 import { runWithReadReuse, INTERNAL_TOOLS } from "../memory/read-cache.js";
@@ -137,7 +141,7 @@ export function resetGateMemory(): void {
  * `learn_workflow` uses) rather than inventing a second one, Echo can ask to
  * be shown rather than keep guessing. Declining just lets it keep trying.
  */
-const GUI_TOOLS = new Set(["click_ui_element", "click_text", "click", "type_text", "set_value", "drag"]);
+const GUI_TOOLS = new Set(['click_in_app','type_in_app','press_app_key','scroll_in_app','drag_in_app','set_app_value','move_echo_cursor',"click_ui_element", "click_text", "click", "type_text", "set_value", "drag"]);
 const guiFailureStreak = new Map<string, number>();
 /** At most one offer per task — repeating "can you show me?" after a no is just noise. */
 const offeredDemo = new Set<string>();
@@ -195,6 +199,8 @@ export async function decide(
   ctx: GateContext,
   now = agentNow()
 ): Promise<GateDecision> {
+  const inputRefusal=computerInputRefusal(toolName,input);
+  if(inputRefusal)return {allowed:false,assessment:{tier:'high',reason:'legacy computer-input bypass'},message:inputRefusal};
   // Ahead of ordinary risk classification: a repeatedly-failing GUI action
   // isn't dangerous, it's stuck, and that's a different question.
   const askedForDemo = await maybeOfferDemo(toolName, currentAgentRunContext()?.taskId);
@@ -209,8 +215,10 @@ export async function decide(
     };
   }
 
-  let assessment = classify(toolName, input, { workingDir: ctx.workingDir });
   const bareTool = bareToolName(toolName);
+  const nativeRisk=echoNativeInputRisk(bareTool,input);
+  if(nativeRisk?.decision==='deny')return {allowed:false,assessment:nativeRisk,message:'This is a protected app permission or security control. Only the user may operate it; no input was sent.'};
+  let assessment:RiskAssessment = nativeRisk??classify(toolName, input, { workingDir: ctx.workingDir });
 
   // --- TypeSafe Jev: a second opinion that may only ESCALATE ---
   //
@@ -356,7 +364,8 @@ async function runAuthorizedTool(def: ToolDef, args: Record<string, unknown>, ct
         return runInInvocation(invocation, () => {
           taskCoordinator.startCall(invocation, def.name, 'internal');
           recordToolDenied(def.name, args, message);
-          ctx.emit?.('tool', {name: def.name, summary: message});
+          ctx.emit?.('toolEnd', {name: def.name, taskId: run.taskId, actorId: run.identity.id,
+            runId: run.recorder.runId, callId: invocation.callId});
           const output = {...denied, callId: invocation.callId, taskId: run.taskId};
           taskCoordinator.endCall(invocation, output);
           return output;
@@ -364,7 +373,6 @@ async function runAuthorizedTool(def: ToolDef, args: Record<string, unknown>, ct
       } catch { /* A stopped task still receives the same refusal. */ }
     }
     recordToolDenied(def.name, args, message);
-    ctx.emit?.('tool', {name: def.name, summary: message});
     return denied;
   }
   // Resolve names before risk assessment and resource leasing, so aliases and
@@ -377,6 +385,7 @@ async function runAuthorizedTool(def: ToolDef, args: Record<string, unknown>, ct
     }
   }
   if (!run || isReplaying()) return executeGated(def, args, ctx);
+  if(run.appQuestion)return {status:'cancelled',text:'This task is waiting for the user’s answer. No additional tool was executed.'};
   if (run.loop?.hasExited) return {status: 'cancelled', text: 'The task has stopped; this action was not attempted.', error: {category: 'task_stopped', message: 'No tool may start after the task exits', retryable: false}};
   let invocation;
   try { invocation = createInvocation(run.taskId, run.identity.id, def.name, args, ctx.workingDir); }
@@ -412,6 +421,7 @@ async function runAuthorizedTool(def: ToolDef, args: Record<string, unknown>, ct
     out = { ...normalizeToolOutput(out), callId: invocation.callId, taskId: invocation.taskId };
     taskCoordinator.endCall(invocation, { ...out, image: undefined } as any);
     taskCoordinator.releaseResources(invocation, out.status === "timeout" || out.status === "uncertain");
+    if(run.appQuestion&&def.name==='ask_app_question'&&out.status==='success')run.onAppQuestion?.();
     if (!run.privateMode && run.identity.kind !== "rehearsal") {
       try { noteToolOutcome({ tool: def.name, taskId: run.taskId, callId: invocation.callId, scope: run.scope as any, status: out.status!, verified: out.verification === "verified", durationMs: out.durationMs, errorCategory: out.error?.category, origin: "real" }); } catch (error) { console.error("[memory] tool outcome recording failed", error); }
     }
@@ -552,13 +562,20 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
   // recorded a `tool.start` the replay had no way to produce, and verification
   // read that as the agent having diverged.
   const log = currentLoop();
-  const callId = log?.toolStart(def.name, args ?? {}, currentInvocation()?.callId);
+  const invocation = currentInvocation();
+  const context = currentAgentRunContext();
+  const executionId = invocation?.callId ?? randomUUID();
+  const identity = {callId: executionId, taskId: invocation?.taskId ?? context?.taskId,
+    actorId: invocation?.actorId ?? context?.identity.id, runId: context?.recorder.runId};
+  // Tape bookkeeping also records refusals/reuse. Live activity is emitted
+  // separately, only at the actual handler boundary below.
+  const callId = log?.toolStart(def.name, args ?? {}, executionId);
   const toolStartedAt = Date.now();
   let toolFailed = false;
   let toolDetail: string | undefined;
   const finishTool = () => {
     if (callId) log?.toolEnd(callId, def.name, toolStartedAt, toolFailed, toolDetail);
-    ctx.emit?.('toolEnd',{name:def.name});
+    ctx.emit?.('toolEnd',{name:def.name,...identity});
   };
 
   if (isReplaying()) {
@@ -569,9 +586,9 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     // tape faithful without creating a side effect.
     agentNow();
     const assessment = classify(def.name, args ?? {}, { workingDir: ctx.workingDir });
-    ctx.emit?.("tool", { name: def.name, summary: bareToolName(def.name),readOnly:def.readOnly });
     ctx.emit?.("risk", { tool: bareToolName(def.name), ...assessment });
-    const replayed = await takeReplayedTool<ToolOutput>(def.name, args ?? {}, true);
+    const replayed = await takeReplayedTool<ToolOutput>(def.name, args ?? {}, true, () =>
+      ctx.emit?.('tool', {name:def.name,summary:bareToolName(def.name),readOnly:def.readOnly,...identity}));
     if (replayed.handled) {
       // Deliberately no extra detail: a replayed run has to emit exactly what
       // the run it replays emitted, or verification reads the annotation itself
@@ -580,8 +597,6 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
       return replayed.value ?? {};
     }
   }
-
-  ctx.emit?.("tool", { name: def.name, summary: bareToolName(def.name),readOnly:def.readOnly });
 
   // Before the risk decision: there is no sense asking the user to approve an
   // action whose arguments cannot describe a real action.
@@ -635,8 +650,16 @@ async function executeGated(def: ToolDef, args: Record<string, unknown>, ctx: Ga
     // is on, and best-effort, so it can never delay or break the action.
     if (currentInvocation()) taskCoordinator.assertInvocation(currentInvocation()!);
     if (captureAllowed()) await captureGroundingFrame(bare);
-    const out = await recordTool(def.name, args ?? {}, () => runWithReadReuse(currentAgentRunContext(), def, args ?? {},
-      currentInvocation()?.callId, async () => normalizeToolOutput(await def.handler(args ?? {}))));
+    const out = await recordTool(def.name, args ?? {}, () => runWithReadReuse(context, def, args ?? {},
+      invocation?.callId, async () => {
+        // Approval and recording may await. Recheck ownership/cancellation at
+        // dispatch, and don't claim activity for a reused observation.
+        if (invocation) taskCoordinator.assertInvocation(invocation);
+        if (context?.loop.hasExited || context?.toolSignal?.aborted || context?.appQuestion)
+          return {status:'cancelled',text:'The task stopped before handler execution.'};
+        ctx.emit?.('tool', {name:def.name,summary:bare,...identity,readOnly:def.readOnly});
+        return normalizeToolOutput(await withComputerEvidence(()=>def.handler(args ?? {})));
+      }), executionId);
     toolFailed = out.status !== "success";
     toolDetail = out.error?.message;
     learn(out.text ?? "", out.image ?? null, out.status === "success");

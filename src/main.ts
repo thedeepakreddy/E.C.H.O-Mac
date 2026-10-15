@@ -113,7 +113,8 @@ import { startShadowMode, stopShadowMode } from "./tools/shadow.js";
 import * as ax from "./tools/ax.js";
 import { disableOrtTelemetry } from "./utils/ortEnv.js";
 import { installProcessHandlers, pendingRecoveries, pruneOldRunLogs, recordRendererError } from "./agent-replay/runtime.js";
-import { swarm } from "./frontier/swarm.js";
+import { swarm, type MissionState } from "./frontier/swarm.js";
+import {OfficeReportQueue,type OfficeReportLedger} from './frontier/office-report.js';
 import {supervisor,automaticTasks} from './tasks/runtime.js';
 import {needsTaskDispatch} from './tasks/automatic.js';
 import {captureAllowed} from './memory/capture-policy.js';
@@ -299,6 +300,9 @@ let autoReflexTurn: { command: string; capture: autoreflex.TurnCapture } | null 
  * Tools are still executed by Echo through the risk gate; see voice/realtime.ts.
  */
 let realtime: RealtimeVoiceSession | null = null;
+let realtimeTurn:{session:RealtimeVoiceSession;turnId:string;generation:number;revision:number;modelDone:boolean}|null=null;
+let realtimeConnectionTurnId:string|undefined;
+let realtimeConnectSequence=0;
 let realtimeSaid = "";
 /**
  * Realtime audio is still coming out of the speaker.
@@ -369,11 +373,20 @@ let pendingInterjection: { wavPath: string; meta: CaptureMeta; transcript: strin
 const realtimeClock = new SpeechClock(
   { bytesPerSecond: REALTIME_OUTPUT_RATE * 2 }, // mono PCM16
   () => {
+    const owned=realtimeTurn;
+    if(!owned||owned.session!==realtime||owned.turnId!==voiceSession.brainTurnId
+      ||owned.generation!==voiceSession.generation||owned.revision!==inputRevision)return;
     // Echo has stopped talking: capture may resume. See the pause in the
     // 'audio' handler for why this matters so much on the realtime path.
     echoSpokeUntil = performance.now();
     listener?.setPaused(false);
     voiceSession.noteSpeaking(false);
+    if(owned.modelDone){
+      realtimeTurn=null;
+      // This transport belongs to this turn, not to the next conversation.
+      // Close after drain so late tool requests cannot acquire a new task.
+      stopRealtimeVoice();
+    }
     setStatus(lastBrainStatus);
     maybeAutoListen();
   }
@@ -388,9 +401,22 @@ function isEchoTalkingToItself(meta: UtteranceMeta): boolean {
   });
 }
 
-async function ensureRealtime(): Promise<RealtimeVoiceSession | null> {
-  if (realtime?.active && realtime.conversationId === conversationId("echo", currentScope())) { realtime.syncContext(); return realtime; }
-  if (realtime) { realtime.close(); realtime = null; }
+function stopRealtimeVoice():void {
+  const previous=realtime,owned=!!realtimeTurn&&realtimeTurn.session===previous
+    &&realtimeTurn.turnId===voiceSession?.brainTurnId;realtime=null;realtimeTurn=null;
+  realtimeConnectionTurnId=undefined;realtimeConnectSequence++;
+  realtimeClock.reset();
+  previous?.close();
+  // A completed transport can outlive its speech. Closing it must not stop
+  // another owner's later TTS (for example an Office completion report).
+  if(owned){player?.stop();listener?.setPaused(false);}
+  if(owned){voiceSession.noteBrainDone();voiceSession.noteSpeaking(false);}
+}
+async function ensureRealtime(turnId?:string): Promise<RealtimeVoiceSession | null> {
+  const revision=inputRevision,generation=voiceSession.generation;
+  if (realtime?.active && realtimeConnectionTurnId===turnId && realtime.conversationId === conversationId("echo", currentScope())) { realtime.syncContext(); return realtime; }
+  if (realtime) stopRealtimeVoice();
+  const sequence=++realtimeConnectSequence;
   const key = process.env[cfg.gemini?.apiKeyEnv ?? "GEMINI_API_KEY"];
   if (!key) return null;
   const session = new RealtimeVoiceSession(cfg, key, {
@@ -405,12 +431,18 @@ async function ensureRealtime(): Promise<RealtimeVoiceSession | null> {
     // directly otherwise reads as an instruction to start speaking Telugu.
     instruction: buildSystemPrompt(undefined, REALTIME_VOICE_GUIDANCE, false),
   });
-  session.on("heard", (t: string) => send("state", { hearing: t }));
+  const current=()=>!shuttingDown&&realtime===session&&revision===inputRevision&&generation===voiceSession.generation;
+  const liveOutput=()=>current()&&realtimeTurn?.session===session&&realtimeTurn.revision===inputRevision
+    &&!realtimeTurn.modelDone&&realtimeTurn.turnId===turnId&&realtimeTurn.generation===voiceSession.generation
+    &&realtimeTurn.turnId===voiceSession.brainTurnId&&voiceSession.brainOutputIsLive();
+  session.on("heard", (t: string) => {if(liveOutput())send("state", { hearing: t });});
   session.on("said", (t: string) => {
+    if(!liveOutput())return;
     realtimeSaid += t;
     send("message", { kind: "assistant", text: realtimeSaid });
   });
   session.on("audio", (pcm: Buffer) => {
+    if(!liveOutput())return;
     // PAUSE CAPTURE WHILE ECHO SPEAKS. Both pipeline paths already do this and
     // the realtime path did not, which produced a genuine infinite loop: the
     // conversation window leaves the mic open with no wake word required, so
@@ -429,28 +461,35 @@ async function ensureRealtime(): Promise<RealtimeVoiceSession | null> {
     setStatus("speaking");
     player?.play(pcm, REALTIME_OUTPUT_RATE, 0);
   });
-  session.on("tool", (name: string) => send("message", { kind: "action", text: `Running ${name}` }));
+  session.on("tool", (name: string) => {if(liveOutput())send("message", { kind: "action", text: `Running ${name}` });});
   // The model stopped because the user cut in; drop whatever is still queued.
-  session.on("interrupted", () => { try { player?.stop(); } catch { /* ignore */ } });
+  session.on("interrupted", () => {
+    if(!liveOutput())return;
+    finishTurn("rejected", "realtime turn interrupted");
+    // A bare drain before turnComplete does not end SpeechClock's pending
+    // turn. Invalidate this output owner and release capture explicitly.
+    stopRealtimeVoice();
+  });
   session.on("turnComplete", () => {
+    if(!liveOutput())return;
     if (realtimeSaid.trim()) lastAssistantText = realtimeSaid.trim();
     realtimeSaid = "";
     finishTurn("success", "realtime turn completed");
+    realtimeTurn!.modelDone=true;voiceSession.noteBrainDone();
     // Only re-arm the mic once the SPEAKER is quiet, not when the model
     // stopped generating. The clock calls back when that happens.
     realtimeClock.noteTurnComplete();
   });
   session.on("error", (m: string) => {
+    if(!current())return;
     console.error(`[realtime] ${m}`);
     send("notice", { level: "error", text: `Realtime voice: ${m}` });
   });
-  session.on("closed", () => { if (realtime === session) realtime = null; realtimeClock.noteDrained(); });
-  // `drained` only ever ENDS a turn early — it is never depended on, because it
-  // did not arrive and that is what broke the conversation window.
-  player?.on("drained", () => realtimeClock.noteDrained());
-  session.on("interrupted", () => realtimeClock.noteDrained());
-  await session.connect();
-  realtime = session;
+  session.on("closed", () => { if (!current())return;stopRealtimeVoice(); });
+  try { await session.connect(); }
+  catch(error) { session.close();throw error; }
+  if(shuttingDown||revision!==inputRevision||generation!==voiceSession.generation||sequence!==realtimeConnectSequence||turnId&&!voiceSession.isCurrent(turnId)){session.close();return null;}
+  realtime = session;realtimeConnectionTurnId=turnId;
   return session;
 }
 
@@ -463,8 +502,13 @@ async function ensureRealtime(): Promise<RealtimeVoiceSession | null> {
  */
 async function dispatchToRealtime(wavPath: string, turn: Turn | null, command = ""): Promise<boolean> {
   if (needsTaskDispatch(command)) return false;
+  const revision=inputRevision,generation=voiceSession.generation;
+  if(turn&&(turn.cancelled||turn.abort.signal.aborted||!voiceSession.isCurrent(turn.id)))return true;
+  if(realtimeTurn&&realtimeTurn.turnId===turn?.id)return true;
+  let session:RealtimeVoiceSession|null=null;
   try {
-    const session = await ensureRealtime();
+    session = await ensureRealtime(turn?.id);
+    if(shuttingDown||revision!==inputRevision||generation!==voiceSession.generation||turn&&!voiceSession.isCurrent(turn.id))return true;
     if (!session) return false;
     // Open a recorded turn, exactly as the text brains do.
     //
@@ -486,6 +530,8 @@ async function dispatchToRealtime(wavPath: string, turn: Turn | null, command = 
     if (realtimeClock.speaking) { listener?.setPaused(false); voiceSession.noteSpeaking(false); }
     realtimeClock.reset(); // never inherit the last turn's speaking state
     voiceSession.noteBrainSend(turn, "(audio)", "gemini-live");
+    if(!voiceSession.brainTurnId)return false;
+    realtimeTurn={session,turnId:voiceSession.brainTurnId,generation,revision:inputRevision,modelDone:false};
     setStatus("thinking");
     const pcm = readWavPcm(wavPath);
     // 100ms of 16 kHz mono PCM16 per message, as the provider expects.
@@ -496,6 +542,9 @@ async function dispatchToRealtime(wavPath: string, turn: Turn | null, command = 
     session.endOfSpeech();
     return true;
   } catch (err: any) {
+    if(shuttingDown||revision!==inputRevision||generation!==voiceSession.generation
+      ||turn&&(turn.cancelled||turn.abort.signal.aborted||!voiceSession.isCurrent(turn.id)))return true;
+    if(session&&realtime===session)stopRealtimeVoice();
     console.error(`[realtime] dispatch failed, falling back: ${err?.message ?? err}`);
     return false;
   }
@@ -768,7 +817,7 @@ function awaitCommand(turn: Turn) {
  * the microphone at turnEnd while audio was still playing.
  */
 function echoIsSpeaking(): boolean {
-  return tts.isSpeaking() || speech?.isSpeaking === true || realtimeClock.speaking;
+  return tts?.isSpeaking() || speech?.isSpeaking === true || realtimeClock.speaking;
 }
 
 /** Status to fall back to when a capture came to nothing. */
@@ -782,6 +831,8 @@ function idleStatus(): string {
  */
 function dispatchToBrain(text: string, audio?: AudioTurn, turn: Turn | null = null, modality: "voice" | "text" = "voice") {
   if (shuttingDown) return;
+  if(realtimeTurn)stopRealtimeVoice();
+  if(officeReportSpeaking){cancelOfficeReports();tts?.stop();}
   if (brainLifecycle?.isSwitching) {
     const revision = inputRevision;
     void brainLifecycle.ready().then(ready => {
@@ -1427,6 +1478,7 @@ function maybeQuickReply(command: string, turn: Turn | null = null, showUser = f
 /** Everything stops: speech, the brain, the conversation. The one path for every stop control. */
 function stopEverything(why: string) {
   inputRevision++;
+  cancelOfficeReports();
   // Anything held back to be answered after the reply is part of what is being
   // stopped. Draining it later would answer a question the user has abandoned.
   if (pendingInterjection) {
@@ -1436,10 +1488,11 @@ function stopEverything(why: string) {
   const heard = speech?.spokenSoFar() ?? "";
   voiceSession.cancel("stop", why);
   abortSttStreams(why);
-  tts.stop();
-  brain.noteInterrupted?.(heard);
+  tts?.stop();
+  stopRealtimeVoice();
+  brain?.noteInterrupted?.(heard);
   voiceLog.event("audio.stopped", { turnId: voiceSession.current?.id, why });
-  brain.interrupt();
+  brain?.interrupt();
   void supervisor.cancelOwned().catch(error=>console.error('[tasks] cancellation failed:',error));
   endConversation(why);
   awaitingCommand = null;
@@ -1640,6 +1693,7 @@ async function saveControlSettings(input: Partial<ControlSettings> | undefined):
   Object.assign(cfg.voice, next.voice);
   Object.assign(cfg.hud, next.hud);
   Object.assign(cfg.memory, next.memory);
+  if(!captureAllowed()&&officeReportSpeaking){cancelOfficeReports();tts?.stop();}
   Object.assign(cfg.helpers, next.helpers);
   Object.assign(cfg.dreaming, next.dreaming);
   Object.assign(cfg.learning, next.learning);
@@ -1997,6 +2051,7 @@ function onBargeIn(level: number, bar: number) {
   console.log(`[echo] barge-in (level ${level} over ${bar}) — stopping speech`);
   const heard = speech?.spokenSoFar() ?? "";
   voiceSession.cancel("bargein", `level ${level} over ${bar}`);
+  stopRealtimeVoice();
   tts.stop();
   brain.noteInterrupted?.(heard);
   voiceLog.event("audio.stopped", { turnId: voiceSession.current?.id, level, bar });
@@ -2106,6 +2161,7 @@ async function wireTts() {
     console.log(`[voice] player: ${player.name}${player.aec ? " + echo-cancelled capture" : ""}`);
     player.on("error", (m: string) => console.error(`[voice] player: ${m}`));
     player.on("started", () => voiceLog.event("audio.start", { turnId: voiceSession.brainTurnId ?? voiceSession.current?.id }));
+    player.on('drained',()=>realtimeClock.noteDrained());
     player.on("exit", () => console.error("[voice] player process exited"));
   } catch (err: any) {
     console.error(`[voice] player unavailable: ${err?.message ?? err}`);
@@ -2257,6 +2313,64 @@ function makeFleetBrain() {
 }
 
 const macBots=createMacBots(swarm,()=>({makeBrain:makeFleetBrain()}),()=>({...currentScope()}),captureAllowed);
+// One coordinator voice lane; office agents never own the microphone or speaker.
+let officeReportQueue:OfficeReportQueue|undefined;
+let officeReportReset:Promise<void>=Promise.resolve();
+let officeReportGeneration=0;
+let officeReportSpeaking:symbol|undefined;
+let officeReportDeliveryBlocked=false;
+const officeLedgerPath=()=>join(dataRoot(),'office-report-delivery.json');
+function readOfficeLedger():OfficeReportLedger {
+  return existsSync(officeLedgerPath())?JSON.parse(readFileSync(officeLedgerPath(),'utf8')):{version:1,revision:0,entries:[]};
+}
+function officeVoiceIdle():boolean {
+  return !officeReportDeliveryBlocked&&!shuttingDown&&!!tts&&cfg.voice.ttsEnabled&&!brainLifecycle?.isSwitching
+    &&!officeReportSpeaking&&['sleeping','active_idle','interrupted'].includes(voiceSession?.state)
+    &&!voiceSession?.brainTurnActive&&!listener?.isCapturing&&!listener?.capturingInterjection
+    &&!echoIsSpeaking()&&!confirmations.isWaiting&&!expectAnswer&&!awaitingCommand
+    &&!pendingInterjection&&!realtimeTurn&&['idle','sleeping','asleep'].includes(lastBrainStatus)
+    &&replyChannel()==='local'&&captureAllowed();
+}
+function makeOfficeReportQueue():OfficeReportQueue {
+  return new OfficeReportQueue({
+    readLedger:async()=>readOfficeLedger(),
+    writeLedger:async(next,revision)=>{if(readOfficeLedger().revision!==revision)return false;atomicWrite(officeLedgerPath(),JSON.stringify(next));return true;},
+    isIdle:officeVoiceIdle,
+    canDeliver:report=>['principalId','workspaceId','projectId'].every(field=>report.scope[field as keyof MemoryScope]===currentScope()[field as keyof MemoryScope]),
+    speak:async(text,delivery)=>{
+      const entry=readOfficeLedger().entries.find(e=>e.key===delivery.key);
+      const saved=entry&&taskCoordinator.get(entry.report.taskId);
+      const mission=entry&&swarm.getMission(entry.report.missionId);
+      if(!officeVoiceIdle()||delivery.signal.aborted||!saved?.result||saved.privateMode
+        ||saved.scope.echoBot!==true||mission?.scope.echoBot!==true||saved.ownerActorId!==`mission:${mission.id}`
+        ||!mission||mission.taskId!==saved.taskId||mission.status!==entry!.report.status
+        ||mission.retrySequence!==undefined&&mission.retrySequence!==entry!.report.retrySequence
+        ||['principalId','workspaceId','projectId'].some(field=>saved.scope[field]!==currentScope()[field as keyof MemoryScope]))return {status:'interrupted'};
+      const speakingToken=Symbol('office speech');officeReportSpeaking=speakingToken;
+      try{return await tts.speakWithAcknowledgment(text,{signal:delivery.signal});}
+      finally{if(officeReportSpeaking===speakingToken)officeReportSpeaking=undefined;}
+    },
+    notify:entry=>{publishControlUpdate();if(['failed','interrupted'].includes(entry.state))send('notice',{level:'warn',text:'Office report is saved. Voice delivery was not confirmed; open Tasks to read it.'});},
+  });
+}
+async function officeQueue():Promise<OfficeReportQueue> {
+  await officeReportReset;
+  if(officeReportDeliveryBlocked)throw Error('Office voice delivery is blocked because Stop could not be saved. Check local storage before restarting delivery.');
+  return officeReportQueue??=makeOfficeReportQueue();
+}
+function cancelOfficeReports():void {
+  officeReportGeneration++;
+  const queue=officeReportQueue??makeOfficeReportQueue();officeReportQueue=undefined;
+  officeReportReset=officeReportReset.then(()=>queue.stop()).catch(error=>{officeReportDeliveryBlocked=true;console.error('[office report] Stop persistence failed; voice delivery remains blocked:',error);});
+}
+swarm.setTerminalListener((mission:MissionState)=>{
+  const generation=officeReportGeneration;
+  const saved=taskCoordinator.get(mission.taskId);
+  if(mission.scope.echoBot!==true||saved?.scope.echoBot!==true||saved.ownerActorId!==`mission:${mission.id}`||!saved.result||mission.status==='running'||mission.status==='cancelled')return;
+  const compiler=Object.values(mission.tasks).find(t=>t.profile==='lead');
+  const summary=mission.status==='completed'?(compiler?.result?.summary??Object.values(mission.tasks).find(t=>t.result)?.result?.summary??saved.result.summary):saved.result.summary;
+  void officeQueue().then(queue=>generation===officeReportGeneration?queue.enqueue({source:'persisted_terminal_result',missionId:mission.id,taskId:saved.taskId,retrySequence:mission.retrySequence??0,status:mission.status as Exclude<MissionState['status'],'running'>,summary:summary.slice(0,4000),privateMode:saved.privateMode||!captureAllowed(),scope:saved.scope}):false).catch(error=>console.error('[office report] Could not save handoff:',error));
+});
 
 async function handleControlAction(action: ControlAction): Promise<{ ok: boolean; message?: string; data?: Record<string, unknown> }> {
   if (shuttingDown) return {ok: false, message: "Echo is shutting down."};
@@ -2613,7 +2727,7 @@ app.whenReady().then(async () => {
   // The control panel shows "Connecting…" and the result as they happen.
   chatgpt.onChange(() => publishControlUpdate());
   setActiveConfig(cfg); // deep modules (gate.ts's critic, tool pruning, escalation, …) read the live config through this
-  voiceLog.init(app.getAppPath());
+  voiceLog.init(dataRoot());
   voiceSession = new VoiceSession({ windowMs: () => (cfg.voice?.conversationMode === false ? 0 : cfg.voice?.conversationWindowMs ?? 12000) });
   voiceSession.on("turnSummary", (summary) => console.log(`[voice] ${describeSummary(summary)}`));
   console.log(`[jarvis] config loaded (brain=${cfg.brain})`);
@@ -2742,6 +2856,10 @@ app.whenReady().then(async () => {
   const startupMainTask = startupMainTasks.at(-1);
   const recoveryProvider = startupMainTask?.provider;
   const startupCfg: JarvisConfig = isProvider(recoveryProvider) ? { ...cfg, brain: recoveryProvider } : cfg;
+  // Acquire the original runtime surface before constructing any provider.
+  // Failure disables autonomous desktop input, not conversation or background reads.
+  try {const {prepareEchoLcuRuntime}=await import('./tools/lcu-runtime.js');await prepareEchoLcuRuntime();}
+  catch(error){console.error('[echo:lcu] unavailable:',error);send('notice',{level:'error',text:'Echo computer control is unavailable. The local LCU runtime must connect before Echo can use apps; no legacy input will be substituted.'});}
   const built = createBrain(startupCfg);
   let firstActivation = true;
   brainLifecycle = new BrainLifecycle(built, {
@@ -2804,6 +2922,7 @@ app.whenReady().then(async () => {
   if (cfg.dreaming?.enabled) console.log("[jarvis] idle rehearsal is ON (look-only, when you're away)");
 
   await wireTts();
+  mainTimers.every(1000,async()=>{if(officeVoiceIdle())await (await officeQueue()).drain();},error=>console.error('[office report] Delivery failed:',error));
   if (shuttingDown) return;
   // Held speech is checked on a timer so nothing waits indefinitely.
   mainTimers.every(4000, drainHeldSpeech);
@@ -2839,7 +2958,8 @@ app.whenReady().then(async () => {
     }
     for (const task of startupRecoveries.filter((item) => item.actor.kind === "clone")) {
       const recovered = swarm.recover(task, {
-        makeBrain: (identity, missionTask) => {
+        makeBrain: (identity, missionTask) => makeFleetBrain()(identity,missionTask),
+        makeRecoveredBrain: (identity, missionTask) => {
           const provider = task.provider;
           const cloneCfg: JarvisConfig = isProvider(provider) ? { ...cfg, brain: provider } : cfg;
           return fleetBrainFactory(cloneCfg)(identity, missionTask);
@@ -2972,6 +3092,7 @@ async function shutdown(): Promise<void> {
   shuttingDown = true;
   inputRevision++;
   mainTimers.close();
+  cancelOfficeReports();
   const brainStopping = shutdownStep('brain', () => brainLifecycle?.close() ?? brain?.stop());
   shutdownPromise = (async () => {
   try {
@@ -2980,6 +3101,7 @@ async function shutdown(): Promise<void> {
     /* already gone */
   }
   await shutdownStep('microphone', () => listener?.stop(), 3000);
+  await shutdownStep('office report handoff',()=>officeReportReset,3000);
   await shutdownStep('speech', () => { tts?.stop(); realtime?.close(); realtime = null; }, 3000);
   await shutdownStep('Piper workers', () => PiperWorker.stopAll(), 3000);
   await shutdownStep('Telegram', () => telegram?.stop(), 3000);
@@ -3004,6 +3126,7 @@ async function shutdown(): Promise<void> {
   // Clones and any partially-started connection are registered globally in
   // the MCP layer, so this is the final ownership backstop.
   await shutdownStep('MCP servers', () => closeMcpServers());
+  await shutdownStep('Echo computer control',async()=>{const {closeEchoComputerControl}=await import('./tools/lcu-control.js');await closeEchoComputerControl();});
   for (const [name, stop] of [['rewind', stopRewind], ['watchdog', stopWatchdog], ['ghost', stopGhostMode], ['debugger', stopAutoDebug], ['shadow', stopShadowMode]] as const) {
     await shutdownStep(name, stop, 3000);
   }

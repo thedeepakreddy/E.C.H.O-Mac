@@ -1,4 +1,5 @@
 import {toolGranted} from '../safety/tool-permissions.js';
+import {currentAgentRunContext} from '../agent-replay/context.js';
 import { hasExternalToolGrants } from '../safety/tool-permissions.js';
 import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { Brain, LOOP_CAPS, buildSystemPrompt, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
@@ -14,6 +15,7 @@ import { confirmations } from "../safety/confirm.js";
 import { observeAction } from "../frontier/observe.js";
 import { runGated, decide, DENIAL_MESSAGE } from "../safety/gate.js";
 import { modelToolResult } from "../memory/tool-context.js";
+import {computerImageEntries,computerImageLabel} from '../tools/lcu-evidence.js';
 import { LOCAL_TOOL_NAMES } from "./localtools.js";
 import { ROUTER_ALWAYS_INCLUDE } from "./tool-router.js";
 import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
@@ -176,8 +178,7 @@ export class ClaudeBrain extends Brain {
           }
           const content: any[] = [];
           content.push({ type: "text", text: JSON.stringify(modelToolResult(out)) });
-          if (out.image)
-            content.push({ type: "image", data: out.image.data, mimeType: out.image.mimeType });
+          for(const entry of computerImageEntries(out)){content.push({type:'text',text:computerImageLabel(entry,out)});content.push({type:'image',...entry.image});}
           if (!content.length) content.push({ type: "text", text: "done" });
           // The SDK keeps the conversation already supplied on send(). Avoid
           // re-appending the entire shared archive after every tool call.
@@ -276,6 +277,9 @@ export class ClaudeBrain extends Brain {
     input: Record<string, unknown>,
     _options: { signal: AbortSignal }
   ): Promise<{ behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }> {
+    const owner=currentAgentRunContext();
+    const stopped=()=>_options.signal?.aborted||owner?.toolSignal?.aborted||owner?.loop?.hasExited||!!owner?.appQuestion;
+    if(stopped())return {behavior:'deny',message:'This task is stopped or waiting for user input. No SDK tool may execute.'};
     if (this.limits.allowedTools && !toolGranted(this.limits.allowedTools,toolName.replace(/^mcp__jarvis__/, ""))) {
       // The one choke point every SDK tool call passes through — including its
       // own native Bash/Write/Edit, which never appear in Echo's own TOOLS and
@@ -288,6 +292,7 @@ export class ClaudeBrain extends Brain {
       allowedTools: this.limits.allowedTools,
       emit: (e, p) => this.emitEvent(e as any, p),
     });
+    if(stopped())return {behavior:'deny',message:'The task stopped while this tool was being assessed. No SDK tool may execute.'};
     if (!decision.allowed) {
       return { behavior: "deny", message: decision.message ?? DENIAL_MESSAGE };
     }
@@ -471,7 +476,7 @@ export class ClaudeBrain extends Brain {
 
   private resetSession(): void {
     this.sessionGeneration++;
-    try { this.q?.interrupt?.(); } catch { /* already closed */ }
+    try { this.q?.close?.(); } catch { /* already closed */ }
     this.input.end();
     this.input = new Pushable<SDKUserMessage>();
     this.q = null;
@@ -484,23 +489,25 @@ export class ClaudeBrain extends Brain {
   }
 
   interrupt() {
-    try {
-      this.q?.interrupt?.();
-    } catch (err) {
-      console.error("[jarvis] interrupt failed:", (err as any)?.message ?? err);
-    }
+    void this.pauseForInput().catch(()=>this.emitEvent('error','Claude could not confirm interruption; its session was closed.'));
     currentLoop()?.exit("abort_signal", { detail: "user interrupted" });
     this.emitEvent("status", "idle");
   }
 
+  async pauseForInput():Promise<void> {
+    const active=this.q;
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      await Promise.race([Promise.resolve(active?.interrupt?.()),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('SDK interruption acknowledgment timed out')),5000);})]);
+    }catch(error){
+      if(this.q===active)this.resetSession();
+      throw error;
+    }finally{if(timer)clearTimeout(timer);}
+  }
+
   async stop() {
     this.memory.close();
-    try {
-      this.q?.interrupt?.();
-    } catch (err) {
-      console.error("[jarvis] stop failed:", (err as any)?.message ?? err);
-    }
-    currentLoop()?.exit("abort_signal", { detail: "brain stopped" });
-    this.input.end();
+    try {await this.pauseForInput();}
+    finally {this.resetSession();currentLoop()?.exit("abort_signal", { detail: "brain stopped" });this.input.end();}
   }
 }

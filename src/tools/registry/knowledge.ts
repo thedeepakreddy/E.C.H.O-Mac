@@ -434,9 +434,8 @@ export const KNOWLEDGE_TOOLS: ToolDef[] = [
       });
       // Hand the url over. The model cannot act on a camera it only has a NAME
       // for, and the Osiris panel is not a usable route to one: the hosted
-      // build publishes no map handle, so `focusOsiris` falls back to driving
-      // the site's search box by keystroke, which in a recorded session left
-      // the globe stuck on Hungary while Echo clicked at it for 70 seconds.
+      // build may publish no map handle. Its retired keystroke search left the
+      // globe unmoved in a recorded session, so that fallback is disabled.
       const url = summary.open ? ` Open it with open_url: ${summary.open}` : "";
       const text = summary.speech + placeMissed + url;
       return { text, data: summary.open ? { url: summary.open } : undefined };
@@ -445,12 +444,12 @@ export const KNOWLEDGE_TOOLS: ToolDef[] = [
   {
     name: "osiris_focus",
     description:
-      "Point the Osiris globe at a place — a city, country, region or landmark. Use when the user asks to look at somewhere specific on the world map ('show me Ukraine', 'zoom into Tokyo'). Opens the grid first if it isn't up.",
+      "Point the Osiris globe at a place only when its loaded page exposes the supported map API. Opens the grid if needed and checks that capability first. Hosted or loading pages without the API report unavailable; keyboard shortcuts and search typing are disabled. Never promise camera movement without a supported route.",
     schema: {
       place: z.string().describe("Where to look — a place name, as spoken."),
-      lat: z.number().optional().describe("Exact latitude, if known."),
-      lng: z.number().optional().describe("Exact longitude, if known."),
-      zoom: z.number().optional().describe("Zoom level, 2 (whole globe) to 12 (a city block). Defaults to 6."),
+      lat: z.number().min(-90).max(90).optional().describe("Exact latitude, if known."),
+      lng: z.number().min(-180).max(180).optional().describe("Exact longitude, if known."),
+      zoom: z.number().min(2).max(12).optional().describe("Zoom level, 2 (whole globe) to 12 (a city block). Defaults to 6."),
     },
     readOnly: false,
     handler: async (a) => {
@@ -460,9 +459,12 @@ export const KNOWLEDGE_TOOLS: ToolDef[] = [
 
       if (!osiris.isOsirisOpen()) {
         await osiris.openOsirisPanel({});
-        // The globe needs to exist before the camera can be told to move.
-        await new Promise((r) => setTimeout(r, 6000));
       }
+      if(!await osiris.canFocusOsiris())return {
+        status:'failed',verification:'unverified',
+        text:'The grid is open, but camera control is unavailable: this page does not expose the supported map API or is not ready yet. No search typing or keyboard shortcut was sent. You can navigate the map manually.',
+        error:{category:'unsupported_input',message:'Osiris map API unavailable',retryable:false},
+      };
 
       let coords =
         Number.isFinite(a.lat) && Number.isFinite(a.lng)
@@ -484,14 +486,13 @@ export const KNOWLEDGE_TOOLS: ToolDef[] = [
             coords = { lat: hit.lat, lng: hit.lng, zoom: a.zoom };
           }
         } catch {
-          /* the search-box route below doesn't need coordinates */
+          /* Missing coordinates are reported below; no search typing fallback. */
         }
       }
 
       const route = await osiris.focusOsiris(place, coords);
-      if (route === "map") return { text: `Bringing ${place || "that position"} up on the grid.` };
-      if (route === "search") return { text: `Searching the grid for ${place} and flying there.` };
-      return { text: `The grid is open, but I couldn't move the camera to ${place || "there"} from here.` };
+      if (route === "map") return {status:'success',verification:'unverified',text: `Requested map movement to ${place || "that position"}; the final camera position has not been verified.`};
+      return {status:'failed',verification:'unverified',text: `The grid is open, but I couldn't move the camera to ${place || "there"} through the supported map API. No keyboard or search fallback was used.`};
     },
   },
   {

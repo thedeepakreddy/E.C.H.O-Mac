@@ -40,6 +40,9 @@ export interface AgentRunContext {
   observationEpoch?: number;
   onNoProgress?: () => void;
   toolCatalog?: {discover(query: string): Promise<unknown>};
+  /** Host-written clarification; never derived from unproved provider prose. */
+  appQuestion?: string;
+  onAppQuestion?: () => void;
 }
 
 const storage = new AsyncLocalStorage<AgentRunContext | null>();

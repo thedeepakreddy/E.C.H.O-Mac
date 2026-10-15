@@ -9,15 +9,18 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describeSummary, type TurnSummary } from "./voice/voice-log.js";
+import {dataRoot} from './memory/paths.js';
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const dir = join(ROOT, "runs", "voice");
+// New installs write to mutable user data; legacy checkout logs remain readable.
+const dirs = [join(dataRoot(),'runs','voice'),join(ROOT,'runs','voice')];
 
 function latest(): string | null {
   try {
-    const files = readdirSync(dir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => join(dir, f))
+    const files = dirs.flatMap(dir=>{
+      try{return readdirSync(dir).filter(f=>f.endsWith('.jsonl')).map(f=>join(dir,f));}
+      catch{return [];}
+    })
       .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
     return files[0] ?? null;
   } catch {

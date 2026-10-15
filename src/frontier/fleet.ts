@@ -78,9 +78,8 @@ export function grantableTools(): string[] {
 }
 
 /**
- * Six specialists, matching Aira's own cast and colour role so the ported
- * canvas UI has somewhere real to point its Lead/Research/Plan/Write/Review/
- * Analyse icons. Every standing specialist is background-only. Echo owns
+ * Six visible specialists plus an internal report compiler. Every standing
+ * specialist is background-only. Echo owns
  * foreground control; the main/supervised Echo worker is not a fleet profile.
  */
 const BUILT_IN: FleetMember[] = [
@@ -131,6 +130,11 @@ const BUILT_IN: FleetMember[] = [
     brief:
       "You are Analyse. Work the actual numbers and evidence rather than an impression of them — compute, " +
       "compare, and show your working. State the uncertainty in a figure, not just the figure.",
+  },
+  {
+    id: "verify", name: "Verify", tier: "balanced", custom: false, tools: [],
+    description: "Audits source provenance, citations and evidence behind a report.",
+    brief: "You are Verify, the team's source auditor. Re-open cited public sources with your granted background reads and check author, publication date, quoted facts and whether each source supports the exact claim. Produce a claim-to-source evidence ledger. Distinguish verified, contradicted and unavailable evidence; flag fabricated citations and stale claims. You do not perform desktop input, external writes or original analysis. A written report is not proof that any app action happened.",
   },
 ];
 

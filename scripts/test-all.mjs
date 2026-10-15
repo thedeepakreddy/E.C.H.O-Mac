@@ -12,7 +12,8 @@
  * Each command owns a temporary data directory, process group and deadline.
  */
 import {runTestCommand} from "./test-command.mjs";
-import {LIVE_TESTS, DEVICE_TESTS, selectTests} from "./test-modes.mjs";
+import {parseUniqueJson} from './manifest.mjs';
+import {LIVE_TESTS, DEVICE_TESTS, UI_TESTS, selectTests, validateTestModes} from "./test-modes.mjs";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -26,13 +27,22 @@ if (process.env.ECHO_TEST_RUNNER) {
 }
 
 const args = process.argv.slice(2);
-if (args.includes("--live") && args.includes("--device")) throw new Error("Choose --live or --device, not both.");
-const mode = args.includes("--live") ? "live" : args.includes("--device") ? "device" : "offline";
+const requestedModes=['offline','live','device','ui'].filter(mode=>args.includes(`--${mode}`));
+if(requestedModes.length>1)throw Error('Choose only one verification group.');
+for(const flag of args.filter(arg=>arg.startsWith('--')))if(!['--offline','--live','--device','--ui','--list'].includes(flag))throw Error(`Unknown test option: ${flag}`);
+const mode = requestedModes[0]??'offline';
 const live = mode === "live";
 const filters = args.filter((a) => !a.startsWith("--"));
 
-const scripts = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).scripts;
+const scripts = parseUniqueJson(readFileSync(join(ROOT, "package.json"), "utf8")).scripts;
+validateTestModes(scripts);
 const tests = selectTests(scripts, mode, filters);
+if(!tests.length)throw Error(`No ${mode} tests match this selection.`);
+if(args.includes('--list')){
+  const descriptions={...LIVE_TESTS,...DEVICE_TESTS,...UI_TESTS};
+  for(const name of tests)console.log(`${mode}: ${name}${descriptions[name]?` — ${descriptions[name]}`:''}`);
+  console.log(`${tests.length} suites listed; nothing executed.`);process.exit(0);
+}
 const cancelled = new AbortController();
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => cancelled.abort());
 
@@ -43,7 +53,7 @@ async function run(cmd, cmdArgs) {
   // A test may select its own cassette/log directory. An inherited override
   // would redirect fixture recordings away from the directory being asserted.
   for (const key of ['ECHO_LOG_DIR', 'ECHO_REPLAY_DIR', 'ECHO_REPLAY_RUN', 'ECHO_REPLAY_PROVIDER']) delete env[key];
-  if (mode === 'offline') {
+  if (mode === 'offline' || mode === 'ui') {
     env.ECHO_MCP = '0';
     env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${JSON.stringify(join(ROOT, 'scripts/test-network-guard.mjs'))}`;
   }
@@ -79,5 +89,5 @@ for (const f of failed) {
   console.log(`\n── ${f.name} ─────────────────────────────────────────\n${f.out.trim().split("\n").slice(-40).join("\n")}`);
 }
 console.log(`\n${total - failed.length}/${total} passed in ${Math.round((Date.now() - t0) / 1000)}s${failed.length ? ` — FAILED: ${failed.map((f) => f.name).join(", ")}` : ""}`);
-if (mode === "offline" && !filters.length) console.log(`Not run (need keys, network or permissions): ${Object.keys({...LIVE_TESTS, ...DEVICE_TESTS}).join(", ")} — npm run test:live / npm run test:device`);
+if (mode === "offline" && !filters.length) console.log(`Not run: UI ${Object.keys(UI_TESTS).length}, live ${Object.keys(LIVE_TESTS).length}, device ${Object.keys(DEVICE_TESTS).length} suites — npm run test:ui / test:live / test:device. Device/live require separate authorization.`);
 process.exit(failed.length || cancelled.signal.aborted ? 1 : 0);

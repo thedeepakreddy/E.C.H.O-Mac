@@ -17,6 +17,8 @@ import { race } from "../../frontier/parallel.js";
 import { inspectRun, loadEvents, renderInspectionHtml } from "../../agent-replay/index.js";
 import { appRoot, memoryScope } from "./shared.js";
 import { currentAgentRunContext } from "../../agent-replay/context.js";
+import {conversationId} from '../../memory/conversation.js';
+import {RETRY_EVIDENCE_CALL_ID,retryEvidenceOriginal,retryScopeKey,retrySourceIdentityMatches} from '../../frontier/agent-retry.js';
 
 export const AGENT_TOOLS: ToolDef[] = [
   {
@@ -162,15 +164,38 @@ export const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "read_tool_result",
-    description: "Read the original saved result of a tool call in this task. Use callId from an excerpt; paginate with offset and limit. This retrieves evidence without repeating the external tool.",
-    schema: {callId: z.string(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(100).max(12000).default(6000)},
+    description: "Read the original saved result without repeating a tool. Omit sourceTaskId for the current task only; supply an explicit sourceTaskId from the host-authorized retry manifest for older evidence (call IDs are task-local). Use callId '@retry-evidence' with explicit sourceTaskId to page the full saved inventory, progress, artifacts and observation IDs; its call pointers retrieve original tool results. Character offset/limit pages must be concatenated before parsing JSON. Stop at nextOffset null.",
+    schema: {callId: z.string(), sourceTaskId: z.string().min(1).optional(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(100).max(12000).default(6000)},
     readOnly: true,
     handler: async a => {
       const taskId = owningTaskId();
-      const result = taskId ? taskCoordinator.readCallResult(taskId, a.callId) : undefined;
-      if (!result) return {status: 'failed', text: 'No saved result with this callId exists in the current task.'};
-      const original = result.data !== undefined ? JSON.stringify({text: result.text, data: result.data}) : result.text || JSON.stringify(result);
-      const offset = a.offset ?? 0, limit = Math.min(a.limit ?? 6000, 6000);
+      const run=currentAgentRunContext(),invocation=currentInvocation();
+      const denied=()=>({status:'denied' as const,text:'Saved evidence is not authorized for this task, actor, conversation, scope or privacy mode.'});
+      if(!taskId||!invocation||invocation.taskId!==taskId||(run&&(run.taskId!==taskId||run.identity.id!==invocation.actorId)))return denied();
+      let current;
+      try{current=taskCoordinator.assertInvocation(invocation);}catch{return denied();}
+      const sourceTaskId=a.sourceTaskId===undefined?taskId:a.sourceTaskId;
+      if(typeof sourceTaskId!=='string'||!sourceTaskId)return denied();
+      const inventory=a.callId===RETRY_EVIDENCE_CALL_ID;
+      if(inventory&&!a.sourceTaskId)return denied();
+      let source=current;
+      if(a.sourceTaskId!==undefined||inventory){
+        // The selector is model input; only a host-written binding grants access.
+        const authorized=current.bindings.retrySourceTaskIds;
+        const expectedConversation=current.bindings.conversationId??conversationId(current.ownerActorId,current.scope);
+        if(!run||!Array.isArray(authorized)||!authorized.includes(sourceTaskId)
+          ||current.privateMode||run.privateMode||run.conversationId!==expectedConversation
+          ||retryScopeKey(run.scope??{})!==retryScopeKey(current.scope))return denied();
+        const saved=taskCoordinator.get(sourceTaskId);
+        if(!saved||saved.privateMode||retryScopeKey(saved.scope)!==retryScopeKey(current.scope)||!retrySourceIdentityMatches(saved))return denied();
+        source=saved;
+      }
+      const offset=a.offset??0,requestedLimit=a.limit??6000;
+      if(!Number.isInteger(offset)||offset<0||!Number.isInteger(requestedLimit)||requestedLimit<100||requestedLimit>12000)return denied();
+      const result=inventory?undefined:taskCoordinator.readCallResult(sourceTaskId,a.callId);
+      if (!inventory&&!result) return {status: 'failed', text: 'No saved result with this callId exists in the selected task.'};
+      const original=inventory?retryEvidenceOriginal(source):result!.data!==undefined?JSON.stringify({text:result!.text,data:result!.data}):result!.text||JSON.stringify(result);
+      const limit=Math.min(requestedLimit,6000);
       return {text: original.slice(offset, offset + limit), data: {verbatimPage: true, totalChars: original.length, nextOffset: offset + limit < original.length ? offset + limit : null}, status: 'success'};
     },
   },

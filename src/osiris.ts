@@ -269,18 +269,11 @@ export async function applyLayers(ids: string[]): Promise<LayerResult> {
   return Promise.race([navigation, pause(6000).then(() => "pending" as const)]);
 }
 
-/** Send one of Osiris's own keyboard shortcuts to the page. */
+/** Keyboard injection into Echo's embedded grid is intentionally unsupported. */
 export async function pressInOsiris(key: string): Promise<boolean> {
-  if (!feed) return false;
-  try {
-    feed.focus();
-    feed.sendInputEvent({ type: "keyDown", keyCode: key });
-    feed.sendInputEvent({ type: "char", keyCode: key });
-    feed.sendInputEvent({ type: "keyUp", keyCode: key });
-    return true;
-  } catch {
-    return false;
-  }
+  // Osiris is embedded in Echo, whose own host/permission UI cannot be an
+  // autonomous LCU target. Keep supported map/layer APIs; never inject keys.
+  return false;
 }
 
 /**
@@ -317,17 +310,18 @@ export async function relayFetch(path: string): Promise<string | null> {
   );
 }
 
-export type FocusRoute = "map" | "search" | "none";
+export type FocusRoute = "map" | "none";
+
+/** Read-only capability check; a hosted/unfinished map need not expose this API. */
+export async function canFocusOsiris():Promise<boolean> {
+  return await inPage<boolean>(`(() => typeof window.__osirisMap?.flyTo === 'function')()`)===true;
+}
 
 /**
  * Point the globe at a place.
  *
- * Two routes, because only one of them exists on any given instance. A local
- * checkout running `npm run dev` publishes its MapLibre handle on
- * `window.__osirisMap` and can be flown precisely. A production build does not,
- * so the camera is moved the way a person moves it: open the site's search,
- * type the place, take the first hit. The caller is told which route was used,
- * because they are not equally exact and the answer should say so.
+ * Only the exposed MapLibre API is supported. No map handle means no camera
+ * control: never fall back to typing into Echo's embedded search or shortcuts.
  */
 export async function focusOsiris(
   place: string,
@@ -347,49 +341,7 @@ export async function focusOsiris(
 
   if (!place.trim()) return "none";
 
-  // The search route. `s` opens Osiris's search panel; Enter takes the first
-  // result when nothing is highlighted, which is exactly "go to that place".
-  await pressInOsiris("s");
-  await pause(450);
-  const typed = await typeInOsiris(place.trim());
-  if (!typed) return "none";
-  await pause(1400); // let the geocoder answer before committing
-  feed.sendInputEvent({ type: "keyDown", keyCode: "Return" });
-  feed.sendInputEvent({ type: "keyUp", keyCode: "Return" });
-  return "search";
-}
-
-/**
- * Type into whatever the grid has focused.
- *
- * insertText is one call and usually enough; a controlled React input that
- * ignores it is then typed into character by character, which no input can
- * tell from a person. The value is read back so the difference is detected
- * rather than assumed.
- */
-async function typeInOsiris(text: string): Promise<boolean> {
-  if (!feed) return false;
-  try {
-    feed.insertText(text);
-  } catch {
-    /* fall through to the per-character path */
-  }
-  await pause(250);
-  const landed = await inPage<string>(
-    `(document.activeElement && 'value' in document.activeElement ? document.activeElement.value : '') || ''`
-  );
-  if (landed && landed.includes(text.slice(0, 3))) return true;
-
-  for (const ch of text) {
-    feed.sendInputEvent({ type: "keyDown", keyCode: ch });
-    feed.sendInputEvent({ type: "char", keyCode: ch });
-    feed.sendInputEvent({ type: "keyUp", keyCode: ch });
-  }
-  await pause(200);
-  const second = await inPage<string>(
-    `(document.activeElement && 'value' in document.activeElement ? document.activeElement.value : '') || ''`
-  );
-  return !!second;
+  return "none"; // No map API: report unsupported instead of typing into Echo.
 }
 
 function pause(ms: number): Promise<void> {

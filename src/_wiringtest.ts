@@ -64,13 +64,15 @@ function ok(value: unknown, message: string): void {
   // The tools a first spoken command needs must never sit behind a search:
   // that costs a whole extra model round trip before Echo can even look.
   const core = new Set([...LOCAL_TOOL_NAMES, ...ROUTER_ALWAYS_INCLUDE]);
-  for (const n of ["screenshot", "click_ui_element", "type_text", "open_app", "recall", "confirm_action"]) {
+  for (const n of ["screenshot", "inspect_app", "click_in_app", "type_in_app", "press_app_key", "move_echo_cursor", "open_app", "recall", "confirm_action"]) {
     ok(core.has(n), `${n} stays loaded`);
   }
   const loaded = TOOLS.filter((t) => core.has(t.name)).length;
   ok(loaded > 20 && loaded < TOOLS.length,
     `the always-loaded set is a real subset (${loaded} of ${TOOLS.length})`);
   ok([...core].every((n) => TOOLS.some((t) => t.name === n)), "core names are checked against the registry");
+  const localBrain=readFileSync(join(process.cwd(),'src','brain','ollama.ts'),'utf8');
+  ok(/lcuModelGuidance\(\)/.test(localBrain),'local brain receives the runtime control guidance as well as its short persona');
 }
 
 // ---- every brain gets every feature ----------------------------------------
@@ -295,7 +297,7 @@ console.log("  prompts name tools that exist");
   // not something else count.
   const NOT_TOOLS = new Set([
     "tool_calls", "long_term_memory", "e_c_h_o", "claude_code", "working_dir",
-    "system_prompt", "api_key", "config_json", "shortcuts_json", "health_record",
+    "system_prompt", "api_key", "config_json", "shortcuts_json", "health_record", "observation_required",
     // The XML tag the memory packet arrives in, not a tool.
     "echo_context",
     // YouTube's own URL query parameter, from the "take the direct route"
