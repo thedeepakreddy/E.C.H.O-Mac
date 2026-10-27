@@ -140,7 +140,15 @@ function runtime(names: string[], additions: Record<string, unknown> = {}) {
     voiceSession: {noteBrainDone() {}}, remoteRecord() {}, endAutoReflex() {}, finishTurn() {}, publishControlUpdate() {},
     maybeAutoListen() {}, send() {}, tts: {say() {}}, shuttingDown: false, inputRevision: 0,
     telegram: undefined, chatIdle() {}, automaticTasks: {control:()=>null,handle:()=>null},
-    currentScope:()=>({}), captureAllowed:()=>true, ...additions,
+    currentScope:()=>({}), captureAllowed:()=>true,
+    // dispatchToBrain reaches for the phone-update and Mac-bot helpers that
+    // live outside main.ts. The neutral answer is "no intent, no bot", which
+    // leaves every existing case dispatching exactly as it did before these
+    // helpers existed. They sit ahead of `additions` so a case can override.
+    phoneUpdateIntent:()=>null, phoneUpdateCommand:async()=>null,
+    botIntent:()=>null, botRequestId:()=>'fixture',
+    macBots:{run:()=>({message:null}), revision:()=>0},
+    ...additions,
   };
   const functions = names.map(name => declaration('src/main.ts', name)).join('\n');
   const code = `${declaration('src/control-panel.ts', 'ControlTelemetry')}\n${functions}\n`;

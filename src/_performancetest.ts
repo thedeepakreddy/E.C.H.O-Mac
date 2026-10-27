@@ -28,7 +28,14 @@ brain.tools = [];
 brain.messages = [{ role: "user", content: "hello" }];
 try {
   await brain.chat();
-  assert.ok(requests[0].options.num_ctx <= 8192, `local model requested ${requests[0].options.num_ctx} tokens instead of a bounded context`);
+  // The bound is hardware-dependent by design (8192 at or below 8GB, 16384
+  // above), so comparing against a literal only passed on an 8GB machine and
+  // failed everywhere else. What matters here is that the brain asks for the
+  // budget rather than the 131072 the model advertises; the budget's own
+  // policy is pinned at both RAM tiers by the assertions below.
+  const expectedCtx = localContextBudget(cfg, 131072);
+  assert.ok(requests[0].options.num_ctx === expectedCtx && expectedCtx <= 16384,
+    `local model requested ${requests[0].options.num_ctx} tokens instead of the ${expectedCtx}-token bound for this machine`);
   console.log("PASS local context stays bounded despite a model advertising 131072 tokens");
   assert.equal(requests[0].keep_alive, "60s");
   assert.equal(requests[0].options.num_thread, 2);
@@ -42,7 +49,14 @@ try {
   realistic.messages.push({ role: "user", content: "hello" });
   console.log("Local prompt/tool token estimates:", contextTokens(realistic.messages), contextTokens(realistic.tools));
   await realistic.chat();
-  assert.ok(contextTokens(requests[1].messages) + contextTokens(requests[1].tools) < 8192);
+  // What must hold is that the real prompt plus the FITTED tools land inside
+  // the budget this machine actually allocates — the same hardware-dependent
+  // number the request's num_ctx carries. The old literal 8192 was the 8GB
+  // tier's budget, so on any larger machine this failed while the fitter was
+  // working correctly (21821 tokens of tools fitted down to ~8900).
+  const sentTotal = contextTokens(requests[1].messages) + contextTokens(requests[1].tools);
+  assert.ok(sentTotal < expectedCtx,
+    `prompt plus fitted tools came to ${sentTotal} tokens, over this machine's ${expectedCtx}-token budget`);
   const fitted = fitLocalTools(realistic.tools, "open phone remote and set remote password", 3500);
   assert.ok(contextTokens(fitted) <= 3500);
   for (const name of ["inspect_task", "verify_task", "forget", "open_phone_remote", "set_remote_password"]) {

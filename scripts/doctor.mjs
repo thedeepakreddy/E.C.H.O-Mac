@@ -81,6 +81,28 @@ if (existsSync(model)) {
   problems.push("download the Whisper model (see README)");
 }
 
+// --- local embedder -------------------------------------------------------
+// This one is invisible when it is missing, which is why it is checked here.
+// Nothing errors without it: the tool router returns null and every brain
+// sends the FULL tool list each turn (~22k tokens of schemas measured by
+// `npm run performancetest`), the reflex cache drops to exact-string matching
+// so a reworded repeat pays the model again, and autoreflex can never save a
+// fast path. Echo still answers — it is just slow, for no stated reason.
+const embedDir = join(ROOT, "models", "embed");
+const embedModel = join(embedDir, "model_quantized.onnx");
+const embedTokenizer = join(embedDir, "tokenizer.json");
+const haveEmbed = existsSync(embedModel) && existsSync(embedTokenizer);
+console.log(`\n${bold("Local embedder")} ${dim("(tool pruning, reflex cache)")}`);
+if (haveEmbed) {
+  const mb = Math.round(statSync(embedModel).size / 1e6);
+  console.log(`  ${OK} all-MiniLM model (${mb}MB)`);
+} else {
+  const missing = !existsSync(embedModel) ? embedModel : embedTokenizer;
+  console.log(`  ${BAD} embedding model ${dim(`— expected ${missing}`)}`);
+  console.log(`    ${dim("Without it Echo sends every tool to the model on every turn, and never reuses a reworded repeat.")}`);
+  problems.push(`add the embedder: models/embed/{model_quantized.onnx,tokenizer.json} (all-MiniLM-L6-v2, quantized)`);
+}
+
 // --- brain ----------------------------------------------------------------
 const brain = c?.brain ?? "claude";
 console.log(`\n${bold("Brain")} ${dim(`(${brain})`)}`);
