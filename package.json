@@ -1,7 +1,7 @@
 {
   "name": "jarvis",
   "version": "0.1.0",
-  "description": "J.A.R.V.I.S \u2014 a voice-activated, always-on-screen autonomous desktop assistant that can see your screen and control your Mac.",
+  "description": "J.A.R.V.I.S — a voice-activated, always-on-screen autonomous desktop assistant that can see your screen and control your Mac.",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
@@ -54,7 +54,7 @@
     "translatetest": "esbuild src/_translatetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_translatetest.js --log-level=error && node dist/_translatetest.js",
     "dryruntest": "esbuild src/_dryruntest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_dryruntest.js --log-level=error && node dist/_dryruntest.js",
     "struggletest": "esbuild src/_struggletest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_struggletest.js --log-level=error && node dist/_struggletest.js",
-    "researchtest": "esbuild src/_researchtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_researchtest.js --log-level=error && node dist/_researchtest.js",
+    "researchtest": "node --test scripts/research-test.mjs scripts/image-search-test.mjs",
     "remoteapptest": "esbuild src/_remoteapptest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_remoteapptest.js --log-level=error && node dist/_remoteapptest.js",
     "remotetest": "esbuild src/_remotetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_remotetest.js --log-level=error && rm -rf /tmp/jarvis-remotetest && JARVIS_REMOTE_DIR=/tmp/jarvis-remotetest node dist/_remotetest.js",
     "gatetest": "esbuild src/_gatetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_gatetest.js --log-level=error && node dist/_gatetest.js",
@@ -178,7 +178,7 @@
     "test:panel-bots": "npm run build && electron scripts/control_panel_bots_test.mjs",
     "test:panel-office": "npm run build && electron scripts/control_panel_office_test.mjs",
     "test:panel-markdown": "npm run build && electron scripts/control_panel_markdown_test.mjs",
-    "researchtest": "node --test scripts/research-test.mjs scripts/image-search-test.mjs"
+    "embedder": "node scripts/fetch_embedder.mjs"
   },
   "author": "",
   "license": "MIT",
