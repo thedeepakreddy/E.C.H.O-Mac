@@ -129,7 +129,7 @@ if (brain === "gemini") {
     let text = "";
     for await (const m of query({
       prompt: "Reply with exactly: OK",
-      options: { model: c?.claude?.model ?? "claude-opus-4-8", maxTurns: 1 },
+      options: { model: c?.claude?.model ?? "claude-sonnet-5-5", maxTurns: 1 },
     })) {
       if (m.type === "result") text = `${m.is_error ? "ERROR " : ""}${m.result ?? ""}`;
     }
