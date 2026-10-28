@@ -279,7 +279,7 @@ export interface JarvisConfig {
    * see a journey rather than an arrival, and a watching person sees a hand
    * rather than a script. Turn it off to shave ~200ms from each move.
    */
-  control: { cliclickBin: string; workingDir: string; humanCursor: boolean };
+  control: { cliclickBin: string; workingDir: string; humanCursor: boolean; preserveCursor: boolean };
   hud: {
     startListeningOnLaunch: boolean;
     /**
@@ -515,7 +515,7 @@ const DEFAULTS: JarvisConfig = {
     conversationMode: true,
     conversationWindowMs: 12000,
   },
-  control: { cliclickBin: "/opt/homebrew/bin/cliclick", workingDir: "~", humanCursor: true },
+  control: { cliclickBin: "/opt/homebrew/bin/cliclick", workingDir: "~", humanCursor: true, preserveCursor: true },
   hud: { startListeningOnLaunch: true, skin: "jarvis" },
   helpers: { shadow: false, ghost: false, autoDebug: false, shadowIntervalSeconds: 60, watchdog: false, meetingReminders: true, screenHistory: false, screenHistoryIntervalSeconds: 120, memoryIndexing: false },
   agi: {

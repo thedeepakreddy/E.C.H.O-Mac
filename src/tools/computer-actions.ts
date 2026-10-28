@@ -187,6 +187,12 @@ export function cursorPath(
   return points;
 }
 
+let PRESERVE_CURSOR = true;
+/** Return the pointer to where the user left it after a coordinate click. */
+export function setPreserveCursor(on: boolean) {
+  PRESERVE_CURSOR = on;
+}
+
 let HUMAN_CURSOR = true;
 /** Travel to targets instead of jumping to them. On by default. */
 export function setHumanCursor(on: boolean) {
@@ -269,8 +275,34 @@ export async function click(
 ): Promise<string> {
   const [cx, cy] = clampCoords(x, y);
   const cmd = button === "right" ? "rc" : button === "double" ? "dc" : "c";
+
+  // Put the pointer back where the user left it.
+  //
+  // A coordinate click is the last resort — click_ui_element presses the
+  // control through Accessibility, and failing that posts the click straight
+  // into the app, neither of which touches the cursor. When neither works the
+  // physical pointer has to go to the target, and leaving it there is what
+  // makes Echo feel like it has taken the machine over: the user comes back to
+  // a cursor parked somewhere they did not put it.
+  //
+  // Read before, restore after, in one extra call each. Both are best-effort:
+  // if the position cannot be read the click still happens, and a failed
+  // restore is never allowed to turn a successful click into an error.
+  let origin: string | null = null;
+  if (PRESERVE_CURSOR) {
+    const at = await run(CLICLICK, ["p"]);
+    const [px, py] = at.stdout.trim().split(",").map(Number);
+    if (at.code === 0 && Number.isFinite(px) && Number.isFinite(py)) origin = `${px},${py}`;
+  }
+
   const result = await run(CLICLICK, [`${cmd}:${cx},${cy}`]);
   if (result.code !== 0) throw new Error(`cliclick click failed: ${result.stderr || result.stdout}`);
+
+  if (origin) {
+    // Straight back, never walked: the journey out was not shown either, and
+    // animating the return would draw the eye to exactly what this hides.
+    await run(CLICLICK, [`m:${origin}`]).catch(() => undefined);
+  }
   return `${button} click at ${cx},${cy}`;
 }
 

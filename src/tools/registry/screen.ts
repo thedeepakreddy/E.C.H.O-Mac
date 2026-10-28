@@ -184,9 +184,20 @@ export const SCREEN_TOOLS: ToolDef[] = [
           error: { category: "stale_target", message: r.error ?? "AXPress failed", retryable: true },
         };
       }
-      // Fallback: click the element's centre.
+      // No AXPress on this element. Before taking the user's pointer, try the
+      // same hook background_click uses: it posts the click into the app at
+      // those coordinates without the cursor going anywhere. Only if that
+      // fails do we move the physical mouse, which is the thing a person
+      // sitting at the machine actually notices.
       const cx = el.x + Math.round(el.w / 2);
       const cy = el.y + Math.round(el.h / 2);
+      if (d.pid) {
+        const hooked = await deepHookClick(d.pid, cx, cy);
+        if (hooked.ok) {
+          demo.noteStep({ kind: "click", target: a.description, role: el.role });
+          return { text: `Clicked ${where} in ${d.app} without moving the mouse.` };
+        }
+      }
       await act.click(cx, cy, "left");
       demo.noteStep({ kind: "click", target: a.description, role: el.role });
       return { text: `Clicked ${where} at ${cx},${cy} in ${d.app}.` };
