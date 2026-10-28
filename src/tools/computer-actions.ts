@@ -137,10 +137,90 @@ function clampCoords(x: number, y: number): [string, string] {
   return [String(Math.round(x)), String(Math.round(y))];
 }
 
+/**
+ * A path a hand would take, not a teleport.
+ *
+ * cliclick jumps the pointer to its destination in one step. Nothing is wrong
+ * with that mechanically — but on a screen someone is watching, a cursor that
+ * appears at its target reads as a script, while one that travels reads as a
+ * person. It also matters to the software underneath: menus that open on hover,
+ * drags that need intermediate motion, and anything tracking mousemove see an
+ * arrival with no journey.
+ *
+ * Ease-in-out, because a hand accelerates away from rest and decelerates into a
+ * target (Fitts's law in the small). The jitter is perpendicular to the line of
+ * travel and scaled by distance, so a long sweep bows slightly as an arm does
+ * while a short correction stays straight. The last point is always exact: the
+ * wobble must never change where the click lands.
+ *
+ * Pure, so the shape can be tested without a cursor or a display.
+ */
+export function cursorPath(
+  fromX: number, fromY: number, toX: number, toY: number,
+  opts: { steps?: number; jitter?: number; rand?: () => number } = {}
+): Array<{ x: number; y: number }> {
+  const rand = opts.rand ?? Math.random;
+  const dx = toX - fromX, dy = toY - fromY;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 2) return [{ x: Math.round(toX), y: Math.round(toY) }];
+
+  // Roughly one step per 18px, kept inside bounds a single cliclick call can
+  // carry without the move itself becoming the slow part.
+  const steps = opts.steps ?? Math.max(3, Math.min(24, Math.round(distance / 18)));
+  const jitter = opts.jitter ?? Math.min(6, distance / 40);
+  // Unit normal to the direction of travel: the bow goes across the path.
+  const nx = distance ? -dy / distance : 0;
+  const ny = distance ? dx / distance : 0;
+
+  const points: Array<{ x: number; y: number }> = [];
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    if (i === steps) { points.push({ x: Math.round(toX), y: Math.round(toY) }); break; }
+    // A half-sine envelope: no deviation at either end, most in the middle.
+    const bow = Math.sin(t * Math.PI) * jitter * (rand() - 0.5) * 2;
+    points.push({
+      x: Math.round(fromX + dx * eased + nx * bow),
+      y: Math.round(fromY + dy * eased + ny * bow),
+    });
+  }
+  return points;
+}
+
+let HUMAN_CURSOR = true;
+/** Travel to targets instead of jumping to them. On by default. */
+export function setHumanCursor(on: boolean) {
+  HUMAN_CURSOR = on;
+}
+
 export async function moveMouse(x: number, y: number): Promise<string> {
   const [cx, cy] = clampCoords(x, y);
-  const result = await run(CLICLICK, [`m:${cx},${cy}`]);
-  if (result.code !== 0) throw new Error(`cliclick move failed: ${result.stderr || result.stdout}`);
+
+  // The whole path goes in ONE cliclick call. cliclick takes a sequence of
+  // commands, so twenty-four waypoints cost one process spawn rather than
+  // twenty-four — the motion is the point, the process count is not.
+  let moved = false;
+  if (HUMAN_CURSOR) {
+    const at = await run(CLICLICK, ["p"]);
+    const [fx, fy] = at.stdout.trim().split(",").map(Number);
+    if (at.code === 0 && Number.isFinite(fx) && Number.isFinite(fy)) {
+      const path = cursorPath(fx, fy, Number(cx), Number(cy));
+      if (path.length > 1) {
+        const args: string[] = [];
+        for (const point of path) args.push(`m:${point.x},${point.y}`, "w:8");
+        args.pop(); // nothing to wait for after arriving
+        const walked = await run(CLICLICK, args);
+        if (walked.code !== 0) throw new Error(`cliclick move failed: ${walked.stderr || walked.stdout}`);
+        moved = true;
+      }
+    }
+    // Could not read the starting point, or the move was too short to walk:
+    // fall through to the direct jump rather than refusing to move at all.
+  }
+  if (!moved) {
+    const result = await run(CLICLICK, [`m:${cx},${cy}`]);
+    if (result.code !== 0) throw new Error(`cliclick move failed: ${result.stderr || result.stdout}`);
+  }
 
   // cliclick can exit successfully while macOS silently refuses input when
   // Accessibility permission is missing. Read the cursor back so callers do

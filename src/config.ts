@@ -273,7 +273,13 @@ export interface JarvisConfig {
     /** How long the follow-up mic stays armed before the conversation ends (ms). */
     conversationWindowMs: number;
   };
-  control: { cliclickBin: string; workingDir: string };
+  /**
+   * humanCursor moves the pointer along a path instead of teleporting it.
+   * On by default: hover menus, drag targets and anything watching mousemove
+   * see a journey rather than an arrival, and a watching person sees a hand
+   * rather than a script. Turn it off to shave ~200ms from each move.
+   */
+  control: { cliclickBin: string; workingDir: string; humanCursor: boolean };
   hud: {
     startListeningOnLaunch: boolean;
     /**
@@ -509,7 +515,7 @@ const DEFAULTS: JarvisConfig = {
     conversationMode: true,
     conversationWindowMs: 12000,
   },
-  control: { cliclickBin: "/opt/homebrew/bin/cliclick", workingDir: "~" },
+  control: { cliclickBin: "/opt/homebrew/bin/cliclick", workingDir: "~", humanCursor: true },
   hud: { startListeningOnLaunch: true, skin: "jarvis" },
   helpers: { shadow: false, ghost: false, autoDebug: false, shadowIntervalSeconds: 60, watchdog: false, meetingReminders: true, screenHistory: false, screenHistoryIntervalSeconds: 120, memoryIndexing: false },
   agi: {

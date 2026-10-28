@@ -7,7 +7,7 @@ import { resolveOpenAIAuth, openAIUnavailableReason } from "./openai-auth.js";
 import { RecordingBrain, type RecordingBrainOptions } from "../agent-replay/runtime.js";
 import { configuredReplayDirectory, configuredReplayProvider } from "../agent-replay/runtime.js";
 import { RecordedPlaybackBrain } from "../agent-replay/playback-brain.js";
-import { setCliclickBin } from "../tools/computer-actions.js";
+import { setCliclickBin, setHumanCursor } from "../tools/computer-actions.js";
 import type { JarvisConfig } from "../config.js";
 
 export { Brain } from "./types.js";
@@ -25,6 +25,7 @@ export type CreateBrainOptions = Pick<
 /** Build the brain named in config, falling back to Claude if a key is missing. */
 export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {}): { brain: Brain; provider: Provider } {
   setCliclickBin(cfg.control.cliclickBin);
+  setHumanCursor(cfg.control.humanCursor !== false);
 
   // The Agent SDK owns Claude's transport and has no cassette/fetch adapter.
   // Avoid a deceptive "replay" that would still make a live API request: for

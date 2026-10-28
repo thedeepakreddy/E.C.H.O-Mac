@@ -178,7 +178,8 @@
     "test:panel-bots": "npm run build && electron scripts/control_panel_bots_test.mjs",
     "test:panel-office": "npm run build && electron scripts/control_panel_office_test.mjs",
     "test:panel-markdown": "npm run build && electron scripts/control_panel_markdown_test.mjs",
-    "embedder": "node scripts/fetch_embedder.mjs"
+    "embedder": "node scripts/fetch_embedder.mjs",
+    "cursorpathtest": "esbuild src/_cursorpathtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_cursorpathtest.js --log-level=error && node dist/_cursorpathtest.js"
   },
   "author": "",
   "license": "MIT",
