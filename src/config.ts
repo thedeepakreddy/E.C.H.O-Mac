@@ -198,6 +198,13 @@ export interface JarvisConfig {
      * - `sarvam`: Indian languages TTS (requires SARVAM_API_KEY)
      * - `piper`: Piper neural voice, fully offline (npm run piper:setup)
      */
+    /**
+     * Wake Echo by tapping the Fn (globe) key, in addition to Cmd+Shift+J.
+     * Needs native/fnwatch, which npm run build compiles on macOS. Set macOS's
+     * own "Press globe key to" (System Settings > Keyboard) to Do Nothing, or
+     * both will fire.
+     */
+    fnWake?: boolean;
     ttsEngine?: "mac" | "fakeyou" | "elevenlabs" | "sarvam" | "gemini" | "piper" | "vibevoice";
     /** Official VibeVoice-Realtime server; Echo never launches a model implicitly. */
     vibeVoiceUrl?: string;

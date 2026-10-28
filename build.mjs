@@ -46,6 +46,7 @@ function buildNativeHelpers() {
     visionhelper: "screen OCR and presence",
     facetracker: "eye tracking",
     sonar: "presence sensing",
+    fnwatch: "waking Echo with the Fn key",
     voiceio: "the persistent player and echo-cancelled microphone",
     speechhelper: "Apple on-device streaming transcription",
   };

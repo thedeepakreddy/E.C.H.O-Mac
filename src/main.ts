@@ -88,6 +88,7 @@ import { saveRemoteUrl, readRemoteUrl } from "./frontier/remotelink.js";
 import { relayFromConfig } from "./frontier/relay-agent.js";
 import { startCaptureBridge, stopCaptureBridge } from "./frontier/remotecapture.js";
 import { startTelegram, type TelegramBridge } from "./frontier/telegram.js";
+import { startFnWake, stopFnWake } from "./voice/fnwake.js";
 import { toggleGestures } from "./tools/gestures.js";
 import { toggleEyeTracking } from "./tools/eyetrack.js";
 import { toggleSonar } from "./tools/sonar.js";
@@ -2505,6 +2506,10 @@ function wireIpc() {
 function wireShortcuts() {
   globalShortcut.register("CommandOrControl+Shift+J", () => listener?.triggerListen());
   globalShortcut.register("CommandOrControl+Shift+.", () => stopEverything("user interrupted (hotkey)"));
+  // Fn cannot be an accelerator — it never reaches an app as an ordinary key —
+  // so it comes from a native event tap instead. It is additive: ⌘⇧J keeps
+  // working whether or not the helper is there.
+  if (cfg.voice.fnWake !== false) startFnWake(() => listener?.triggerListen());
 }
 
 // Only ever one Jarvis. A second instance would spawn a rival brain and fight
@@ -2976,6 +2981,7 @@ async function shutdown(): Promise<void> {
   shutdownPromise = (async () => {
   try {
     globalShortcut.unregisterAll();
+    stopFnWake();
   } catch {
     /* already gone */
   }
