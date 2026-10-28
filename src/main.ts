@@ -84,7 +84,7 @@ import {
 } from "./frontier/remote.js";
 import { listSessions as listCodingProjects } from "./coding/session.js";
 import { hasPassword as hasRemotePassword } from "./frontier/remoteauth.js";
-import { saveRemoteUrl } from "./frontier/remotelink.js";
+import { saveRemoteUrl, readRemoteUrl } from "./frontier/remotelink.js";
 import { relayFromConfig } from "./frontier/relay-agent.js";
 import { startCaptureBridge, stopCaptureBridge } from "./frontier/remotecapture.js";
 import { startTelegram, type TelegramBridge } from "./frontier/telegram.js";
@@ -3165,8 +3165,15 @@ setStatusProvider((logsAfter) => {
 let lastSentRemoteUrl = "";
 setPublicUrlListener((url) => {
   if (!url || url === lastSentRemoteUrl) return;
+  // Compare against the link on disk, not just the one this process has seen.
+  // lastSentRemoteUrl starts empty on every launch, so an unchanged link read
+  // back after a restart looked new and was announced again — which is why
+  // this arrived on Telegram every single time Echo started.
+  const previous = readRemoteUrl();
   lastSentRemoteUrl = url;
   saveRemoteUrl(url);
+  if (!cfg.telegram?.notifyRemoteLink) return;
+  if (url === previous) return;
   const tell = (triesLeft: number) => {
     // At launch the remote starts before Telegram does; wait for it briefly.
     if (!telegram) { if (triesLeft > 0) setTimeout(() => tell(triesLeft - 1), 5000); return; }

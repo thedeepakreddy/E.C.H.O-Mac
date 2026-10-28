@@ -1,5 +1,5 @@
 import QRCode from "qrcode";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { dataRoot } from "../memory/paths.js";
 
@@ -34,6 +34,22 @@ export async function qrText(url: string): Promise<string> {
  * A phone that misses the QR, a reactor that was not looking at — this is the
  * fallback that means the link is never actually lost while the remote is open.
  */
+/**
+ * The link as it was last written, or "" when there is none.
+ *
+ * Used to tell a genuinely new link from the same one coming back after a
+ * restart. Reading the file rather than holding the value in memory is the
+ * whole point: a module variable resets every launch, which is what made the
+ * "sent once" notification fire on every start.
+ */
+export function readRemoteUrl(): string {
+  try {
+    return readFileSync(join(dataRoot(), "remote-url.txt"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 export function saveRemoteUrl(url: string): string {
   const path = join(dataRoot(), "remote-url.txt");
   try {

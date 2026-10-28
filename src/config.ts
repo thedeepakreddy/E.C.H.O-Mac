@@ -418,7 +418,13 @@ export interface JarvisConfig {
    * environment variable and only the explicitly listed chat IDs may control
    * Echo — never leave allowedChatIds empty on a live bot.
    */
-  telegram: { enabled: boolean; botTokenEnv: string; allowedChatIds: string[] };
+  /**
+   * notifyRemoteLink sends the phone-remote link to Telegram when it changes.
+   * Off by default: the link is saved to disk, shown as a QR on the HUD and
+   * readable with phone_remote_status, so the message is a convenience rather
+   * than the only way back in — and one that arrives unasked.
+   */
+  telegram: { enabled: boolean; botTokenEnv: string; allowedChatIds: string[]; notifyRemoteLink: boolean };
   /**
    * The Osiris grid — the open-source OSINT globe Echo can put on screen and
    * read out loud.
@@ -540,7 +546,7 @@ const DEFAULTS: JarvisConfig = {
   learning: { enabled: false, captureScreens: true, maxStepsPerTurn: 0 },
   remote: { alwaysOn: false },
   memory: { enabled: true, importLegacy: true, cloudRecall: true, retentionDays: 0 },
-  telegram: { enabled: false, botTokenEnv: "TELEGRAM_BOT_TOKEN", allowedChatIds: [] },
+  telegram: { enabled: false, botTokenEnv: "TELEGRAM_BOT_TOKEN", allowedChatIds: [], notifyRemoteLink: false },
   osiris: { baseUrl: "", preferLocal: true, defaultLayers: [] },
 };
 
