@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
 import {runTestCommand} from './test-command.mjs';
-import {selectTests, testMode, LIVE_TESTS, DEVICE_TESTS} from './test-modes.mjs';
+import {selectTests, testMode, validateTestModes, LIVE_TESTS, DEVICE_TESTS} from './test-modes.mjs';
 
 const cwd = fileURLToPath(new URL('../', import.meta.url));
 let passed = 0;
@@ -14,6 +14,17 @@ await test('offline discovery excludes every declared real service and device te
   for (const name of Object.keys(LIVE_TESTS)) assert.equal(testMode(name), 'live');
   for (const name of Object.keys(DEVICE_TESTS)) assert.equal(testMode(name), 'device');
   assert.deepEqual(selectTests(scripts, 'live', ['openrouter']), ['openroutertest']);
+});
+await test('renderer fixtures are a separate group, never mistaken for native Calculator acceptance',()=>{
+ const scripts={'test:panel-office':'fixture','test:calculator-ui':'fixture',superviseduitest:'renderer fixture','test:coding-desktop':'native','test:audio-recovery':'native',exampletest:'offline'};
+ assert.deepEqual(selectTests(scripts,'offline'),['exampletest']);
+ assert.deepEqual(selectTests(scripts,'ui'),['test:panel-office','test:calculator-ui','superviseduitest']);
+ assert.deepEqual(selectTests(scripts,'device'),['test:coding-desktop','test:audio-recovery']);
+ assert.deepEqual(selectTests(scripts,'ui',['office']),['test:panel-office']);
+});
+await test('new colon-prefixed test scripts cannot disappear from coverage without classification',()=>{
+ assert.throws(()=>validateTestModes({'test:forgotten':'fixture'}),/Unclassified test script/);
+ assert.doesNotThrow(()=>validateTestModes({'test:offline':'alias','test:panel-office':'fixture'}));
 });
 await test('commands preserve output, exit codes and spawn errors', async () => {
   const good = await run('process.stdout.write("out");process.stderr.write("err")');

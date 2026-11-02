@@ -43,7 +43,7 @@ check("mcp-prefixed screenshot", tier("mcp__jarvis__screenshot"), "low");
 
 // --- ordinary work: announced but not blocking ----------------------------
 console.log("  medium — ordinary action");
-for (const t of ["click", "type_text", "press_keys", "scroll", "open_app", "set_value"]) {
+for (const t of ["click", "type_text", "scroll", "open_app", "set_value"]) {
   check(t, tier(`mcp__jarvis__${t}`), "medium");
 }
 check("harmless bash", tier("Bash", { command: "ls -la src" }), "medium");
@@ -56,6 +56,9 @@ check('independent agent mission', tier('run_agent_mission', {goal:'Work indepen
 
 // --- must always confirm --------------------------------------------------
 console.log("  high — destructive, or leaves the machine");
+for(const t of ['click_in_app','press_app_key','press_keys']){
+  check(`${t} retains the native input gate`,tier(`mcp__jarvis__${t}`,{app:'Calculator',key:'Return',target:2}),'high');
+}
 const mustConfirm: Array<[string, string]> = [
   ["rm -rf build", "recursive delete"],
   ["rm ./notes.txt", "plain delete"],

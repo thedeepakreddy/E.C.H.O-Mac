@@ -1,4 +1,5 @@
 import {codingToolNames, CODING_GUIDANCE} from '../coding/tool-selection.js';
+import {isAppOperationRequest} from '../brain/app-intent.js';
 import {listSessions} from '../coding/session.js';
 import { intelligenceToolNames, INTELLIGENCE_TOOL_GUIDANCE } from '../brain/intelligence-routing.js';
 import { routeMemory } from "./router.js";
@@ -41,6 +42,7 @@ export class ProviderMemoryContext {
   configure(settings?: Partial<ContextSettings>): void { this.settings = contextSettings(settings); }
   inputBudget(model?: string): number { return contextInputBudget(this.settings, this.provider, model); }
   isCodingTurn(): boolean {
+    if(isAppOperationRequest(this.query))return false;
     if (codingToolNames(this.query).size) return true;
     const task = this.options.taskId ? taskCoordinator.get(this.options.taskId) : null;
     if (Object.values(task?.calls ?? {}).some(call=>codingToolNames(call.tool.replace(/_/g,' ')).size)) return true;

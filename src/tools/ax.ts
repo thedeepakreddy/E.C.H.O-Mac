@@ -119,12 +119,9 @@ export async function dump(all = false): Promise<AxDump> {
 
 /** Activate an element directly through the API (no mouse). Returns its label. */
 export async function press(pid: number, path: string): Promise<{ ok: boolean; label?: string; error?: string }> {
-  try {
-    const raw = await runHelper(["press", "--pid", String(pid), "--path", path]);
-    return JSON.parse(raw);
-  } catch (err: any) {
-    return { ok: false, error: String(err?.message ?? err) };
-  }
+  // Legacy AX paths are NOT LCU native indices. Never translate by guessing
+  // or bypass original runtime approval with a direct helper invocation.
+  return {ok:false,error:'Legacy AXPress is disabled for Echo. Use inspect_app and click_in_app with a fresh LCU index. No input was sent.'};
 }
 
 // ---- matching ------------------------------------------------------------

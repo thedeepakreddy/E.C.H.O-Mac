@@ -7,6 +7,8 @@ export interface AgentIdentity {
   id: string;
   name: string;
   kind: "main" | "clone" | "scheduled" | "research" | "rehearsal";
+  /** Host-set office identity; progress stays in its inspector, not Echo's HUD. */
+  background?: boolean;
   parentTaskId?: string;
 }
 
@@ -38,6 +40,9 @@ export interface AgentRunContext {
   observationEpoch?: number;
   onNoProgress?: () => void;
   toolCatalog?: {discover(query: string): Promise<unknown>};
+  /** Host-written clarification; never derived from unproved provider prose. */
+  appQuestion?: string;
+  onAppQuestion?: () => void;
 }
 
 const storage = new AsyncLocalStorage<AgentRunContext | null>();

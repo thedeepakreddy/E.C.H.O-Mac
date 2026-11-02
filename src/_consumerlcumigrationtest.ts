@@ -1,0 +1,168 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+declare const __ECHO_INERT_CONSUMER_FIXTURE__:boolean;
+if(typeof __ECHO_INERT_CONSUMER_FIXTURE__==='undefined'||!__ECHO_INERT_CONSUMER_FIXTURE__)
+  throw Error('Refusing an unmocked consumer fixture. Run: node scripts/consumer-lcu-migration-test.mjs');
+const root=mkdtempSync(join(tmpdir(),'echo-consumer-lcu-'));
+process.env.ECHO_DATA_ROOT=root;process.env.ECHO_MEMORY_ROOT=join(root,'memory');process.env.ECHO_MCP='0';
+const fixture:any={app:'Calculator',frontmostReads:0,legacy:[],ax:{axAvailable:false,elements:[],pid:1,app:'Calculator'},ocr:{lines:[]}};
+(globalThis as any).__consumerFixture=fixture;
+try{
+  const {replay}=await import('./frontier/replay.js');
+  const steps=[{kind:'open' as const,app:'Calculator'},{kind:'type' as const,text:'2+3'},{kind:'keys' as const,modifiers:[],key:'Return'}];
+  const workflow={name:'Inert dry-run fixture',createdAt:0,steps,parameters:[],runs:0,repairs:0};
+  const preview=await replay(workflow,steps,{dryRun:true});
+  assert.deepEqual(fixture.legacy,[],'A dry run must not launch/focus, type, click, press or scroll');
+  assert(preview.ok);assert.equal(workflow.runs,0);assert.match(preview.summary,/nothing was changed/);
+  assert(preview.results.every(result=>result.how==='skipped'));
+  console.log('PASS workflow dry-run never sends physical input, including opening an app');
+  const {Brain}=await import('./brain/types.js'),{RecordingBrain}=await import('./agent-replay/runtime.js');
+  const {currentLoop}=await import('./agent-replay/loop-log.js');
+  const {EchoComputerControl,installEchoComputerControl,closeEchoComputerControl}=await import('./tools/lcu-control.js');
+  const {resetGateMemory}=await import('./safety/gate.js');
+  const {confirmations}=await import('./safety/confirm.js');
+  const questions:string[]=[];let approve=false;
+  confirmations.on('ask',({id,question})=>{questions.push(question);confirmations.settle(id,approve,'inert migration fixture');});
+  const nativeCalls:string[]=[];
+  let onNativeCall:((code:string)=>void)|undefined;
+  let observed:any={content:[{type:'text',text:'Window: "Calculator", App: Calculator.\n0 standard window Calculator\n\t7 button Description: 2, ID: Two'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.calculator'}}}};
+  const owned=async<T>(work:()=>Promise<T>,options:Record<string,unknown>={},brainOptions:Record<string,unknown>={})=>{
+    resetGateMemory();questions.length=0;nativeCalls.length=0;
+    const client={connect:async()=>{},instructions:'inert native fixture',publicTools:()=>[{name:'js'},{name:'js_reset'}],
+      call:async(_name:string,args:{code:string})=>{nativeCalls.push(args.code);onNativeCall?.(args.code);return structuredClone(observed);},turnEnded:async()=>{},close:async()=>{}};
+    installEchoComputerControl(new EchoComputerControl(client,undefined,async()=>{}));
+    let value!:T,issue:unknown,finished!:()=>void;
+    const workFinished=new Promise<void>(resolve=>{finished=resolve;});
+    class Provider extends Brain {
+      async send(){try{value=await work();}catch(error){issue=error;}finally{currentLoop()!.exit('completed');this.emit('turnEnd');finished();}}
+      interrupt(){}async stop(){}
+    }
+    const brain=new RecordingBrain(new Provider(),'test',{}, {autoResume:false,...brainOptions});
+    const terminalErrors:string[]=[];brain.on('error',message=>terminalErrors.push(String(message)));
+    try{const ended=new Promise<void>(resolve=>brain.once('turnEnd',resolve));brain.send('Inert consumer migration contract',undefined,{privateMode:true,...options});await ended;await workFinished;if(issue)throw issue;assert.deepEqual(terminalErrors,[],'Unexpected RecordingBrain terminal errors must fail this fixture');return value;}
+    finally{await brain.stop();await closeEchoComputerControl();}
+  };
+  fixture.ax={axAvailable:true,pid:1,app:'Calculator',elements:[{role:'AXButton',label:'2',value:'',enabled:true,press:true,path:'legacy-path',x:900,y:800,w:20,h:20}]};
+  const clickSteps=[{kind:'click' as const,target:'2'}];
+  const clicked=await owned(()=>replay({...workflow,steps:clickSteps},clickSteps));
+  assert.deepEqual(fixture.legacy,[],'Workflow input must never activate legacy AX paths or global coordinates');
+  assert(clicked.ok);assert.equal(nativeCalls.filter(code=>code.includes('.click(')).length,1);
+  assert(nativeCalls.some(code=>code.includes('.click(7,')),'The clicked index must come from the original native LCU observation');
+  assert((clicked as any).computerContent?.some((block:any)=>block.text?.includes('ID: Two')),'Native evidence must survive the nested gate');
+  console.log('PASS workflow click is owner-scoped, fresh native index, nested-gated and preserves original evidence');
+  const {dismissPopups}=await import('./frontier/popups.js');
+  fixture.legacy=[];fixture.frontmostReads=0;fixture.app='Finder';
+  fixture.ax={axAvailable:true,pid:1,app:'Finder',elements:[{role:'AXButton',label:'Not now',value:'',enabled:true,press:true,path:'legacy-popup',x:800,y:900,w:40,h:20}]};
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t23 button Description: Close'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  onNativeCall=code=>{if(code.includes('.click('))observed={...observed,content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t24 text Report ready'}]};};
+  const dismissed=await owned(()=>dismissPopups(1));
+  assert.deepEqual(fixture.legacy,[],'Popup dismissal must not activate legacy paths or OCR coordinates');
+  assert.deepEqual(dismissed.dismissed,['Close']);assert.equal(fixture.frontmostReads,1,'Default app is derived once from actual frontmost state');
+  assert(nativeCalls.some(code=>code.includes('.click(23,')));assert((dismissed as any).computerContent?.length>0);
+  console.log('PASS popup dismissals use unique fresh native controls, not legacy AX or OCR coordinates');
+  const extract=await import('./frontier/extract.js');
+  fixture.legacy=[];fixture.frontmostReads=0;onNativeCall=undefined;
+  fixture.ax={axAvailable:true,pid:1,app:'Finder',elements:['A','1','B','2','C','3'].map((label,i)=>({role:'AXCell',label,value:'',x:i%2*60,y:Math.floor(i/2)*30,w:20,h:10}))};
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t12 scroll area Description: Table'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  const table=await owned(()=>extract.readAll(2));
+  assert.deepEqual(fixture.legacy,[],'Collecting rows must not use global scroll or Page Down');
+  assert.deepEqual(table.rows,[['A','1'],['B','2'],['C','3']]);
+  assert.equal((table as any).status,'partial','Repeated rows after scrolling do not prove the end of a list');
+  assert(nativeCalls.some(code=>code.includes('.scroll(12,"down",1)')));assert.equal(fixture.frontmostReads,1);
+  assert((table as any).computerContent?.length>0);
+  console.log('PASS extraction scroll uses a fresh native view and retains rows with truthful partial status');
+  const {TOOL_MAP}=await import('./tools/registry.js'),{runGated}=await import('./safety/gate.js');
+  assert.equal(TOOL_MAP.get('extract_table')!.readOnly,false,'A tool capable of scrolling must declare mutation');
+  const outerTable=await owned(()=>runGated(TOOL_MAP.get('extract_table')!,{scroll:true,maxScreens:2,app:'Finder'},{workingDir:root}));
+  assert.equal(outerTable.status,'partial');assert.match(outerTable.text??'',/A,1/);
+  assert(nativeCalls.some(code=>code.includes('.scroll(12,"down",1)')));
+  assert((outerTable.data as any).originalComputerResults?.length>0,'Outer extraction must retain native evidence from nested gates');
+  assert(outerTable.computerContent?.length);
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t23 button Description: Close'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  onNativeCall=code=>{if(code.includes('.click('))observed={...observed,content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t24 text Report ready'}]};};
+  const outerPopup=await owned(()=>runGated(TOOL_MAP.get('dismiss_popups')!,{rounds:1,app:'Finder'},{workingDir:root}));
+  assert.equal(outerPopup.status,'success');assert.match(outerPopup.text??'',/Close/);
+  assert(nativeCalls.some(code=>code.includes('.click(23,')));
+  assert((outerPopup.data as any).originalComputerResults?.length>0);assert(outerPopup.computerContent?.length);
+  console.log('PASS actual outer registry tools and coordinator preserve nested native provenance without resource conflicts');
+  const {save}=await import('./frontier/demonstrate.js');
+  const sensitive=[['Mail','com.apple.mail','Send'],['Safari','com.apple.safari','Pay'],['Finder','com.apple.finder','Delete'],['Finder','com.apple.finder','Mystery']] as const;
+  const answer=(request:{id:string;question:string})=>{questions.push(request.question);confirmations.settle(request.id,request.question.includes('replay the whole'),'inert exact-action refusal');};
+  confirmations.removeAllListeners('ask');confirmations.on('ask',answer);
+  for(const [app,bundle,label] of sensitive){
+    fixture.app=app;onNativeCall=undefined;
+    observed={content:[{type:'text',text:`Window: "${app}", App: ${app}.\n0 standard window ${app}\n\t8 button Description: ${label}`}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:bundle}}}};
+    const dangerousSteps=[{kind:'click' as const,target:label}],dangerous={...workflow,name:`Inert gated ${label}`,steps:dangerousSteps};save(dangerous);
+    const outcome=await owned(()=>runGated(TOOL_MAP.get('run_workflow')!,{name:dangerous.name,values:{}},{workingDir:root}));
+    assert.equal(questions.length,2,'Whole-macro approval must not approve the exact sensitive native action');
+    assert.equal(nativeCalls.filter(code=>code.includes('.click(')).length,0);
+    assert.match(outcome.text??'',/Stopped at step 1/);
+    assert.equal(outcome.status,'denied','The actual outer workflow must not normalize a refused native step into success');
+    assert.equal(outcome.verification,'unverified');
+    assert(outcome.computerContent?.length);assert((outcome.data as any).originalComputerResults?.length>0);
+  }
+  console.log('PASS Send/Pay/Delete/unknown controls require exact native approval even after whole-workflow approval');
+  fixture.app='Finder';onNativeCall=undefined;
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t12 scroll area Description: Table'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  const ungranted=await owned(()=>runGated(TOOL_MAP.get('extract_table')!,{scroll:true,maxScreens:2,app:'Finder'},{workingDir:root}),{}, {limits:{allowedTools:new Set(['extract_table'])}});
+  assert.equal(ungranted.status,'denied');assert.equal(nativeCalls.length,0);
+  fixture.frontmostReads=0;
+  const background=await owned(()=>runGated(TOOL_MAP.get('extract_table')!,{scroll:true,maxScreens:2},{workingDir:root}),{}, {identity:{id:'background-fixture',name:'Research',kind:'clone',background:true},limits:{allowedTools:new Set(['extract_table','inspect_app','scroll_in_app'])}});
+  assert.equal(background.status,'denied');assert.equal(nativeCalls.length,0);assert.equal(fixture.frontmostReads,0);
+  console.log('PASS a macro grant cannot grant native reads/inputs, and background extraction never touches the screen');
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t23 button Description: Close'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  onNativeCall=code=>{if(code.includes('.click('))currentLoop()!.exit('abort_signal');};
+  const stoppedPopup=await owned(()=>dismissPopups(1,{app:'Finder'}));
+  assert.equal(stoppedPopup.status,'partial','Stop after a returned input must retain honest completed-input progress');
+  assert.deepEqual(stoppedPopup.attempted,['Close']);assert.deepEqual(stoppedPopup.dismissed,[]);
+  assert.equal((stoppedPopup.data as any).inputCallsReturned,1);assert.match(stoppedPopup.note,/input returned/);
+  assert.equal(nativeCalls.filter(code=>code.includes('.click(')).length,1);
+  console.log('PASS Stop after a native return preserves attempted input without claiming dismissal or sending another input');
+  fixture.app='Calculator';onNativeCall=undefined;
+  const calculator={content:[{type:'text',text:'Window: "Calculator", App: Calculator.\n0 standard window Calculator\n\t7 button Description: 2, ID: Two'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.calculator'}}}};
+  observed=structuredClone(calculator);
+  const partialSteps=[{kind:'click' as const,target:'2'},{kind:'click' as const,target:'Not there'}];
+  const partialWorkflow={...workflow,name:'Inert partial native workflow',steps:partialSteps};save(partialWorkflow);
+  const outerWorkflow=await owned(()=>runGated(TOOL_MAP.get('run_workflow')!,{name:partialWorkflow.name,values:{}},{workingDir:root}));
+  assert.equal(outerWorkflow.status,'partial');assert.equal(outerWorkflow.verification,'unverified');
+  assert.match(outerWorkflow.text??'',/first 1 step\(s\) completed/);
+  assert.equal((outerWorkflow.data as any).inputCallsReturned,1);assert((outerWorkflow.data as any).originalComputerResults.length>0);assert(outerWorkflow.computerContent?.length);
+  console.log('PASS actual outer workflow preserves partial status, completed input and original native provenance');
+  observed=structuredClone(calculator);
+  onNativeCall=code=>{if(code.startsWith('await echoLcuApp.getAXState('))currentLoop()!.exit('abort_signal');};
+  const stoppedBefore=await owned(()=>replay({...workflow,steps:clickSteps},clickSteps,{app:'Calculator'}));
+  assert.equal(stoppedBefore.status,'cancelled');assert.equal(nativeCalls.filter(code=>/\.(click|typeText|pressKey|scroll)\(/.test(code)).length,0);
+  console.log('PASS Stop during inspection prevents every subsequent native input');
+  observed=structuredClone(calculator);let observations=0;
+  onNativeCall=code=>{if(code.startsWith('await echoLcuApp.getAXState(')&&++observations===2)observed={...calculator,content:[{type:'text',text:'Window: "Other window", App: Calculator.\n0 standard window Other window\n\t7 button Description: 2, ID: Two'}]};};
+  const movedWindow=await owned(()=>replay({...workflow,steps:clickSteps},clickSteps,{app:'Calculator'}));
+  assert.equal(movedWindow.status,'partial');assert.equal(nativeCalls.filter(code=>code.includes('.click(')).length,0);assert(movedWindow.computerContent?.length);
+  console.log('PASS changed native windows stop at observation_required without clicking a stale index');
+  fixture.app='Finder';
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t12 scroll area Description: Table'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  onNativeCall=code=>{if(code.includes('.scroll('))throw Error('Inert transport failed after native scroll dispatch');};
+  const uncertainTable=await owned(()=>extract.readAll(2,{app:'Finder'}));
+  assert.equal(uncertainTable.status,'uncertain');assert.deepEqual(uncertainTable.rows,[['A','1'],['B','2'],['C','3']]);
+  assert.equal(nativeCalls.filter(code=>code.includes('.scroll(')).length,1);assert(uncertainTable.computerContent?.length);
+  console.log('PASS uncertain scrolling retains collected rows and evidence without retrying the effect');
+  onNativeCall=undefined;
+  observed={content:[{type:'text',text:'Window: "Downloads", App: Finder.\n0 standard window Downloads\n\t23 button Description: Close\n\t24 button Description: Close'}],_meta:{'codex/toolSurface':{app:{kind:'appId',appId:'com.apple.finder'}}}};
+  fixture.ocr={lines:[{text:'Close',confidence:1,cx:900,cy:800,x:890,y:790,w:20,h:20}]};
+  const ambiguous=await owned(()=>dismissPopups(1,{app:'Finder'}));
+  assert.equal(ambiguous.status,'partial');assert.deepEqual(ambiguous.dismissed,[]);assert.deepEqual(ambiguous.attempted,[]);
+  assert.equal(nativeCalls.filter(code=>code.includes('.click(')).length,0);assert.deepEqual(fixture.legacy,[]);
+  console.log('PASS ambiguous native dismissal never falls back to legacy AX or OCR coordinates');
+  fixture.app='Calculator';observed=structuredClone(calculator);let missingPost=false;
+  onNativeCall=code=>{
+    if(code.includes('.click(')){missingPost=true;observed={content:[{type:'text',text:'No native window was returned after this input.'}]};}
+    else if(missingPost&&code.startsWith('await echoLcuApp.getAXState('))observed={...calculator,content:[{type:'text',text:'Window: "Unrelated window", App: Calculator.\n0 standard window Unrelated window\n\t7 button Description: 2, ID: Two'}]};
+  };
+  const twoClicks=[...clickSteps,...clickSteps];
+  const missingWindow=await owned(()=>replay({...workflow,steps:twoClicks},twoClicks,{app:'Calculator'}));
+  assert.equal(missingWindow.status,'partial');assert.equal(missingWindow.results[0].ok,true);assert.equal(missingWindow.results[1].ok,false);
+  assert.match(missingWindow.results[1].note,/window changed/);assert.equal(nativeCalls.filter(code=>code.includes('.click(')).length,1);
+  assert.equal((missingWindow.data as any).inputCallsReturned,1);assert(missingWindow.computerContent?.some(block=>block.text?.includes('Unrelated window')));
+  console.log('PASS missing post-window requires fresh native proof and cannot authorize input in a changed window');
+}finally{rmSync(root,{recursive:true,force:true});}

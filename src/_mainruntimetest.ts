@@ -11,6 +11,8 @@ import {RuntimeTimers} from './runtime/timers.js';
 import {controlSettingsFor, normalizeControlSettings} from './runtime/control-settings.js';
 import {AutomaticTaskRouter,needsTaskDispatch} from './tasks/automatic.js';
 import type {SupervisedState} from './tasks/supervisor.js';
+import {phoneUpdateIntent} from './control-companion.js';
+import {botIntent} from './frontier/bots.js';
 
 let passed = 0;
 async function test(name: string, body: () => unknown): Promise<void> {
@@ -72,7 +74,7 @@ await test('switches coalesce and conflicting requests report busy', async () =>
 await test('all current brain events route once; retired events and errors are isolated', async () => {
   const counts = new Map<string, number>();
   const payloads: BrainEventMap = {status: ['thinking'], text: ['hello'], textDelta: [{text: 'hel'}],
-    textDone: [{text: 'hello'}], tool: [{name: 'read', summary: 'reading'}], risk: [{tool: 'read', tier: 'low', reason: 'fixture'}],
+    textDone: [{text: 'hello'}], tool: [{name: 'read', summary: 'reading'}], toolEnd: [{name:'read'}], risk: [{tool: 'read', tier: 'low', reason: 'fixture'}],
     turnEnd: [], error: ['fixture error'], progress: ['working']};
   const handlers = Object.fromEntries(Object.keys(payloads).map(event => [event, () => counts.set(event, (counts.get(event) ?? 0) + 1)])) as BrainHandlers;
   const f = fixture({handlers: () => handlers});
@@ -139,15 +141,12 @@ function runtime(names: string[], additions: Record<string, unknown> = {}) {
     brain: {provider: 'ollama'}, ollamaFailureStreak: 0, lastAssistantText: '', lastBrainStatus: 'idle', expectAnswer: false,
     voiceSession: {noteBrainDone() {}}, remoteRecord() {}, endAutoReflex() {}, finishTurn() {}, publishControlUpdate() {},
     maybeAutoListen() {}, send() {}, tts: {say() {}}, shuttingDown: false, inputRevision: 0,
+    officeReportSpeaking: undefined, cancelOfficeReports() {},
+    realtimeTurn:null, stopRealtimeVoice() {},
     telegram: undefined, chatIdle() {}, automaticTasks: {control:()=>null,handle:()=>null},
-    currentScope:()=>({}), captureAllowed:()=>true,
-    // dispatchToBrain reaches for the phone-update and Mac-bot helpers that
-    // live outside main.ts. The neutral answer is "no intent, no bot", which
-    // leaves every existing case dispatching exactly as it did before these
-    // helpers existed. They sit ahead of `additions` so a case can override.
-    phoneUpdateIntent:()=>null, phoneUpdateCommand:async()=>null,
-    botIntent:()=>null, botRequestId:()=>'fixture',
-    macBots:{run:()=>({message:null}), revision:()=>0},
+    currentScope:()=>({}), captureAllowed:()=>true, phoneUpdateIntent, botIntent,
+    // Neutral fixtures for helpers dispatchToBrain reaches outside main.ts; ahead of `additions` so a case can override.
+    phoneUpdateCommand:async()=>null, botRequestId:()=>'fixture', macBots:{run:()=>({message:null}), revision:()=>0},
     ...additions,
   };
   const functions = names.map(name => declaration('src/main.ts', name)).join('\n');
@@ -197,6 +196,38 @@ await test('stopping or replacing a brain discards delayed build dispatch result
     if (change === 'replace') context.brain = {provider: 'openai'};
     if (change === 'shutdown') context.shuttingDown = true;
     held.resolve(); await new Promise(resolve => setImmediate(resolve)); assert.equal(sent, 0);
+  }
+});
+await test('local phone and bot commands bypass model and supervised-task dispatch', async () => {
+  for (const [text, expected] of [
+    ['Send me updates to my phone', 'start'],
+    ['Stop sending updates to my phone', 'stop'],
+    ['Ask research bot to compare test fixtures', 'research'],
+  ]) {
+    const calls: string[] = []; let spoken = '';
+    const context = runtime(['dispatchToBrain'], {
+      brainLifecycle: undefined,
+      phoneUpdateCommand: async (intent: string) => {calls.push(intent); return 'Local command handled';},
+      botRequestId: () => '00000000-0000-4000-8000-000000000001',
+      macBots: {
+        revision: () => 'fixture-revision',
+        run: (request: any) => {
+          assert.equal(request.goal, 'compare test fixtures');
+          assert.equal(request.requestId, '00000000-0000-4000-8000-000000000001');
+          assert.equal(request.botRevision, 'fixture-revision');
+          calls.push(request.name); return {message: 'Local command handled'};
+        },
+      },
+      handleBuildInput: () => {throw Error('Local commands must not enter a build');},
+      automaticTasks: {control: () => null, handle: () => {throw Error('Local commands must not start supervision');}},
+      dispatchToBrainUnchecked: () => {throw Error('Local commands must not call a model');},
+      speech: undefined,
+      voiceSession: {noteBrainSend() {}, noteBrainText() {}, noteBrainDone() {}},
+      tts: {say: (message: string) => {spoken = message;}}, finishLocalTurn() {},
+    });
+    context.dispatchToBrain(text, undefined, null, 'text');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, [expected]); assert.equal(spoken, 'Local command handled');
   }
 });
 await test('natural long tasks enter supervision once on every foreground provider and input modality', async () => {

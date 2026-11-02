@@ -1,0 +1,6 @@
+{
+  "schema": "game-room.opening-schedule.v1",
+  "roomId": "echo-agent-office",
+  "primaryArrival": {"openingId": "", "exception": ""},
+  "openings": []
+}

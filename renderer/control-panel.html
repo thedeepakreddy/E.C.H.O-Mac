@@ -116,7 +116,7 @@
             <span id="mission-summary" class="summary-list"><span class="summary-empty">No missions yet</span></span>
           </button>
 
-          <button class="context-section context-link" type="button" data-view="tasks">
+          <button class="context-section context-link" type="button" data-view="bots">
             <span class="context-heading"><span><i></i>Agents</span><small id="agent-summary-count">0 connected</small></span>
             <span id="agent-summary" class="summary-list"><span class="summary-empty">No background agents</span></span>
           </button>
@@ -143,7 +143,8 @@
           <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
-          <button class="active" type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button class="active" type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks</span></button>
+          <button type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
@@ -152,13 +153,12 @@
 
         <section class="mission-workspace" aria-labelledby="mission-monitor-title">
           <div class="workspace-heading mission-heading">
-            <div><h1 id="mission-monitor-title">Agents</h1><p id="ops-subtitle">Manage your specialists and inspect their task reports</p></div>
-            <div class="ops-subnav" role="tablist" aria-label="Agent view">
+            <div><h1 id="mission-monitor-title">Tasks</h1><p id="ops-subtitle">Follow live work, dependencies and saved task reports</p></div>
+            <div class="ops-subnav" role="tablist" aria-label="Task view">
               <button type="button" class="ops-tab active" data-ops-view="board" role="tab" aria-selected="true">Board</button>
               <button type="button" class="ops-tab" data-ops-view="missions" role="tab" aria-selected="false">Missions</button>
-              <button type="button" class="ops-tab" data-view="bots">Agent office</button>
             </div>
-            <div class="zoom-control" role="group" aria-label="Zoom agents panel">
+            <div class="zoom-control" role="group" aria-label="Zoom tasks panel">
               <button type="button" id="agents-zoom-out" title="Zoom out" aria-label="Zoom out"><svg><use href="#icon-minus" /></svg></button>
               <span id="agents-zoom-level">100%</span>
               <button type="button" id="agents-zoom-in" title="Zoom in" aria-label="Zoom in"><svg><use href="#icon-plus" /></svg></button>
@@ -176,15 +176,15 @@
                     <p class="board-answer-goal" id="board-answer-goal"></p>
                     <div class="board-answer-text" id="board-answer-text"></div>
                   </div>
-                  <p id="board-empty" class="companion-muted">Start a task in Bots. This board shows the same run, each specialist’s progress and its reports.</p>
+                  <p id="board-empty" class="companion-muted">Start a task in Agents. This board shows the same run, each specialist’s progress and its reports.</p>
                 </div>
                 <div class="board-task-status">
                   <span id="board-status-text">Ready when you are.</span>
                 </div>
                 <div class="board-task-tools">
-                  <button type="button" class="board-round" id="board-team" title="Choose a team in Bots" aria-label="Choose a team in Bots"><svg><use href="#icon-network" /></svg></button>
+                  <button type="button" class="board-round" id="board-team" title="Choose a team in Agents" aria-label="Choose a team in Agents"><svg><use href="#icon-network" /></svg></button>
                   <button type="button" class="board-round" id="board-toggle-output" title="Show or hide every agent's output" aria-label="Toggle all output"><svg><use href="#icon-eye" /></svg></button>
-                  <button type="button" class="board-round primary" id="board-open-bots" title="Start a task in Bots" aria-label="Start a task in Bots"><svg><use href="#icon-send" /></svg></button>
+                  <button type="button" class="board-round primary" id="board-open-bots" title="Start a task in Agents" aria-label="Start a task in Agents"><svg><use href="#icon-send" /></svg></button>
                   <button type="button" class="board-round primary danger" id="board-stop" title="Stop the board" aria-label="Stop the board" hidden><svg><use href="#icon-stop" /></svg></button>
                 </div>
               </div>
@@ -206,12 +206,13 @@
 <aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
-          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks</span></button>
+          <button type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
-<button class="active" type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents &amp; Bots</span></button></aside>
-        <section class="companion-main"><header class="section-title"><h1>Agents &amp; Bots</h1><button type="button" class="secondary-button" id="bots-refresh" hidden>Refresh</button></header>
+</aside>
+        <section class="companion-main"><header class="section-title"><h1>Agents</h1><button type="button" class="secondary-button" id="bots-refresh" hidden>Refresh</button></header>
           <div class="companion-scroll">
             <section id="agent-office" aria-label="Live agent workspace"></section>
             <dialog id="bots-assignment" class="office-dialog" aria-labelledby="bots-assignment-title"><div class="office-dialog-heading"><h2 id="bots-assignment-title">Assign task</h2><button type="button" id="bots-assignment-close" class="office-button">Close</button></div><p class="companion-muted">Choose an agent or team. One bot task runs at a time on your Mac.</p>
@@ -225,7 +226,8 @@
         <aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
-          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks</span></button>
+          <button type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
@@ -243,7 +245,8 @@
         <aside class="section-nav" aria-label="Control panel sections">          <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
-          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks</span></button>
+          <button type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
@@ -261,7 +264,8 @@
           <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
-          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks</span></button>
+          <button type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents</span></button>
           <button class="active" type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
@@ -329,7 +333,8 @@
           <button type="button" data-view="day"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Now &amp; Next</span></button>
           <button type="button" data-view="brain"><span class="nav-icon"><svg><use href="#icon-brain" /></svg></span><span>Second Brain</span></button>
           <button type="button" data-view="overview"><span class="nav-icon"><svg><use href="#icon-home" /></svg></span><span>Live Overview</span></button>
-          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks &amp; Agents</span></button>
+          <button type="button" data-view="tasks"><span class="nav-icon"><svg><use href="#icon-list" /></svg></span><span>Tasks</span></button>
+          <button type="button" data-view="bots"><span class="nav-icon"><svg><use href="#icon-agent" /></svg></span><span>Agents</span></button>
           <button type="button" data-view="world"><span class="nav-icon"><svg><use href="#icon-world" /></svg></span><span>World Intelligence</span></button>
           <button type="button" data-view="models"><span class="nav-icon"><svg><use href="#icon-route" /></svg></span><span>Models &amp; Routing</span></button>
           <button class="active" type="button" data-view="settings"><span class="nav-icon"><svg><use href="#icon-settings" /></svg></span><span>Settings</span></button>
@@ -509,12 +514,13 @@
             <textarea id="fleet-brief" rows="7" placeholder="You answer questions about our tax filings.&#10;&#10;- Cite the filing year for anything you assert.&#10;- Say when a figure is an estimate rather than filed.&#10;- Refuse to guess at numbers you have not been given."></textarea>
             <small>Its standing instructions. Sent with every task this agent runs.</small>
           </label>
-          <label><span>Tier</span>
+          <label><span>Legacy tier</span>
             <select id="fleet-tier">
-              <option value="fast">Fast — local, free</option>
-              <option value="balanced" selected>Balanced — your default brain</option>
-              <option value="deep">Deep — strongest reasoning</option>
+              <option value="fast">Fast</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="deep">Deep</option>
             </select>
+            <small>All agents use Echo's active brain. This saved tier does not change the model.</small>
           </label>
           <fieldset class="fleet-wide">
             <legend>Tools</legend>

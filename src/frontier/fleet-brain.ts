@@ -2,7 +2,8 @@ import {botRevision} from "./bots.js";
 import { createBrain } from "../brain/index.js";
 import type { JarvisConfig } from "../config.js";
 import type { SwarmDeps } from "./swarm.js";
-import { allowedToolsFor, grantableTools, getFleetMember, TIER_PROVIDER } from "./fleet.js";
+import { allowedToolsFor, getFleetMember } from "./fleet.js";
+import {TOOLS} from '../tools/registry.js';
 import { PLAYBOOKS, playbookFor } from "./agent-playbooks.js";
 
 /** The project detected for the current turn; main.ts refreshes it, every brain built here reads it. */
@@ -10,23 +11,23 @@ export const brainProjectHint: { value?: string } = {};
 
 /**
  * The one `makeBrain` every swarm entry point must use. A task whose `profile`
- * names a fleet member runs on that member's tier provider, and a custom
- * member's tool grants become a hard `allowedTools` limit. A task with no
- * profile gets the default brain and every tool, as before.
+ * names a fleet member gets its persona and hard tool grants, not a different
+ * provider. Every agent snapshots Echo's active provider/model when launched.
+ * In-flight work keeps that snapshot; queued launches see subsequent switches.
+ * Legacy roster tiers are metadata only and cannot redirect execution.
  */
 export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDeps["makeBrain"] {
   return (identity, task) => {
     const member = task?.profile ? getFleetMember(task.profile) : null;
     if (task?.profile && !member) throw new Error(`Unknown agent profile "${task.profile}". Select an existing fleet member.`);
     if(member && task?.runtime === "openbot" && task.botRevision !== botRevision(member))throw new Error("This bot changed after its task was queued. Refresh and start a new run.");
-    // Built-in specialists follow the brain the user selected (forcing Claude broke them when it was not set up);
-    // their depth comes from the role's reasoning level instead. Custom agents keep the tier the user chose.
-    const provider = member?.custom ? TIER_PROVIDER[member.tier] : null;
+    // Every agent follows the brain the user selected; depth comes from the role's reasoning level.
     const reasoning = member ? (PLAYBOOKS[member.id] ?? playbookFor({ id: member.id, mode: 'research' }))?.thinking : undefined;
     const profileGrants = member ? allowedToolsFor(member) : null;
-    const allowed = task?.readOnly ? new Set(grantableTools().filter(tool=>profileGrants===null||profileGrants.has(tool))) : profileGrants;
-    const clone = create(provider ? { ...cfg, brain: provider } : cfg, {
-      identity,
+    const allowed = task?.readOnly ? new Set(TOOLS.filter(tool=>tool.readOnly&&(profileGrants===null||profileGrants.has(tool.name))).map(tool=>tool.name)) : profileGrants;
+    const clone = create(structuredClone(cfg), {
+      identity: member ? {...identity, background:true} : identity,
+      allowProviderFallback: false,
       maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
       // Result submission is an actor-owned lifecycle operation, not a user
       // resource grant. Without it a read-only agent can never finish a mission.

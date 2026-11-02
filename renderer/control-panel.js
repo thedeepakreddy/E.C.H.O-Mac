@@ -976,7 +976,7 @@ byId("api-keys-form").addEventListener("submit", async (event) => {
   }
 });
 
-// The Agents board inspects the same persisted tasks started in Bots.
+// The Tasks board inspects the same persisted runs started in Agents.
 let fleetMembers = [];
 let grantableToolNames = [];
 let fleetMaxCustom = 6;
@@ -1076,7 +1076,7 @@ function agentCardMarkup(member, task, liveProgress) {
       ${open ? `<div class="board-agent-card-output">${renderPlainText(fullText)}</div>` : `<p class="board-agent-card-preview">${escapeHtml(preview)}</p>`}
       <button type="button" class="board-agent-card-toggle" data-toggle-agent="${escapeHtml(member.id)}">${open ? "Hide answer" : `Read answer · ${words} words`}<svg><use href="#icon-chevron" /></svg></button>
     ` : ""}
-    <button type="button" class="board-agent-card-toggle" data-task-agent="${escapeHtml(member.id)}">${member.id === "lead" ? "Choose a team in Bots" : "Give a task in Bots"}<svg><use href="#icon-chevron" /></svg></button>
+    <button type="button" class="board-agent-card-toggle" data-task-agent="${escapeHtml(member.id)}">${member.id === "lead" ? "Choose a team in Agents" : "Assign a task in Agents"}<svg><use href="#icon-chevron" /></svg></button>
     ${phase === "working" ? `<button type="button" class="board-agent-card-toggle" data-stop-agent="${escapeHtml(member.id)}">Stop this step<svg><use href="#icon-stop" /></svg></button>` : ""}
   </article>`;
 }

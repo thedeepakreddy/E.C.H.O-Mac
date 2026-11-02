@@ -26,6 +26,8 @@ for(const brain of ['claude','gemini','openai','openrouter','ollama'] as const){
   assert.equal(toolGranted(options.limits.allowedTools,'mcp__jarvis__start_project_build'),false);
   assert.equal(toolGranted(options.limits.allowedTools,'mcp__service__query'),true);
   assert.equal(toolGranted(options.limits.allowedTools,'mcp__jarvis__spawn_subagent'),false);
+  makeSupervisedBrain({...structuredClone(DEFAULTS_FOR_TESTS),brain},{id:'background-worker',name:'Worker',kind:'clone'}, {...spec,lane:'knowledge'},false,create);
+  assert.equal(options.limits.allowedTools.has('verify_app_state'),false,'Background workers cannot bind foreground app state');
   makeSupervisedBrain({...structuredClone(DEFAULTS_FOR_TESTS),brain},{id:'inspector',name:'Inspector',kind:'clone'},spec,true,create);
   assert.equal(options.limits.maxIterations,30);
   assert.equal(options.autoResume,false);assert.equal(options.maxRecoveryAttempts,0);

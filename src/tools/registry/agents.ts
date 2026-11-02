@@ -17,6 +17,8 @@ import { race } from "../../frontier/parallel.js";
 import { inspectRun, loadEvents, renderInspectionHtml } from "../../agent-replay/index.js";
 import { appRoot, memoryScope } from "./shared.js";
 import { currentAgentRunContext } from "../../agent-replay/context.js";
+import {conversationId} from '../../memory/conversation.js';
+import {RETRY_EVIDENCE_CALL_ID,retryEvidenceOriginal,retryScopeKey,retrySourceIdentityMatches} from '../../frontier/agent-retry.js';
 
 export const AGENT_TOOLS: ToolDef[] = [
   {
@@ -162,15 +164,38 @@ export const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "read_tool_result",
-    description: "Read the original saved result of a tool call in this task. Use callId from an excerpt; paginate with offset and limit. This retrieves evidence without repeating the external tool.",
-    schema: {callId: z.string(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(100).max(12000).default(6000)},
+    description: "Read the original saved result without repeating a tool. Omit sourceTaskId for the current task only; supply an explicit sourceTaskId from the host-authorized retry manifest for older evidence (call IDs are task-local). Use callId '@retry-evidence' with explicit sourceTaskId to page the full saved inventory, progress, artifacts and observation IDs; its call pointers retrieve original tool results. Character offset/limit pages must be concatenated before parsing JSON. Stop at nextOffset null.",
+    schema: {callId: z.string(), sourceTaskId: z.string().min(1).optional(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(100).max(12000).default(6000)},
     readOnly: true,
     handler: async a => {
       const taskId = owningTaskId();
-      const result = taskId ? taskCoordinator.readCallResult(taskId, a.callId) : undefined;
-      if (!result) return {status: 'failed', text: 'No saved result with this callId exists in the current task.'};
-      const original = result.data !== undefined ? JSON.stringify({text: result.text, data: result.data}) : result.text || JSON.stringify(result);
-      const offset = a.offset ?? 0, limit = Math.min(a.limit ?? 6000, 6000);
+      const run=currentAgentRunContext(),invocation=currentInvocation();
+      const denied=()=>({status:'denied' as const,text:'Saved evidence is not authorized for this task, actor, conversation, scope or privacy mode.'});
+      if(!taskId||!invocation||invocation.taskId!==taskId||(run&&(run.taskId!==taskId||run.identity.id!==invocation.actorId)))return denied();
+      let current;
+      try{current=taskCoordinator.assertInvocation(invocation);}catch{return denied();}
+      const sourceTaskId=a.sourceTaskId===undefined?taskId:a.sourceTaskId;
+      if(typeof sourceTaskId!=='string'||!sourceTaskId)return denied();
+      const inventory=a.callId===RETRY_EVIDENCE_CALL_ID;
+      if(inventory&&!a.sourceTaskId)return denied();
+      let source=current;
+      if(a.sourceTaskId!==undefined||inventory){
+        // The selector is model input; only a host-written binding grants access.
+        const authorized=current.bindings.retrySourceTaskIds;
+        const expectedConversation=current.bindings.conversationId??conversationId(current.ownerActorId,current.scope);
+        if(!run||!Array.isArray(authorized)||!authorized.includes(sourceTaskId)
+          ||current.privateMode||run.privateMode||run.conversationId!==expectedConversation
+          ||retryScopeKey(run.scope??{})!==retryScopeKey(current.scope))return denied();
+        const saved=taskCoordinator.get(sourceTaskId);
+        if(!saved||saved.privateMode||retryScopeKey(saved.scope)!==retryScopeKey(current.scope)||!retrySourceIdentityMatches(saved))return denied();
+        source=saved;
+      }
+      const offset=a.offset??0,requestedLimit=a.limit??6000;
+      if(!Number.isInteger(offset)||offset<0||!Number.isInteger(requestedLimit)||requestedLimit<100||requestedLimit>12000)return denied();
+      const result=inventory?undefined:taskCoordinator.readCallResult(sourceTaskId,a.callId);
+      if (!inventory&&!result) return {status: 'failed', text: 'No saved result with this callId exists in the selected task.'};
+      const original=inventory?retryEvidenceOriginal(source):result!.data!==undefined?JSON.stringify({text:result!.text,data:result!.data}):result!.text||JSON.stringify(result);
+      const limit=Math.min(requestedLimit,6000);
       return {text: original.slice(offset, offset + limit), data: {verbatimPage: true, totalChars: original.length, nextOffset: offset + limit < original.length ? offset + limit : null}, status: 'success'};
     },
   },
@@ -278,10 +303,10 @@ export const AGENT_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (a) => {
-      const { loadConfig } = await import("../../config.js");
+      const { activeConfig } = await import("../../config.js");
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { swarm } = await import("../../frontier/swarm.js");
-      const cfg = loadConfig(appRoot());
+      const cfg = activeConfig(appRoot());
       const goal = `${a.taskDescription}\nRequested worker label: ${a.agentName}`;
       const result = swarm.spawn(goal, {
         makeBrain: makeFleetBrain(cfg),
@@ -312,10 +337,10 @@ export const AGENT_TOOLS: ToolDef[] = [
     schema: { goals: z.array(z.string()).describe("A list of detailed instructions, one for each sub-agent you wish to spawn.") },
     readOnly: false,
     handler: async (a) => {
-      const { loadConfig } = await import("../../config.js");
+      const { activeConfig } = await import("../../config.js");
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { swarm } = await import("../../frontier/swarm.js");
-      const cfg = loadConfig(appRoot());
+      const cfg = activeConfig(appRoot());
 
       const goals = (Array.isArray(a.goals) ? a.goals : [a.goals]).filter(Boolean);
       let spawned = 0;
@@ -346,7 +371,7 @@ export const AGENT_TOOLS: ToolDef[] = [
         dependsOn: z.array(z.string()).default([]),
         lane: z.enum(["knowledge", "gui"]).default("knowledge"),
         acceptanceCriteria: z.array(z.string()).default([]),
-        profile: z.string().optional().describe("A fleet agent id — lead, research, plan, write, review, analyse, or one of the user's own agents. It sets that agent's brief, model tier and tool limits; any other text is only a display name."),
+        profile: z.string().optional().describe("A fleet agent id — lead, research, plan, write, review, analyse, or one of the user's own agents. It sets that agent's brief and tool limits. Every agent uses Echo's active brain and model; any other text is only a display name."),
         timeoutMs: z.number().int().min(1_000).max(3_600_000).default(600_000),
         maxIterations: z.number().int().min(1).max(200).default(50),
         maxRecoveryAttempts: z.number().int().min(0).max(5).default(2),
@@ -354,10 +379,10 @@ export const AGENT_TOOLS: ToolDef[] = [
     },
     readOnly: false,
     handler: async (args) => {
-      const { loadConfig } = await import("../../config.js");
+      const { activeConfig } = await import("../../config.js");
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { swarm } = await import("../../frontier/swarm.js");
-      const cfg = loadConfig(appRoot());
+      const cfg = activeConfig(appRoot());
       const result = swarm.submitMission({
         goal: args.goal,
         scope: { ...(await memoryScope()) },
@@ -474,9 +499,8 @@ export const AGENT_TOOLS: ToolDef[] = [
       const g = global as any;
       if (!g.__activeCrons) g.__activeCrons = new Map<number, NodeJS.Timeout>();
       
-      const { createBrain } = await import("../../brain/index.js");
-      const { loadConfig } = await import("../../config.js");
-      const cfg = loadConfig(appRoot());
+      const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
+      const { activeConfig } = await import("../../config.js");
 
       const cronId = Date.now();
       const intervalMs = Math.max(1000, a.intervalSeconds * 1000);
@@ -487,8 +511,12 @@ export const AGENT_TOOLS: ToolDef[] = [
           name: `Echo Scheduled ${cronId}`,
           kind: "scheduled" as const,
         };
-        const { brain: subBrain } = createBrain(cfg, { identity });
-        subBrain.send(`[SYSTEM: CRON TRIGGER] Your recurring task is: ${a.goal}. When finished, remember to save results.`);
+        try {
+          const subBrain = makeFleetBrain(activeConfig(appRoot()))(identity);
+          subBrain.send(`[SYSTEM: CRON TRIGGER] Your recurring task is: ${a.goal}. When finished, remember to save results.`);
+        } catch(error) {
+          console.error('[scheduler] Agent could not start on Echo’s active brain:', error instanceof Error ? error.message : 'Brain unavailable.');
+        }
       }, intervalMs);
       
       g.__activeCrons.set(cronId, timer);

@@ -1,6 +1,7 @@
 import {toolGranted} from '../safety/tool-permissions.js';
 import { z } from "zod";
 import { Brain, LOOP_CAPS, LOCAL_PERSONA, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
+import {lcuModelGuidance} from '../tools/lcu-guidance.js';
 import { TOOLS, TOOL_MAP } from "../tools/registry.js";
 import { classify, bareToolName } from "../safety/risk.js";
 import { runGated } from "../safety/gate.js";
@@ -88,7 +89,7 @@ export class OllamaBrain extends Brain {
         return { tools: [], servers: [], close: async () => {} };
       });
     }
-    const system = LOCAL_PERSONA;
+    const system = `${LOCAL_PERSONA}\n\n${lcuModelGuidance()}`;
     this.messages.push({ role: "system", content: system });
   }
 

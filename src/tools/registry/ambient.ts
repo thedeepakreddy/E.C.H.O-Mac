@@ -363,10 +363,10 @@ export const AMBIENT_TOOLS: ToolDef[] = [
   {
     name: "away_mode",
     description:
-      "Turn away mode on or off. Away mode is the ONLY thing that makes Jarvis watch the camera continuously — with it off, nothing is monitored and nothing happens automatically. While it is on: when the user leaves the desk their media is paused, the reactor dims so it is obvious from across the room, and the screen locks after a delay if they asked for that. Everything is undone when they return. Use when the user says to turn on away mode, or asks to be watched while they step out.",
+      "Turn away mode on or off. Away mode makes Jarvis watch the camera continuously — with it off, nothing is monitored. On confirmed absence, supported media players pause and the reactor dims. Automatic screen locking is unavailable; never promise it. Use when the user explicitly asks for away monitoring.",
     schema: {
       enable: z.boolean().describe("Turn away mode on or off"),
-      lockScreen: z.boolean().default(false).describe("Also lock the screen once they have gone"),
+      lockScreen: z.boolean().default(false).describe("Legacy request; automatic screen locking is unavailable and no lock will be attempted"),
       lockAfterSeconds: z.number().int().min(10).max(1800).default(120),
     },
     readOnly: false,
@@ -383,8 +383,8 @@ export const AMBIENT_TOOLS: ToolDef[] = [
       });
       presenceMonitor.start();
       setAwayMode(true);
-      const locks = a.lockScreen === true ? `, and lock the screen ${a.lockAfterSeconds ?? 120} seconds after you go` : "";
-      return { text: `Away mode on. I'll watch for you leaving, pause anything playing${locks}. Everything comes back when you do.` };
+      const locks = a.lockScreen === true ? " Automatic screen locking is unavailable; I will not attempt to lock your Mac." : "";
+      return { text: `Away mode on. I'll watch for you leaving and pause supported media players. Media I paused can resume when you return.${locks}` };
     },
   },
   {

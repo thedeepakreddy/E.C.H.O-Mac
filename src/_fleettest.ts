@@ -25,10 +25,10 @@ console.log("\nAgent fleet\n");
 _resetForTests();
 
 const builtIns = listFleet();
-ok(builtIns.length === 6, `six built-in agents (got ${builtIns.length})`);
+ok(builtIns.length === 7, `six visible specialists plus the internal compiler (got ${builtIns.length})`);
 ok(builtIns.every((m) => !m.custom), "every built-in is marked non-custom");
-ok(["lead", "research", "plan", "write", "review", "analyse"].every((id) => builtIns.some((m) => m.id === id)), "the expected six ids are present");
-ok(allowedToolsFor(builtIns[0]) === null, "a built-in agent has no tool restriction at all");
+ok(["lead", "research", "plan", "write", "review", "analyse", "verify"].every((id) => builtIns.some((m) => m.id === id)), "the expected compiler and six specialist ids are present");
+ok(allowedToolsFor(builtIns[0]).has('web_search') && !allowedToolsFor(builtIns[0]).has('click'), "a built-in agent has background research grants, never desktop input");
 
 // ---- adding a custom agent -----------------------------------------------------
 const grantable = grantableTools();
@@ -36,13 +36,13 @@ ok(grantable.length > 0, `there are grantable (read-only) tools to offer (${gran
 
 const added = addFleetMember({ id: "tax", name: "Tax", description: "Answers about filings.", brief: "You answer tax questions.", tier: "balanced", tools: [grantable[0], "run_terminal_command"] });
 ok(added.tools.includes(grantable[0]) && !added.tools.includes("run_terminal_command"), "a non-read-only tool is silently dropped from what's granted, never a write tool");
-ok(listFleet().length === 7, "the roster now has seven agents");
+ok(listFleet().length === builtIns.length + 1, "the custom specialist is added to the built-in roster");
 const allowed = allowedToolsFor(added);
 ok(!!allowed && allowed.has(grantable[0]) && !allowed.has("run_terminal_command"), "the custom agent's allowlist matches exactly what was granted");
 
 // ---- re-adding the same id updates rather than duplicates ------------------------
 addFleetMember({ id: "tax", name: "Tax Agent", description: "d", brief: "b", tier: "fast", tools: [] });
-ok(listFleet().length === 7, "saving the same id again replaces it rather than adding a second one");
+ok(listFleet().length === builtIns.length + 1, "saving the same id again replaces it rather than adding a second one");
 ok(getFleetMember("tax")?.name === "Tax Agent", "the replacement took effect");
 
 // ---- built-ins are protected ----------------------------------------------------
@@ -90,23 +90,38 @@ ok(listFleet().filter((m) => m.custom).length === MAX_CUSTOM - 1, "the count dro
 // persona but ran on the default brain with every tool, write tools included.
 const { makeFleetBrain } = await import("./frontier/fleet-brain.js");
 addFleetMember({ id: "reader", name: "Reader", description: "", brief: "b", tier: "fast", tools: [grantable[0]] });
-const built: Array<{ brain: string; allowed?: ReadonlySet<string>; reasoning?: string }> = [];
+const built: Array<{ brain: string; allowed?: ReadonlySet<string>; fallback?: boolean; config: any; reasoning?: string }> = [];
 const fakeCreate = ((cfg: any, opts: any) => {
-  built.push({ brain: cfg.brain, allowed: opts?.limits?.allowedTools, reasoning: opts?.limits?.reasoning });
+  built.push({ brain: cfg.brain, allowed: opts?.limits?.allowedTools, fallback: opts?.allowProviderFallback, config: cfg, reasoning: opts?.limits?.reasoning });
   return { brain: {}, provider: cfg.brain };
 }) as any;
 const make = makeFleetBrain({ brain: "gemini" } as any, fakeCreate);
 const budget = { timeoutMs: 1000, maxIterations: 5, maxRecoveryAttempts: 0 };
 const identity = { id: "t", name: "T", kind: "clone" } as any;
 make(identity, { profile: "reader", budget } as any);
-ok(built[0].brain === "ollama", `a fast-tier custom agent runs on ollama (got ${built[0].brain})`);
+ok(built[0].brain === "gemini", `a fast-tier custom agent follows Echo's brain (got ${built[0].brain})`);
 ok(!!built[0].allowed && built[0].allowed.size === 2 && built[0].allowed.has(grantable[0]) && built[0].allowed.has('submit_agent_result'), "its grants include only the requested read plus actor-owned Result submission");
 make(identity, { profile: "review", budget } as any);
-ok(built[1].brain === "gemini" && built[1].allowed === undefined && built[1].reasoning === "high", "a built-in follows the selected brain, with no tool limit and its role's high reasoning");
+ok(built[1].brain === "gemini" && !!built[1].allowed?.has('web_search') && !built[1].allowed?.has('click'), "a deep-tier built-in follows Echo's brain with background-only grants");
+ok(built[1].reasoning === "high", "Review reasons at high on the selected brain");
 make(identity, { profile: "write", budget } as any);
-ok(built[2].brain === "gemini" && built[2].reasoning === "medium", "Write reasons at medium on the selected brain");
+ok(built.at(-1)!.brain === "gemini" && built.at(-1)!.reasoning === "medium", "Write reasons at medium on the selected brain");
 make(identity, { budget } as any);
-ok(built[2].brain === "gemini" && built[2].allowed === undefined, "a task with no profile keeps the default brain and every tool");
+ok(built.at(-1)!.brain === "gemini" && built.at(-1)!.allowed === undefined, "a task with no profile keeps the default brain and every tool");
+const activeConfig:any={brain:'gemini',gemini:{model:'first'},claude:{model:'claude-choice'},openai:{model:'openai-choice'},openrouter:{model:'router-choice'},nvidia:{model:'nvidia-choice'},ollama:{model:'local-choice'}};
+const liveFactory=makeFleetBrain(activeConfig,fakeCreate);
+for(const provider of ['gemini','claude','openai','openrouter','nvidia','ollama']){
+ activeConfig.brain=provider;
+ for(const profile of ['research','plan','write','review','analyse','verify','lead','reader']){
+  liveFactory(identity,{profile,budget} as any);const last=built.at(-1)!;
+  ok(last.brain===provider,`${profile} follows active ${provider}`);
+  ok(last.config[provider].model===activeConfig[provider].model,`${profile} preserves ${provider}'s selected model`);
+  ok(last.fallback===false,`${profile} cannot silently fall back to a different provider`);
+ }
+}
+activeConfig.brain='gemini';liveFactory(identity,{profile:'research',budget} as any);const oldConfig=built.at(-1)!.config;activeConfig.gemini.model='second';activeConfig.brain='openai';
+ok(oldConfig.brain==='gemini'&&oldConfig.gemini.model==='first','a running agent configuration is isolated from subsequent brain/model switches');
+liveFactory(identity,{profile:'review',budget} as any);ok(built.at(-1)!.brain==='openai','a later queued specialist uses Echo’s newly active brain');
 removeFleetMember("reader");
 
 _resetForTests();

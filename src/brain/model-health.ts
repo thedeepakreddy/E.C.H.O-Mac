@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import {createHash} from 'node:crypto';
 import { dataRoot } from "../memory/paths.js";
 
 /**
@@ -24,6 +25,14 @@ import { dataRoot } from "../memory/paths.js";
 
 export type HealthReason = "not found" | "quota";
 
+/** Credential material is hashed in memory; none of these values is persisted. */
+export interface ModelHealthScope {
+  provider:string;
+  account:string;
+  environment:string;
+  endpoint:string;
+}
+
 interface Note {
   temporary?: string;
   /** Why the model was written off, when it 404s. */
@@ -44,6 +53,8 @@ class ModelHealth {
   /** The path the cached notes were read from, so a changed data root reloads. */
   private loadedFrom: string | null = null;
 
+  constructor(private readonly scopeHash?:string,private readonly provider='gemini'){}
+
   /**
    * Resolved per access rather than captured at construction.
    *
@@ -54,7 +65,7 @@ class ModelHealth {
    * minutes. `dataRoot()` is the same seam the rest of the app already uses.
    */
   private get file(): string {
-    return join(dataRoot(), "model-health.json");
+    return this.scopeHash?join(dataRoot(),'model-health',`${this.scopeHash}.json`):join(dataRoot(), "model-health.json");
   }
 
   private load(): Record<string, Note> {
@@ -101,16 +112,17 @@ class ModelHealth {
   }
 
   /** This key cannot use this model at all — remember it rather than asking weekly. */
-  markDead(model: string, detail: string): void {
+  markDead(model: string, _detail: string): void {
     const notes = this.load();
-    if (notes[model]?.dead) return;
-    notes[model] = { dead: detail.slice(0, 200), at: Date.now() };
+    if (notes[model]?.dead && !this.usable(model)) return;
+    notes[model] = { dead: 'not found', at: Date.now() };
     this.save();
-    console.warn(`[gemini] ${model} is not available to this key — dropping it from the ladder`);
+    console.warn(`[${this.provider}] ${model} is not available to this account — dropping it from the ladder`);
   }
   markUnavailable(model:string,reason:string):void {
-    const notes=this.load();if(notes[model]?.dead)return;
-    notes[model]={until:Date.now()+60000,at:Date.now(),temporary:reason};this.save();
+    const notes=this.load();if(notes[model]?.dead&&!this.usable(model))return;
+    const temporary=reason==='stalled'||reason==='temporarily overloaded'?reason:'unavailable';
+    notes[model]={until:Date.now()+60000,at:Date.now(),temporary};this.save();
   }
 
   /**
@@ -138,13 +150,15 @@ class ModelHealth {
    * metric name settles it when the quotaId is missing.
    */
   markExhausted(model: string, detail: string): void {
+    const notes = this.load();
+    // An older in-flight request can report quota after another worker got a 404.
+    if (notes[model]?.dead && !this.usable(model)) return;
     const daily = /per ?day|PerDay|GenerateRequestsPerDay|generate_content_free_tier_requests/i.test(detail);
     const until = daily ? nextPacificMidnight() : Date.now() + RATE_LIMIT_COOLDOWN_MS;
-    const notes = this.load();
     notes[model] = { until, at: Date.now() };
     this.save();
     const when = daily ? "its daily quota resets" : "the rate limit clears";
-    console.warn(`[gemini] ${model} is out of quota — skipping it until ${when} (${new Date(until).toLocaleTimeString()})`);
+    console.warn(`[${this.provider}] ${model} is out of quota — skipping it until ${when} (${new Date(until).toLocaleTimeString()})`);
   }
 
   /** Plain-language account of why nothing is usable, for the error the user sees. */
@@ -183,3 +197,12 @@ function nextPacificMidnight(): number {
 }
 
 export const modelHealth = new ModelHealth();
+
+const scopedHealth=new Map<string,ModelHealth>();
+/** Share updates between same-account workers, never between credentials or hosts. */
+export function scopedModelHealth(scope:ModelHealthScope):ModelHealth {
+  const key=createHash('sha256').update(JSON.stringify([scope.provider,scope.account,scope.environment,scope.endpoint])).digest('hex');
+  let health=scopedHealth.get(key);
+  if(!health){health=new ModelHealth(key,scope.provider);scopedHealth.set(key,health);}
+  return health;
+}
