@@ -14,10 +14,13 @@ npm install
 mkdir -p models
 curl -L -o models/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+npm run embedder
 npm run login
 npm run doctor
 npm start
 ```
+
+`npm run embedder` fetches the local sentence embedder into `models/embed`. `models/` is not in the repository, so a fresh clone has none — and nothing fails without it. Echo simply gets slower: the tool router stops pruning and every brain receives the full tool list each turn, the reflex cache falls back to exact-string matching so a reworded repeat pays the model again, and no fast path is ever learned. `npm run doctor` reports whether it is present.
 
 `npm start` builds and launches Electron. The build uses esbuild and does not substitute for `npm run typecheck`. `npm run dev` rebuilds on changes; it is not the normal launch command. Check the [validation record](VALIDATION.md) for the runtime used in the latest checks.
 
