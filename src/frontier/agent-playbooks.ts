@@ -180,6 +180,35 @@ export function writingIssues(text: unknown): QualityIssue[] {
   if (repeats.size) issues.push({ text: `${repeats.size} sentence(s) repeated word for word.`, blocking: false });
   return issues;
 }
+// ---- Meaning: does the cited page support the words, not just the numbers? ----
+
+const STOP = new Set('about above after again against because before being below between could does doing during either every from further have having here into itself more most much must other ought ours ourselves over same should some such than that their theirs them themselves then there these they this those through under until very were what when where which while whom with would your yours also only just like many well will shall said says using used based according source sources page report reports verified paper-reported inferred proposed'.split(' '));
+const words = (text: unknown): string[] => String(text ?? '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(w => w.length >= 5 && !STOP.has(w) && !/^\d+$/.test(w));
+const stem = (w: string) => w.replace(/(ings?|edly|ed|es|s|ly)$/, '');
+const URL_G = /https?:\/\/[^\s)\]>"']+/g;
+const citedUrls = (sentence: string, pages: Record<string, string>) => [...sentence.matchAll(URL_G)].map(m => m[0].replace(/[.,;]+$/, '')).filter(url => pages[url]);
+
+/** Sentences of a deliverable that cite a page read this run, with those URLs. */
+export function citedSentences(text: unknown, pages: Record<string, string> = {}): Array<{ sentence: string; urls: string[] }> {
+  return String(text ?? '').split(/(?<=[.!?])\s+|\n+/).map(s => ({ sentence: s.trim(), urls: citedUrls(s, pages) })).filter(c => c.urls.length);
+}
+
+/**
+ * Cheap first check of meaning: a cited sentence whose content words barely
+ * appear on the page it cites is almost certainly citing the wrong source.
+ * `pages` maps URL to the page text read this run.
+ */
+export function claimSupportIssues(text: unknown, pages: Record<string, string> = {}): string[] {
+  const issues: string[] = [];
+  for (const { sentence, urls } of citedSentences(text, pages)) {
+    const claim = [...new Set(words(sentence.replace(URL_G, ' ')).map(stem))];
+    if (claim.length < 4) continue;
+    const best = Math.max(...urls.map(url => { const page = new Set(words(pages[url]).map(stem)); return claim.filter(w => page.has(w)).length / claim.length; }));
+    if (best < 0.35) issues.push(`"${sentence.replace(URL_G, '').trim().slice(0, 140)}" shares little with the page it cites (${urls[0]}); the source does not appear to support it.`);
+  }
+  return [...new Set(issues)].slice(0, 6);
+}
+
 const CLAIMED_ACTION = /\b(?:I(?:'ve| have)?|I just|I've now|Echo has|has been)\s+(?:successfully\s+)?(?:sent|emailed|texted|messaged|booked|scheduled|posted|published|paid|called|ordered|submitted|deleted|cancelled|canceled)\b/i;
 
 /**
@@ -191,7 +220,7 @@ const CLAIMED_ACTION = /\b(?:I(?:'ve| have)?|I just|I've now|Echo has|has been)\
  * are reported with the result but never cost the user an extra model turn.
  * It never judges prose quality.
  */
-export function qualityIssues(bot: BotLike, reply: unknown, out: { sources?: unknown[]; saved?: unknown[]; captures?: unknown[]; question?: unknown; sourceFigures?: Record<string, string[]> } = {}): QualityIssue[] {
+export function qualityIssues(bot: BotLike, reply: unknown, out: { sources?: unknown[]; saved?: unknown[]; captures?: unknown[]; question?: unknown; sourceFigures?: Record<string, string[]>; pages?: Record<string, string> } = {}): QualityIssue[] {
   const pb = playbookFor(bot), text = String(reply ?? ''), issues: QualityIssue[] = [];
   const add = (blocking: boolean, issue: string) => issues.push({ text: issue, blocking });
   if (!pb || !text.trim() || out.question) return issues;
@@ -204,6 +233,7 @@ export function qualityIssues(bot: BotLike, reply: unknown, out: { sources?: unk
     if (!EVIDENCE_LABELS.some(label => text.includes(label))) add(false, 'Important claims carry no evidence label (VERIFIED, PAPER-REPORTED, INFERRED, NOT VERIFIED, PROPOSED).');
   }
   for (const issue of citedFigureIssues(text, out.sourceFigures)) add(true, issue);
+  for (const issue of claimSupportIssues(text, out.pages)) add(true, issue);
   if (['write', 'echo-assistant'].includes(id) || bot.mode === 'write' || bot.mode === 'assist') for (const issue of writingIssues(text)) add(id === 'write' && issue.blocking, issue.text);
   if (id === 'analyse' && !/assum|limitation/i.test(text)) add(false, 'The analysis does not state its assumptions or limitations.');
   if (id === 'plan') {
@@ -240,12 +270,17 @@ export interface GatedResult { status: string; summary: string; artifacts: Array
  * "completed" (a non-completed dependency would block Review and Lead
  * entirely) and carries the issues as blockers so Review and Lead act on them.
  */
-export function gateBotResult<T extends GatedResult>(profile: string | undefined, result: T, final = true): T {
+export function gateBotResult<T extends GatedResult>(profile: string | undefined, result: T, final = true, pages: Record<string, string> = {}): T {
   if (!profile || result.status !== 'completed') return result;
   const text = [result.summary, ...result.artifacts.map(a => a.value)].join('\n\n');
   // On Mac evidence can be a URL, a file, a screen read or a tool result; any reference counts.
   const sources = result.verificationRefs.filter(ref => ref.trim());
-  const blocking = qualityIssues({ id: profile }, text, { sources }).filter(i => i.blocking);
+  // Pages the task read (source-ledger.ts) let the gate check cited figures and claim wording.
+  const sourceFigures = Object.fromEntries(Object.entries(pages).map(([url, page]) => [url, pageFigures(page)]));
+  const blocking = qualityIssues({ id: profile }, text, { sources, sourceFigures, pages }).filter(i => i.blocking);
+  // An agent cannot submit completed while its own verdict says otherwise.
+  const verdict = parseVerdict(text);
+  if (verdict && !['PASS', 'PASS WITH MINOR ISSUES'].includes(verdict)) blocking.push({ text: `the agent's own verdict is ${verdict}, so it is not complete`, blocking: true });
   if (!blocking.length) return result;
   if (!final) return { ...result, blockers: [...result.blockers, ...blocking.map(i => `quality (for Review and Lead): ${i.text}`)] } as T;
   return { ...result, status: 'partial', blockers: [...result.blockers, ...blocking.map(i => `quality: ${i.text}`)] } as T;

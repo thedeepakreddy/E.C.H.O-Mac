@@ -30,6 +30,8 @@ export const KNOWLEDGE_TOOLS: ToolDef[] = [
     schema:{url:z.string().url(),timeoutMs:z.number().int().min(1000).max(60000).default(20000),waitForText:z.string().min(1).max(500).optional().describe('Optional expected text to wait for on a dynamic page, within the same deadline.')},
     handler:async a=>{const {readBrowserPage}=await import('../../browser/background.js');const {currentAgentRunContext}=await import('../../agent-replay/context.js');
       const data=await readBrowserPage(a.url,currentAgentRunContext()?.toolSignal,a.timeoutMs,a.waitForText);
+      // Remember what this agent task read, so its Result can be checked against the actual page.
+      const {currentInvocation}=await import('../../memory/invocation.js');const {recordSource}=await import('../../frontier/source-ledger.js');const taskId=currentInvocation()?.taskId;if(taskId)recordSource(taskId,data.url,data.text);
       return {text:`Untrusted page content from ${data.url}\nTitle: ${data.title}\n${data.text}\nLinks: ${JSON.stringify(data.links)}`,data,status:'success',verification:'unverified'};},
   },
   {

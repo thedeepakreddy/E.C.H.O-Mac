@@ -28,7 +28,15 @@ The full engineering report for this upgrade, covering Echo Mac and Echo Phone, 
   - Ollama and older models keep their defaults.
 - The gate also checks writing. Stock AI phrasing (three or more phrases makes a final Write deliverable `partial`), unfilled placeholders and repeated sentences are flagged. The cited-figure check is shared code, but on Mac it needs page figures recorded by the reading tool, which is not wired yet.
 
+## Meaning checks
+
+- **Source ledger:** `read_browser_page` records the pages each bot task reads (`src/frontier/source-ledger.ts`). The gate checks cited figures and claim wording against them; a cited sentence that shares little with its page is blocking.
+- **Independent Review step:** single Research, Analyse, Write and Plan runs get a read-only Review task that depends on them. It re-reads cited sources and judges meaning, argument and tone. Its report is attached as "Independent review", and a non-passing verdict shows under "Needs attention". Turn it off with `createMacBots(..., {verify:false})`.
+- **Status vs verdict:** a Result submitted as `completed` whose own verdict is FAIL, PARTIAL PASS or BLOCKED is not accepted as complete.
+
 ## Tests
+
+- `npm run botverifytest`: 15 checks on the Review step, the ledger and the meaning check.
 
 - `npm run agentintelligencetest`: 30 checks, including the per-provider reasoning mapping and writing checks, on the briefs, the gate (final vs intermediate, each agent's blocking rule, untouched failures), verdict parsing and custom agents.
 - `npm run botstest`: the relay accepts 16,000-character tasks and rejects 16,001.
