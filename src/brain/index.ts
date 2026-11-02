@@ -127,7 +127,7 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
     selected = new OpenAIBrain({...cfg, openai: {...cfg.openai, model: cfg.nvidia.model}},
       key ? {via: 'apiKey', key} : null, options.limits, {
         url: `${base}/chat/completions`, label: 'nvidia', protocol: 'chat-completions',
-        maxOutputTokens: cfg.nvidia.maxOutputTokens, reasoningEffort: cfg.nvidia.reasoningEffort,
+        maxOutputTokens: cfg.nvidia.maxOutputTokens, reasoningEffort: options.limits?.reasoning === 'high' && cfg.nvidia.reasoningEffort === 'low' ? 'high' : cfg.nvidia.reasoningEffort,
         firstResponseTimeoutMs: 45000, streamSilenceMs: 30000,
         requestTimeoutMs: 110000,
       });

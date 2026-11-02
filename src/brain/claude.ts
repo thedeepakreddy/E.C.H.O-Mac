@@ -247,6 +247,8 @@ export class ClaudeBrain extends Brain {
         // Text fragments as the model writes them, so the voice can start on
         // the first sentence. The complete assistant message still follows.
         includePartialMessages: true,
+        // Agent roles that need deeper reasoning get an extended-thinking budget.
+        ...claudeThinking(this.limits.reasoning),
       } as any,
     });
 
@@ -503,4 +505,9 @@ export class ClaudeBrain extends Brain {
     currentLoop()?.exit("abort_signal", { detail: "brain stopped" });
     this.input.end();
   }
+}
+
+/** Extended-thinking budget per agent reasoning level; low keeps the SDK default. */
+export function claudeThinking(reasoning?: 'low' | 'medium' | 'high'): { maxThinkingTokens?: number } {
+  return reasoning === 'high' ? { maxThinkingTokens: 16000 } : reasoning === 'medium' ? { maxThinkingTokens: 6000 } : {};
 }

@@ -17,7 +17,18 @@ The full engineering report for this upgrade, covering Echo Mac and Echo Phone, 
 - **Limits:** tasks and updates allow 16,000 characters (`bots.ts`, `remote.ts`, the voice command pattern, the page's task and update boxes). Saved results are no longer cut to 6,000/12,000 characters.
 - **Agents page:** `renderer/agent-office.js` and `.css` are now Echo Phone's current module: one control bar, a full-width office, the inspector on selection, and "Open full result" with Copy. The 3D scene files were already identical.
 
+## Reasoning and routing
+
+- Built-in agents follow the brain the user selected. They are no longer forced onto Claude (deep tier) or the default (balanced). Custom agents keep the tier the user chose.
+- Each role's reasoning level (`PLAYBOOKS[id].thinking`) goes to the brain as `limits.reasoning`, which each provider maps to its own setting:
+  - Gemini 3: `thinkingLevel`.
+  - Gemini 2.5: `thinkingBudget`.
+  - Claude: `maxThinkingTokens`.
+  - NVIDIA: `reasoningEffort` raised to high for high-reasoning roles.
+  - Ollama and older models keep their defaults.
+- The gate also checks writing. Stock AI phrasing (three or more phrases makes a final Write deliverable `partial`), unfilled placeholders and repeated sentences are flagged. The cited-figure check is shared code, but on Mac it needs page figures recorded by the reading tool, which is not wired yet.
+
 ## Tests
 
-- `npm run agentintelligencetest`: 24 checks on the briefs, the gate (final vs intermediate, each agent's blocking rule, untouched failures), verdict parsing and custom agents.
+- `npm run agentintelligencetest`: 30 checks, including the per-provider reasoning mapping and writing checks, on the briefs, the gate (final vs intermediate, each agent's blocking rule, untouched failures), verdict parsing and custom agents.
 - `npm run botstest`: the relay accepts 16,000-character tasks and rejects 16,001.

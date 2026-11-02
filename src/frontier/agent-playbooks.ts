@@ -133,6 +133,53 @@ export function parseVerdict(text: unknown): string | null {
 }
 
 const URL_RE = /https?:\/\/[^\s)\]>"']+/i;
+// Figures worth checking: numbers with at least two digits, or a decimal, or a % / k / M / B / T suffix.
+const FIGURE_RE = /\d[\d,]*(?:\.\d+)?\s?(?:%|[kKMBT]\b)?/g;
+const normFigure = (raw: string) => raw.replace(/[,\s]/g, '').toUpperCase();
+const isFigure = (f: string) => /\d\.\d|\d{2,}|[%KMBT]$/.test(f);
+
+/** The figures a page states, normalised, for checking what an agent attributes to it. */
+export function pageFigures(text: unknown): string[] {
+  const set = new Set<string>();
+  for (const m of String(text ?? '').matchAll(FIGURE_RE)) { const f = normFigure(m[0]); if (isFigure(f)) set.add(f); set.add(f.replace(/[%KMBT]$/, '')); }
+  return [...set].slice(0, 5000);
+}
+
+/**
+ * A figure in a sentence that cites a page read this run must appear on that page.
+ * Catches the most damaging research error: a real source cited for a number it does not contain.
+ */
+export function citedFigureIssues(text: unknown, sourceFigures: Record<string, string[]> = {}): string[] {
+  const issues: string[] = [];
+  for (const sentence of String(text ?? '').split(/(?<=[.!?])\s+|\n+/)) {
+    const cited = [...sentence.matchAll(/https?:\/\/[^\s)\]>"']+/g)].map(m => m[0].replace(/[.,;]+$/, '')).filter(url => sourceFigures[url]);
+    if (!cited.length) continue;
+    const prose = sentence.replace(/https?:\/\/[^\s)\]>"']+/g, ' ');
+    for (const m of prose.matchAll(FIGURE_RE)) {
+      const f = normFigure(m[0]);
+      if (!isFigure(f)) continue;
+      const bare = f.replace(/[%KMBT]$/, '');
+      if (!cited.some(url => sourceFigures[url].includes(f) || sourceFigures[url].includes(bare))) issues.push(`"${m[0].trim()}" is attributed to ${cited[0]}, but that page does not contain it.`);
+    }
+  }
+  return [...new Set(issues)].slice(0, 6);
+}
+
+// Stock phrasing that marks text as generic AI writing.
+const STOCK_PHRASES = ["in today's fast-paced world", 'delve into', 'game-changer', 'game changer', 'i hope this email finds you well', 'unlock the power', 'unleash', 'in the ever-evolving', 'ever-changing landscape', 'a testament to', 'navigate the complexities', 'seamlessly', 'cutting-edge', 'look no further', 'elevate your', 'it is important to note that', "in conclusion,", 'embark on a journey', 'rich tapestry', 'synergy'];
+
+/** Writing-quality problems a rule can see: stock phrasing, unfilled placeholders, repeated sentences. */
+export function writingIssues(text: unknown): QualityIssue[] {
+  const t = String(text ?? ''), lower = t.toLowerCase(), issues: QualityIssue[] = [];
+  const stock = STOCK_PHRASES.filter(p => lower.includes(p));
+  if (stock.length) issues.push({ text: `Generic AI phrasing: ${stock.map(p => `"${p}"`).join(', ')}.`, blocking: stock.length >= 3 });
+  const placeholders = t.match(/\[(?:your|insert|company|name|recipient|date|link)[^\]]{0,40}\]|lorem ipsum|\bTBD\b|XX+/gi);
+  if (placeholders) issues.push({ text: `Unfilled placeholders the user must complete: ${[...new Set(placeholders)].slice(0, 5).join(', ')}.`, blocking: false });
+  const seen = new Set<string>(), repeats = new Set<string>();
+  for (const sentence of t.split(/(?<=[.!?])\s+/).map(x => x.trim().toLowerCase()).filter(x => x.length > 40)) { if (seen.has(sentence)) repeats.add(sentence); seen.add(sentence); }
+  if (repeats.size) issues.push({ text: `${repeats.size} sentence(s) repeated word for word.`, blocking: false });
+  return issues;
+}
 const CLAIMED_ACTION = /\b(?:I(?:'ve| have)?|I just|I've now|Echo has|has been)\s+(?:successfully\s+)?(?:sent|emailed|texted|messaged|booked|scheduled|posted|published|paid|called|ordered|submitted|deleted|cancelled|canceled)\b/i;
 
 /**
@@ -144,7 +191,7 @@ const CLAIMED_ACTION = /\b(?:I(?:'ve| have)?|I just|I've now|Echo has|has been)\
  * are reported with the result but never cost the user an extra model turn.
  * It never judges prose quality.
  */
-export function qualityIssues(bot: BotLike, reply: unknown, out: { sources?: unknown[]; saved?: unknown[]; captures?: unknown[]; question?: unknown } = {}): QualityIssue[] {
+export function qualityIssues(bot: BotLike, reply: unknown, out: { sources?: unknown[]; saved?: unknown[]; captures?: unknown[]; question?: unknown; sourceFigures?: Record<string, string[]> } = {}): QualityIssue[] {
   const pb = playbookFor(bot), text = String(reply ?? ''), issues: QualityIssue[] = [];
   const add = (blocking: boolean, issue: string) => issues.push({ text: issue, blocking });
   if (!pb || !text.trim() || out.question) return issues;
@@ -156,6 +203,8 @@ export function qualityIssues(bot: BotLike, reply: unknown, out: { sources?: unk
     if (!sourced && !/NOT VERIFIED/.test(text)) add(true, 'Research claims cite no source read this run and are not marked NOT VERIFIED.');
     if (!EVIDENCE_LABELS.some(label => text.includes(label))) add(false, 'Important claims carry no evidence label (VERIFIED, PAPER-REPORTED, INFERRED, NOT VERIFIED, PROPOSED).');
   }
+  for (const issue of citedFigureIssues(text, out.sourceFigures)) add(true, issue);
+  if (['write', 'echo-assistant'].includes(id) || bot.mode === 'write' || bot.mode === 'assist') for (const issue of writingIssues(text)) add(id === 'write' && issue.blocking, issue.text);
   if (id === 'analyse' && !/assum|limitation/i.test(text)) add(false, 'The analysis does not state its assumptions or limitations.');
   if (id === 'plan') {
     if (!/depend/i.test(text)) add(true, 'The plan does not identify dependencies between tasks.');

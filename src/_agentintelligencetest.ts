@@ -58,6 +58,19 @@ ok(gateBotResult(undefined, result("No profile.")).status === "completed", "non-
 gated = gateBotResult("research", result("See artifact.", { artifacts: [{ kind: "text", label: "Report", value: "Figures (NOT VERIFIED: source unreachable)." }] }));
 ok(gated.status === "completed", "artifacts count as part of the deliverable");
 
+console.log("\nPer-role reasoning\n");
+const { geminiThinking } = await import("./brain/gemini.js");
+const { claudeThinking } = await import("./brain/claude.js");
+ok(JSON.stringify(geminiThinking("gemini-3-pro", "high")) === '{"thinkingConfig":{"thinkingLevel":"high"}}', "Gemini 3 gets a thinking level");
+ok(geminiThinking("gemini-2.5-flash", "medium").thinkingConfig?.thinkingBudget === 8192, "Gemini 2.5 gets a thinking budget");
+ok(Object.keys(geminiThinking("gemini-2.0-flash", "high")).length === 0 && Object.keys(geminiThinking("gemini-3-pro")).length === 0, "models without thinking, and unset roles, keep provider defaults");
+ok(claudeThinking("high").maxThinkingTokens === 16000 && claudeThinking("low").maxThinkingTokens === undefined, "Claude gets an extended-thinking budget by role");
+
+gated = gateBotResult("write", result("In today's fast-paced world, our cutting-edge tool is a game-changer."));
+ok(gated.status === "partial" && gated.blockers.some(b => /Generic AI phrasing/.test(b)), "a final Write deliverable full of stock phrasing is partial");
+{ const { citedFigureIssues, pageFigures } = await import("./frontier/agent-playbooks.js");
+  ok(citedFigureIssues("It has 5,000 shards (https://x.example/r).", { "https://x.example/r": pageFigures("It has 4,200 shards.") }).length === 1 && citedFigureIssues("It has 4,200 shards (https://x.example/r).", { "https://x.example/r": pageFigures("It has 4,200 shards.") }).length === 0, "a cited figure must appear on the cited page"); }
+
 console.log("\nVerdicts\n");
 ok(parseVerdict("Verdict: PASS WITH MINOR ISSUES") === "PASS WITH MINOR ISSUES", "longest verdict form wins");
 ok(parseVerdict("draft Verdict: FAIL\n**Verdict:** partial pass") === "PARTIAL PASS", "the final verdict is used");

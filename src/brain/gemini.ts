@@ -593,6 +593,7 @@ export class GeminiBrain extends Brain {
               config: {
                 systemInstruction: `${this.systemPrompt}\n\n${this.memory.packet(used, true, currentModel)}`,
                 tools: [{ functionDeclarations: declarations }],
+                ...geminiThinking(currentModel, this.limits.reasoning),
                 ...(forced.length ? { toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: forced } } } : {}),
               },
             };
@@ -966,4 +967,12 @@ export class GeminiBrain extends Brain {
       console.error("[gemini] MCP shutdown failed:", (err as any)?.message ?? err)
     );
   }
+}
+
+/** Gemini 3 takes a thinking level; 2.5 takes a token budget; older models have no thinking setting. */
+export function geminiThinking(model: string, reasoning?: 'low' | 'medium' | 'high'): { thinkingConfig?: Record<string, unknown> } {
+  if (!reasoning) return {};
+  if (/^gemini-3/.test(model)) return { thinkingConfig: { thinkingLevel: reasoning } };
+  if (/^gemini-2\.5/.test(model)) return { thinkingConfig: { thinkingBudget: { low: 1024, medium: 8192, high: 24576 }[reasoning] } };
+  return {};
 }
