@@ -121,6 +121,7 @@
     "inteltest": "esbuild src/_inteltest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_inteltest.js --log-level=error && ECHO_MCP=0 node dist/_inteltest.js",
     "mcphttptest": "esbuild src/_mcphttptest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_mcphttptest.js --log-level=error && node dist/_mcphttptest.js",
     "fleettest": "esbuild src/_fleettest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_fleettest.js --log-level=error && node dist/_fleettest.js",
+    "agentintelligencetest": "esbuild src/_agentintelligencetest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_agentintelligencetest.js --log-level=error && node dist/_agentintelligencetest.js",
     "interjectiontest": "esbuild src/_interjectiontest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_interjectiontest.js --log-level=error && node dist/_interjectiontest.js",
     "composiolive": "esbuild src/_composiolive.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_composiolive.js --log-level=error && node dist/_composiolive.js",
     "toolaudit": "esbuild src/_toolaudit.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_toolaudit.js --log-level=error && node dist/_toolaudit.js",

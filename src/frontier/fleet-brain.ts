@@ -3,6 +3,7 @@ import { createBrain } from "../brain/index.js";
 import type { JarvisConfig } from "../config.js";
 import type { SwarmDeps } from "./swarm.js";
 import { allowedToolsFor, grantableTools, getFleetMember, TIER_PROVIDER } from "./fleet.js";
+import { PLAYBOOKS, playbookFor } from "./agent-playbooks.js";
 
 /** The project detected for the current turn; main.ts refreshes it, every brain built here reads it. */
 export const brainProjectHint: { value?: string } = {};
@@ -18,7 +19,10 @@ export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDe
     const member = task?.profile ? getFleetMember(task.profile) : null;
     if (task?.profile && !member) throw new Error(`Unknown agent profile "${task.profile}". Select an existing fleet member.`);
     if(member && task?.runtime === "openbot" && task.botRevision !== botRevision(member))throw new Error("This bot changed after its task was queued. Refresh and start a new run.");
-    const provider = member ? TIER_PROVIDER[member.tier] : null;
+    // Built-in specialists follow the brain the user selected (forcing Claude broke them when it was not set up);
+    // their depth comes from the role's reasoning level instead. Custom agents keep the tier the user chose.
+    const provider = member?.custom ? TIER_PROVIDER[member.tier] : null;
+    const reasoning = member ? (PLAYBOOKS[member.id] ?? playbookFor({ id: member.id, mode: 'research' }))?.thinking : undefined;
     const profileGrants = member ? allowedToolsFor(member) : null;
     const allowed = task?.readOnly ? new Set(grantableTools().filter(tool=>profileGrants===null||profileGrants.has(tool))) : profileGrants;
     const clone = create(provider ? { ...cfg, brain: provider } : cfg, {
@@ -26,7 +30,7 @@ export function makeFleetBrain(cfg: JarvisConfig, create = createBrain): SwarmDe
       maxRecoveryAttempts: task?.budget.maxRecoveryAttempts,
       // Result submission is an actor-owned lifecycle operation, not a user
       // resource grant. Without it a read-only agent can never finish a mission.
-      limits: { openBot:task?.runtime === "openbot", maxIterations: task?.budget.maxIterations, allowedTools: allowed === null ? undefined : new Set([...allowed, 'submit_agent_result']) },
+      limits: { reasoning, openBot:task?.runtime === "openbot", maxIterations: task?.budget.maxIterations, allowedTools: allowed === null ? undefined : new Set([...allowed, 'submit_agent_result']) },
     }).brain;
     clone.projectHint = brainProjectHint.value;
     return clone;

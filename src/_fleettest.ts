@@ -90,9 +90,9 @@ ok(listFleet().filter((m) => m.custom).length === MAX_CUSTOM - 1, "the count dro
 // persona but ran on the default brain with every tool, write tools included.
 const { makeFleetBrain } = await import("./frontier/fleet-brain.js");
 addFleetMember({ id: "reader", name: "Reader", description: "", brief: "b", tier: "fast", tools: [grantable[0]] });
-const built: Array<{ brain: string; allowed?: ReadonlySet<string> }> = [];
+const built: Array<{ brain: string; allowed?: ReadonlySet<string>; reasoning?: string }> = [];
 const fakeCreate = ((cfg: any, opts: any) => {
-  built.push({ brain: cfg.brain, allowed: opts?.limits?.allowedTools });
+  built.push({ brain: cfg.brain, allowed: opts?.limits?.allowedTools, reasoning: opts?.limits?.reasoning });
   return { brain: {}, provider: cfg.brain };
 }) as any;
 const make = makeFleetBrain({ brain: "gemini" } as any, fakeCreate);
@@ -102,7 +102,9 @@ make(identity, { profile: "reader", budget } as any);
 ok(built[0].brain === "ollama", `a fast-tier custom agent runs on ollama (got ${built[0].brain})`);
 ok(!!built[0].allowed && built[0].allowed.size === 2 && built[0].allowed.has(grantable[0]) && built[0].allowed.has('submit_agent_result'), "its grants include only the requested read plus actor-owned Result submission");
 make(identity, { profile: "review", budget } as any);
-ok(built[1].brain === "claude" && built[1].allowed === undefined, "a deep-tier built-in runs on claude with no tool limit");
+ok(built[1].brain === "gemini" && built[1].allowed === undefined && built[1].reasoning === "high", "a built-in follows the selected brain, with no tool limit and its role's high reasoning");
+make(identity, { profile: "write", budget } as any);
+ok(built[2].brain === "gemini" && built[2].reasoning === "medium", "Write reasons at medium on the selected brain");
 make(identity, { budget } as any);
 ok(built[2].brain === "gemini" && built[2].allowed === undefined, "a task with no profile keeps the default brain and every tool");
 removeFleetMember("reader");

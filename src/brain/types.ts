@@ -212,6 +212,8 @@ export interface BrainExecutionLimits {
    * narrows discovery within these grants.
    */
   allowedTools?: ReadonlySet<string>;
+  /** Reasoning depth an agent role needs (agent-playbooks.ts). Each provider maps it to its own setting; unset keeps the provider default. */
+  reasoning?: 'low' | 'medium' | 'high';
 }
 
 /**
