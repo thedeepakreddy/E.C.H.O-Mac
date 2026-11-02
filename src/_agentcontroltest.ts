@@ -5,7 +5,7 @@ import {join} from 'node:path';import {tmpdir} from 'node:os';import {randomUUID
 const root=mkdtempSync(join(tmpdir(),'echo-agent-controls-'));process.env.ECHO_DATA_ROOT=root;process.env.ECHO_MEMORY_ROOT=join(root,'memory');process.env.JARVIS_FLEET_DIR=root;process.env.ECHO_MCP='0';
 const {SwarmManager}=await import('./frontier/swarm.js');const {createMacBots,TEAM_BOT_ID}=await import('./frontier/bots.js');const {taskCoordinator}=await import('./memory/task-state.js');const {parseRemoteAction}=await import('./frontier/remote.js');
 class Fake extends EventEmitter {supportsTaskUpdates=true;sent='';opts:any;pending:Array<()=>void>=[];interrupted=false;send(text:string,_a?:unknown,o?:unknown){this.sent=text;this.opts=o;}queueTaskUpdate(_text:string,applied:()=>void){this.pending.push(applied);return true;}interrupt(){this.interrupted=true;}async stop(){}}
-const host=new SwarmManager(),brains:Fake[]=[];const bots=createMacBots(host,()=>({makeBrain:()=>{const b=new Fake();brains.push(b);return b;}}),()=>({}),()=>true);
+const host=new SwarmManager(),brains:Fake[]=[];const bots=createMacBots(host,()=>({makeBrain:()=>{const b=new Fake();brains.push(b);return b;}}),()=>({}),()=>true,{verify:false});
 try{
  const run=bots.run({name:TEAM_BOT_ID,goal:'Verify choices',botRevision:bots.revision(TEAM_BOT_ID),requestId:randomUUID(),agentIds:['research','plan']});assert.ok(run.ok);const id=run.data!.missionId!;
  const update={missionId:id,taskId:'research',attempt:1,requestId:randomUUID(),operation:'update',text:'Use primary sources'};

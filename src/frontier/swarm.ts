@@ -11,6 +11,7 @@ import {
 } from "../memory/task-state.js";
 import {PROVENANCE_GUIDANCE} from "../vendor/openbot/bot-prompt.js";
 import {gateBotResult,botInstructions} from "./agent-playbooks.js";
+import {sourcesFor,clearSources} from "./source-ledger.js";
 import { getFleetMember } from "./fleet.js";
 import {desktopTaskBusy} from '../tasks/desktop-lane.js';
 import {shutdownStep} from '../shutdown.js';
@@ -830,7 +831,8 @@ export class SwarmManager {
     }
     // Echo bot tasks pass the specialist completion gate: "completed" must be earned.
     const final = !Object.values(mission.tasks).some(other => (other.dependsOn ?? []).includes(task.id));
-    const result = gateBotResult(mission.scope.echoBot === true ? task.profile : undefined, coordinator.get(task.taskId)?.result!, final);
+    const result = gateBotResult(mission.scope.echoBot === true ? task.profile : undefined, coordinator.get(task.taskId)?.result!, final, sourcesFor(task.taskId));
+    clearSources(task.taskId);
     task.result = result;
     task.status = result.status;
     for(const c of task.updates??[])if(c.status==='queued')c.status='not-applied';

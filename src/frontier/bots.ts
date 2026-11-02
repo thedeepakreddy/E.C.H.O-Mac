@@ -3,6 +3,7 @@ import {listFleet,getFleetMember,type FleetMember} from './fleet.js';
 import type {MissionState,SwarmManager,SwarmDeps,AgentTaskSpec} from './swarm.js';
 import {toProviderMessages} from '../vendor/openbot/history.js';
 import {PROVENANCE_GUIDANCE} from '../vendor/openbot/bot-prompt.js';
+import {parseVerdict} from './agent-playbooks.js';
 
 export const TEAM_BOT_ID = 'echo:team'; // Cannot collide with a saved fleet id.
 export const DEFAULT_TEAM = ['research','plan','review'];
@@ -20,14 +21,20 @@ const LEGACY_RUN = /^(?:board-\d{10,16}|solo-[a-z][a-z0-9-]{0,23}-\d{10,16})$/;
 export const isBotRunId = (id:string) => /^bot-[a-f0-9-]{36}$/.test(id) || LEGACY_RUN.test(id);
 export interface BotRequest {name?:string;goal?:string;requestId?:string;botRevision?:string;parentId?:string;agentIds?:string[]}
 type Host = Pick<SwarmManager,'getMission'|'listMissions'|'isMissionLive'|'submitMission'|'cancelMission'|'controlMissionTask'|'taskControlSupported'>;
-const profileIds = (m:MissionState) => [...new Set(Object.values(m.tasks).map(t=>t.profile).filter((p):p is string=>!!p))].sort();
+/** The independent Review step added to single-specialist runs; never counted as a team member. */
+export const VERIFY_TASK = 'verify';
+const VERIFIED_ROLES = new Set(['research','analyse','write','plan']);
+const VERIFY_CRITERION = 'You are the independent verifier for this task, not its author. Read the deliverable in Dependency Results against the user\'s task. Re-read each cited source with read_browser_page and judge every important claim SUPPORTED, PARTIAL or UNSUPPORTED from what the page actually says (meaning, not only numbers). Flag reasoning problems as major or minor (conclusions that do not follow, causal claims from correlation, missing obvious counter-considerations). For writing, judge whether tone, register and format fit the audience the user asked for. Do not invent problems; if it holds up, say what you checked. Submit completed only if the verdict is PASS or PASS WITH MINOR ISSUES.';
+const profileIds = (m:MissionState) => [...new Set(Object.values(m.tasks).filter(t=>t.id!==VERIFY_TASK).map(t=>t.profile).filter((p):p is string=>!!p))].sort();
 const own = (m:MissionState) => m.id.startsWith('bot-') && m.scope.echoBot===true || LEGACY_RUN.test(m.id) && Object.values(m.tasks).length>0 && Object.values(m.tasks).every(t=>typeof t.profile==='string');
 const same = (a:unknown,b:unknown) => JSON.stringify(a)===JSON.stringify(b);
 const bounded = (r:MissionState['result']) => r ? {...r,summary:r.summary.slice(0,MAX_RESULT_TEXT),artifacts:[...new Map(r.artifacts.map(a=>[JSON.stringify([a.kind,a.label,a.value]),a])).values()].slice(0,8).map(a=>({...a,label:a.label.slice(0,160),value:a.value.slice(0,MAX_RESULT_TEXT)})),verificationRefs:r.verificationRefs.slice(0,12).map(v=>v.slice(0,500)),blockers:r.blockers.slice(0,8).map(b=>b.slice(0,1000))}:undefined;
 const identity = (r:BotRequest) => hash({name:r.name,goal:r.goal?.trim(),revision:r.botRevision,parentId:r.parentId??null,agentIds:r.agentIds?[...new Set(r.agentIds)].sort():null});
 
 /** Both pages and Phone dispatch to this service; Swarm remains the only job store and executor. */
-export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<string,unknown>,capture:()=>boolean) {
+export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<string,unknown>,capture:()=>boolean,options:{verify?:boolean}={}) {
+ /** Single Research/Analyse/Write/Plan runs get an independent Review step unless turned off. */
+ const verify=options.verify!==false;
  function revision(name:string) {return name===TEAM_BOT_ID?teamRevision():getFleetMember(name)?botRevision(getFleetMember(name)!):'';}
  function list() {
   const fleet=listFleet();
@@ -35,10 +42,15 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
   bots.push({id:TEAM_BOT_ID,name:'Team of specialists',role:'Selected specialists prepare reports. Lead combines them after they finish.',description:'Several perspectives and one combined report; reading tools only.',revision:teamRevision(),custom:false,mode:'team · read tools',team:true,defaultAgentIds:[...DEFAULT_TEAM]});
   const jobs=host.listMissions().filter(own).slice(0,12).map(m=>{
    const ids=profileIds(m),team=m.scope.botId===TEAM_BOT_ID||ids.length>1;
-   const primary=team?m.tasks.lead?.result: Object.values(m.tasks)[0]?.result;
+   const primary=team?m.tasks.lead?.result:(m.tasks[ids[0]]??Object.values(m.tasks)[0])?.result;
    const result=bounded(m.result);
    if(result && primary?.status==='completed')result.summary=primary.summary.slice(0,MAX_RESULT_TEXT);
    if(result)result.artifacts=[...new Map(result.artifacts.map(a=>[JSON.stringify([a.kind,a.label,a.value]),a])).values()];
+   // The independent Review step's verdict travels with the result the user reads.
+   const check=team?undefined:m.tasks[VERIFY_TASK]?.result;
+   if(result&&check){const text=[check.summary,...check.artifacts.map(a=>a.value)].join('\n\n'),verdict=parseVerdict(text);
+    if(!result.artifacts.some(a=>a.label==='Independent review'))result.artifacts.push({kind:'text',label:'Independent review',value:text.slice(0,MAX_RESULT_TEXT)});
+    if(!(verdict==='PASS'||verdict==='PASS WITH MINOR ISSUES')){const line=`Independent review: ${verdict??check.status} · ${check.summary.split('\n')[0].slice(0,300)}`;if(!result.blockers.includes(line))result.blockers.push(line);}}
    return {id:m.id,botId:team?TEAM_BOT_ID:String(m.scope.botId??ids[0]??''),botName:team?'Team of specialists':String(m.scope.botName??getFleetMember(ids[0])?.name??ids[0]??'Specialist'),agentIds:ids.filter(id=>id!=='lead'),goal:m.goal,status:m.status==='running'&&!host.isMissionLive(m.id)?'interrupted':m.status,createdAt:m.createdAt,updatedAt:m.updatedAt,result,steps:Object.values(m.tasks).map(t=>({id:t.id,name:t.actorName??getFleetMember(t.profile??'')?.name??t.profile??t.id,goal:t.goal,status:t.status,result:bounded(t.result)})),live:host.isMissionLive(m.id)};
   });
   for(const job of jobs){const mission=host.getMission(job.id);if(!mission)continue;for(const step of job.steps){const task=mission.tasks[step.id];if(!task)continue;Object.assign(step,{name:task.profile==='lead'?'Echo':step.name,profile:task.profile,attempt:task.attempt??1,commands:task.updates??[],dependsOn:task.dependsOn??[],activity:task.activity,updateSupported:host.taskControlSupported(mission.id,task.id)});}}
@@ -74,6 +86,7 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
    const candidates=profile==='lead'?ids:profile==='review'?ids.filter(p=>p!=='review'):profile==='write'?ids.filter(p=>['research','analyse','plan'].includes(p)):profile==='plan'?ids.filter(p=>['research','analyse'].includes(p)):[];
    return {id:profile,goal,profile,runtime:'openbot',botRevision:botRevision(getFleetMember(profile)!),readOnly:team,dependsOn:team?candidates:[],lane:!team&&/\b(browser|screen|click|website|app|desktop)\b/i.test(goal)?'gui':'knowledge',acceptanceCriteria:[team?'Use reading tools to prepare your role’s report. Do not perform external changes. Cite evidence and report blockers. For current research use search_research and read_browser_page under your grants, cite actual retrieved sources and name specific access gaps. Use readable Markdown; retain source/author/license credits for relevant pictures from image_search.':'Deliver the requested work with evidence. For current research use search_research and read_browser_page under your grants; cite retrieved sources, not guessed trends. Use readable Markdown and, when helpful for public research, image_search with credited relevant illustrations. Report remaining blockers; prepared actions are not executed actions.',DELIVERABLE_CRITERION],budget:{timeoutMs:team?Math.floor(10*60_000/taskIds.length):10*60_000,maxIterations:40,maxRecoveryAttempts:2}};
   });
+  if(verify&&!team&&VERIFIED_ROLES.has(b.name)&&getFleetMember('review'))tasks.push({id:VERIFY_TASK,goal:`Independently verify the ${getFleetMember(b.name)!.name} deliverable for this task: ${goal}`,profile:'review',runtime:'openbot',botRevision:botRevision(getFleetMember('review')!),readOnly:true,dependsOn:[b.name],lane:'knowledge',acceptanceCriteria:[VERIFY_CRITERION,DELIVERABLE_CRITERION],budget:{timeoutMs:5*60_000,maxIterations:25,maxRecoveryAttempts:1}});
   const submitted=host.submitMission({id,goal,scope:{...currentScope,echoBot:true,echoTeam:team,botId:b.name,botName:team?'Team of specialists':getFleetMember(b.name)!.name,botRevision:b.botRevision,botRequestHash:requestHash,botParentId:b.parentId??null,botContext:history},tasks},deps());
   return submitted.ok?{ok:true,message:team?'Team task started. Specialists report first; Lead combines the results.':`${getFleetMember(b.name)!.name} started.`,data:{missionId:submitted.missionId,repeated:false}}:{ok:false,message:submitted.reason??'The task could not start.'};
  }

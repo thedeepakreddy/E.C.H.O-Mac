@@ -14,7 +14,7 @@ const {setPassword}=await import('./frontier/remoteauth.js');
 const {GeminiBrain}=await import('./brain/gemini.js');const {DEFAULTS_FOR_TESTS}=await import('./config.js');
 class FakeBrain extends EventEmitter {sent='';opts:any;interrupted=false;send(text:string,_a?:unknown,o?:unknown){this.sent=text;this.opts=o;}interrupt(){this.interrupted=true;}async stop(){}}
 const brains:FakeBrain[]=[];const host=new SwarmManager();let privateMode=false;
-const bots=createMacBots(host,()=>({makeBrain:()=>{const b=new FakeBrain();brains.push(b);return b;}}),()=>({projectId:'test-project'}),()=>!privateMode);
+const bots=createMacBots(host,()=>({makeBrain:()=>{const b=new FakeBrain();brains.push(b);return b;}}),()=>({projectId:'test-project'}),()=>!privateMode,{verify:false});
 try {
  const member=getFleetMember('research')!,request={name:member.id,botRevision:botRevision(member),requestId:randomUUID(),goal:'Research useful options'};
  assert.equal(bots.run({...request,requestId:'bad'}).ok,false);privateMode=true;assert.equal(bots.run(request).ok,false);privateMode=false;
