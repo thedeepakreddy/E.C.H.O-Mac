@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { join } from "node:path";
 import { TOOLS } from "../tools/registry.js";
 import { atomicWrite, dataRoot } from "../memory/paths.js";
+import { botInstructions } from "./agent-playbooks.js";
 
 /**
  * The agent fleet: named, standing team members you dispatch a task to,
@@ -71,6 +72,9 @@ export function grantableTools(): string[] {
 }
 
 /**
+ * Each built-in brief is its specialist playbook on the shared contract
+ * (agent-playbooks.ts, kept in step with Echo Phone), not a one-line persona.
+ *
  * Six specialists, matching Aira's own cast and colour role so the ported
  * canvas UI has somewhere real to point its Lead/Research/Plan/Write/Review/
  * Analyse icons. Built-in agents are NOT tool-restricted — the fleet's tool
@@ -82,50 +86,32 @@ const BUILT_IN: FleetMember[] = [
   {
     id: "lead", name: "Lead", tier: "deep", custom: false, tools: [],
     description: "Reads every other agent's report and drafts the final answer.",
-    brief:
-      "You are Lead. You do not do original research or writing yourself — you read the reports the " +
-      "other agents on this board produced (given to you as Dependency Results) and synthesise them into " +
-      "one clear, direct answer to the user's actual question. Cite which agent a claim came from when it " +
-      "matters. If the reports conflict, say so rather than picking one silently. If a report is missing or " +
-      "failed, answer from what you have and note the gap.",
+    brief: botInstructions({ id: "lead" }),
   },
   {
     id: "research", name: "Research", tier: "balanced", custom: false, tools: [],
     description: "Gathers facts, context, and prior art before anything is written.",
-    brief:
-      "You are Research. Find and verify the facts the task needs — search memory, the screen, the web, " +
-      "and any tool that can confirm rather than guess. Report what you found, where it came from, and how " +
-      "confident you are. Flag anything you could not verify instead of stating it as fact.",
+    brief: botInstructions({ id: "research" }),
   },
   {
     id: "plan", name: "Plan", tier: "balanced", custom: false, tools: [],
     description: "Breaks the goal into a concrete, ordered plan.",
-    brief:
-      "You are Plan. Turn the goal into a concrete, ordered sequence of steps with the real dependencies " +
-      "between them made explicit. Call out risks and open decisions the user needs to make. Do not execute " +
-      "the plan yourself — that is what the plan is for.",
+    brief: botInstructions({ id: "plan" }),
   },
   {
     id: "write", name: "Write", tier: "balanced", custom: false, tools: [],
     description: "Drafts the actual content — prose, code, or a document.",
-    brief:
-      "You are Write. Produce the actual deliverable the task asks for, in a form ready to use as-is. " +
-      "Prefer the plainest structure that serves the reader. State any assumption you had to make.",
+    brief: botInstructions({ id: "write" }),
   },
   {
     id: "review", name: "Review", tier: "deep", custom: false, tools: [],
     description: "Checks the work for mistakes, gaps, and things it should not claim.",
-    brief:
-      "You are Review. Read the work critically rather than politely: check the specific claims, find the " +
-      "gaps, and say what should change before this ships. If it holds up, say exactly why rather than just " +
-      "approving it.",
+    brief: botInstructions({ id: "review" }),
   },
   {
     id: "analyse", name: "Analyse", tier: "deep", custom: false, tools: [],
     description: "Digs into data, numbers, and evidence.",
-    brief:
-      "You are Analyse. Work the actual numbers and evidence rather than an impression of them — compute, " +
-      "compare, and show your working. State the uncertainty in a figure, not just the figure.",
+    brief: botInstructions({ id: "analyse" }),
   },
 ];
 
