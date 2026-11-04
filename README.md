@@ -2,6 +2,10 @@
 
 *Created by Deepak (AskDeepakAI)*
 
+[![Echo — desktop intelligence](docs/screenshots/echo-banner.jpg)](docs/screenshots/echo-banner.jpg)
+
+*Animation preview. The Control Panel is shown with sample data, not a real account or desktop.*
+
 Echo is a macOS voice assistant with screen interaction, task execution, memory and a companion phone app. You can speak or type a request, inspect what it is doing in the Control Panel, and review results and approvals there.
 
 This repository contains the implementation, renderer previews and test harnesses. Features depend on the selected model, installed helpers and macOS permissions. The code and checks below show what is implemented; they do not establish reliability across every app or task.
