@@ -187,12 +187,6 @@ Regenerate with `node_modules/.bin/electron scripts/readme-screenshots.mjs` afte
 
 ## Permission and use
 
-Echo is published here to be read and reviewed. It is **not** open source, and there is no
-licence granting you the right to use it.
-
-**Using it without permission is strictly prohibited.** That covers running it(exception for recruiters), copying it,
-building on it, publishing it, and reusing any part of it — the code, the renderer, the
-artwork in `assets/`, the recordings in `docs/media/`, or the design — for any purpose,
-personal, academic or commercial, unless the author has given you written permission.
+MIT license
 
 Ask first: **Deepak (AskDeepakAI)**, [@thedeepakreddy](https://github.com/thedeepakreddy).
