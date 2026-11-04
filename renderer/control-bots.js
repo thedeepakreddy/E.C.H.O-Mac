@@ -5,7 +5,7 @@
  const node=(tag,cls,text)=>{const n=document.createElement(tag);n.className=cls||'';if(text!=null)n.textContent=String(text);return n;};
  const status=t=>{for(const id of ['bots-status','bots-dialog-status'])byId(id).textContent=t;};
  const assignment=byId('bots-assignment');
- function openAssignment(){if(!assignment.open)assignment.showModal();byId('bots-goal').focus();}
+ function openAssignment(){const history=byId('bots-history');if(history?.open)history.close();if(!assignment.open)assignment.showModal();byId('bots-goal').focus();}
  byId('bots-assignment-close').onclick=()=>assignment.close();
  const office=window.EchoAgentOffice.mount(byId('agent-office'),{target:'mac',visible,
   assign(id){fresh();if(data?.bots.some(b=>b.id===id))byId('bots-member').value=id;else if(data?.bots.some(b=>b.team))byId('bots-member').value=data.bots.find(b=>b.team).id;teamIds=null;role();openAssignment();},
@@ -30,7 +30,7 @@
    for(const b of j.result?.blockers||[])row.append(node('p','companion-copy',`Needs attention: ${b}`));
    if(j.live){const stop=node('button','secondary-button','Stop');stop.onclick=async()=>{stop.disabled=true;try{const r=await act({type:'stop-bot',missionId:j.id});status(r.message||'');await load();}finally{stop.disabled=false;}};row.append(stop);}
    else {const follow=node('button','secondary-button','Follow up');follow.disabled=!d.bots.some(b=>b.id===j.botId);follow.onclick=()=>{parentId=j.id;byId('bots-member').value=j.botId;teamIds=j.agentIds?new Set(j.agentIds):null;role();byId('bots-followup').hidden=false;byId('bots-followup').textContent=`Continuing: ${j.goal}. Saved results will be supplied as context.`;byId('bots-fresh').hidden=false;byId('bots-goal').value='';openAssignment();};row.append(follow);}
-   const inspect=node('button','secondary-button','Inspect in Agents');inspect.onclick=()=>window.echoAgentsUI?.inspect(j.id);row.append(inspect);list.append(row);
+   const inspect=node('button','secondary-button','View task report');inspect.onclick=()=>window.echoAgentsUI?.inspect(j.id);row.append(inspect);list.append(row);
   }
  }
  async function load(){if(loading)return loading;if(!visible()||!bridge?.bots)return;const v=version;loading=(async()=>{try{const d=await bridge.bots();if(v===version&&visible())paint(d);}catch{loadError=true;office.setConnection(false);status('Couldn’t read bot runs. Refresh to retry.');}finally{loading=null;clearTimeout(timer);if(visible())timer=setTimeout(load,2500);}})();return loading;}

@@ -1,4 +1,4 @@
-import { spawn, ChildProcessWithoutNullStreams, exec } from "node:child_process";
+import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
@@ -6,6 +6,9 @@ import { getAppPath } from "../utils/appPath.js";
 import { decide, newGestureState, DEFAULT_REGION, type HandFrame } from "./gesturelogic.js";
 import { desktopBounds } from "./displays.js";
 import { loadConfig } from "../config.js";
+import {withHumanComputerControl,humanComputerInputPending} from './human-control.js';
+import {outsideAgentContext,currentAgentRunContext} from '../agent-replay/context.js';
+import {moveMouse,click,hotkey} from './computer-actions.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -33,6 +36,7 @@ let trackerProc: ChildProcessWithoutNullStreams | null = null;
 const SCROLL_STEPS = 5;
 
 export function toggleGestures(enable: boolean) {
+  if(currentAgentRunContext()?.identity.background)throw Error('Office agents cannot enable foreground gesture controls.');
   if (!enable) {
     trackerProc?.kill();
     trackerProc = null;
@@ -81,7 +85,6 @@ export function toggleGestures(enable: boolean) {
       return DEFAULT_REGION;
     }
   })();
-  const cliclick = "/opt/homebrew/bin/cliclick";
 
   trackerProc = spawn(join(getAppPath(), "native", "handtracker"), ["gestures"]);
 
@@ -104,27 +107,15 @@ export function toggleGestures(enable: boolean) {
     }
 
     const action = decide(d, state, surface, Date.now(), region);
-    switch (action.kind) {
-      case "click":
-        exec(`${cliclick} c:${action.x},${action.y}`, (err) => {
-          if (err) console.error("[jarvis] gesture click failed:", err.message);
-        });
-        return;
-      case "scroll": {
-        if (action.direction === "up" || action.direction === "down") {
-          exec(`${cliclick} kp:${action.direction === "up" ? "page-up" : "page-down"}`, () => {});
-        } else {
-          const arrow = action.direction === "left" ? "arrow-left" : "arrow-right";
-          exec(`${cliclick} ${Array(SCROLL_STEPS).fill(`kp:${arrow}`).join(" ")}`, () => {});
-        }
-        return;
-      }
-      case "move":
-        exec(`${cliclick} m:${action.x},${action.y}`, () => {});
-        return;
-      default:
-        return;
-    }
+    if(humanComputerInputPending())return; // Do not queue stale camera frames.
+    // Only actual camera frames enter the human lane, not model arguments.
+    outsideAgentContext(()=>{
+      try{void withHumanComputerControl(async()=>{
+        if(action.kind==='click')await click(action.x,action.y);
+        else if(action.kind==='move')await moveMouse(action.x,action.y);
+        else if(action.kind==='scroll')await hotkey([],action.direction==='up'?'page-up':action.direction==='down'?'page-down':action.direction==='left'?'arrow-left':'arrow-right',action.direction==='left'||action.direction==='right'?SCROLL_STEPS:1);
+      }).catch(()=>{});}catch{/* An Echo-owned desktop suspends human camera input. */}
+    });
   });
 
   trackerProc.on("exit", () => {

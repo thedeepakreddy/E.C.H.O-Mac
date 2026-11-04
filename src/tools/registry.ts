@@ -6,6 +6,7 @@ import { ZodTypeAny } from "zod";
 import type { ToolResultMetadata } from "../memory/tool-result.js";
 import * as act from "./computer-actions.js";
 import { SCREEN_TOOLS } from "./registry/screen.js";
+import {LCU_TOOLS,lcuCompatibleScreenTools} from './registry/lcu.js';
 import { MEMORY_TOOLS } from "./registry/memory.js";
 import { SAFETY_TOOLS } from "./registry/safety.js";
 import { AGENT_TOOLS } from "./registry/agents.js";
@@ -21,6 +22,8 @@ import { SUPERVISED_TOOLS } from './registry/supervised.js';
 export interface ToolOutput extends ToolResultMetadata {
   text?: string;
   image?: act.Screenshot;
+  /** Unchanged LCU content; provider adapters forward all images, not just one. */
+  computerContent?:import('./lcu-session.js').LcuResult['content'];
 }
 
 export interface ToolDef {
@@ -35,7 +38,8 @@ export interface ToolDef {
 }
 
 export const TOOLS: ToolDef[] = [
-  ...SCREEN_TOOLS,
+  ...lcuCompatibleScreenTools(SCREEN_TOOLS),
+  ...LCU_TOOLS,
   ...MEMORY_TOOLS,
   ...SAFETY_TOOLS,
   ...AGENT_TOOLS,

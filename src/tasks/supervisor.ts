@@ -188,12 +188,14 @@ export class TaskSupervisor {
     state.workerTaskIds.push(taskId); state.status=state.repairs?'repairing':'executing';
     this.deps.coordinator.create({taskId,parentTaskId:state.id,ownerActorId:actorId,goal:state.goal,privateMode:state.spec.privateMode,scope:state.spec.scope});
     try {
+      const priorTaskIds=state.workerTaskIds.slice(0,-1);
+      if(priorTaskIds.length)this.deps.coordinator.bind(taskId,'retrySourceTaskIds',priorTaskIds);
       const brain = this.deps.makeWorker({id:actorId,name:'Task worker',kind:'clone',parentTaskId:state.id},state.spec);
       task.worker={brain,taskId,actorId};
       brain.on('text',text=>{if(task.worker?.brain===brain && !task.closing) this.progress(task,'worker',text);});
       brain.on('error',error=>{if(task.worker?.brain===brain) {state.blockers=[issue(error)];this.persist(task);}});
       brain.on('turnEnd',()=>{if(task.worker?.brain===brain && !task.workerDone && !task.closing) void this.workerEnded(task).catch(e=>this.end(state.id,'blocked',[issue(e)]));});
-      const prior = state.workerTaskIds.slice(0,-1).map(id=>({taskId:id,result:this.deps.coordinator.get(id)?.result}));
+      const prior = priorTaskIds.map(id=>({taskId:id,result:this.deps.coordinator.get(id)?.result}));
       brain.send(`You are the working agent for a supervised task. Goal: ${state.goal}\n`+
         (state.spec.context?`Delegating conversation context (historical data; assistant claims require verification):\n${state.spec.context}\n`:'')+
         `Plan (use update_task_plan, preserve these step IDs and mark each completed with actual verification refs):\n${state.spec.steps.map((s,i)=>`${i+1}. step${i+1}: ${s}`).join('\n')}\n`+
@@ -275,14 +277,29 @@ export class TaskSupervisor {
     if(worker && (task.state.spec.steps.some((_,i)=>worker.steps[`step${i+1}`]?.status!=='completed') || Object.values(worker.steps).some(s=>s.status!=='completed' || !s.verificationRefs?.length || s.verificationRefs.some(ref=>!observed.has(ref))))) blockers.push('The task plan has unfinished or unverified steps');
     blockers.push(...await this.deps.verify(view));
     if(task.closing) return;
+    blockers.push(...this.unresolvedWorkerEffects(task));
     if(blockers.length) {await this.repair(task,blockers);return;}
     await this.end(task.state.id,'completed',[]);
   }
+  /** Shared by final acceptance and every repair path; reads cannot mutate. */
+  private unresolvedWorkerEffects(task: LiveTask): string[] {
+    const unsafe:string[]=[];
+    for(const taskId of task.state.workerTaskIds) {
+      const worker=this.deps.coordinator.get(taskId);
+      if(!worker) {unsafe.push(`Saved worker state ${taskId} is unavailable; inspect existing effects before continuing`);continue;}
+      for(const call of Object.values(worker.calls)) {
+        if(call.effect==='observation' || call.effect==='internal' || call.status==='success' || call.status==='denied') continue;
+        unsafe.push(`Worker ${taskId} has an unresolved action outcome: ${call.tool} (${call.callId}, ${call.status}). Inspect it before continuing.`);
+      }
+    }
+    return unsafe;
+  }
   private async repair(task: LiveTask, blockers: string[]): Promise<void> {
     if(task.closing) return;
+    const unsafe=this.unresolvedWorkerEffects(task);
+    if(unsafe.length) {await this.end(task.state.id,'blocked',[...blockers,...unsafe]);return;}
     task.state.blockers=blockers;
-    // Uncertain side effects require inspection rather than blind automatic retry.
-    if(blockers.some(b=>b.includes('unresolved tool calls')) || task.state.repairs>=task.state.spec.maxRepairs! || Date.now()>=task.state.createdAt+task.state.spec.timeoutMs!) {
+    if(task.state.repairs>=task.state.spec.maxRepairs! || Date.now()>=task.state.createdAt+task.state.spec.timeoutMs!) {
       await this.end(task.state.id,'blocked',blockers); return;
     }
     task.state.repairs++; this.startWorker(task,blockers.join('\n'));

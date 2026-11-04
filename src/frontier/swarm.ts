@@ -12,9 +12,10 @@ import {
 import {PROVENANCE_GUIDANCE} from "../vendor/openbot/bot-prompt.js";
 import {gateBotResult,botInstructions} from "./agent-playbooks.js";
 import {sourcesFor,clearSources} from "./source-ledger.js";
-import { getFleetMember } from "./fleet.js";
+import { BACKGROUND_AGENT_GUIDANCE, getFleetMember } from "./fleet.js";
 import {desktopTaskBusy} from '../tasks/desktop-lane.js';
 import {shutdownStep} from '../shutdown.js';
+import {savedAgentProgress} from './agent-retry.js';
 
 /**
  * The clone swarm: background sub-agents working in parallel.
@@ -75,6 +76,9 @@ export interface MissionSpec {
 export type MissionTaskStatus = "pending" | "working" | TaskResultStatus;
 
 export interface MissionTaskState extends AgentTaskSpec {
+  draft?:string;
+  retryContext?:string;
+  retrySourceTaskIds?:string[];
   attempt?:number;
   updates?:Array<{id:string;operation:string;text:string;attempt:number;status:'queued'|'applied'|'not-applied';createdAt:number;appliedAt?:number}>;
   previousAttempts?:Array<{attempt:number;goal:string;result?:TaskResult}>;
@@ -93,6 +97,8 @@ export interface MissionTaskState extends AgentTaskSpec {
 export type MissionStatus = "running" | TaskResultStatus;
 
 export interface MissionState {
+  canonicalTaskId?:string;
+  retrySequence?:number;
   schemaVersion: 1;
   id: string;
   taskId: string;
@@ -121,7 +127,7 @@ export interface SwarmClone {
 export interface CloneBrain {
   readonly supportsTaskUpdates?:boolean;
   queueTaskUpdate?(text:string,applied:()=>void):boolean;
-  on(event: "text" | "turnEnd" | "error" | "tool", cb: (arg?: any) => void): unknown;
+  on(event: "text" | "textDelta" | "textDone" | "status" | "turnEnd" | "error" | "tool" | "toolEnd", cb: (arg?: any) => void): unknown;
   send(text: string, audio?: unknown, opts?: Record<string, unknown>): void;
   interrupt?(): void;
   stop?(): Promise<void>;
@@ -131,6 +137,8 @@ export interface CloneBrain {
 export interface SwarmDeps {
   /** Make a fresh background brain for one clone. */
   makeBrain: (identity: AgentIdentity, task?: MissionTaskState) => CloneBrain;
+  /** Used only to reconstruct the saved attempt, never for future queued work. */
+  makeRecoveredBrain?: (identity: AgentIdentity, task?: MissionTaskState) => CloneBrain;
   coordinator?: TaskCoordinator;
   /** Push the current roster to the UI. Defaults to the overlay. */
   broadcast?: (clones: Array<{ name: string; progress: string }>) => void;
@@ -209,6 +217,10 @@ export class SwarmManager {
   private stopping = new Set<Promise<unknown>>();
   private extraRoster: () => Array<{name:string;progress:string}> = () => [];
   private reservedCapacity: () => number = () => 0;
+  private terminalListener?: (mission: MissionState) => void;
+
+  /** Host notification only, after committing the terminal Result and mission. */
+  setTerminalListener(listener: (mission: MissionState) => void): void {this.terminalListener=listener;}
 
   setExtraRoster(read: () => Array<{name:string;progress:string}>): void {this.extraRoster=read;}
   setReservedCapacity(read:()=>number):void {this.reservedCapacity=read;}
@@ -433,8 +445,10 @@ export class SwarmManager {
     const live = this.missions.get(id) ?? mission;
     for (const task of Object.values(live.tasks)) {
       if (task.taskId) coordinator.forget(task.taskId);
+      for(const source of task.retrySourceTaskIds??[])coordinator.forget(source);
     }
     coordinator.forget(live.taskId);
+    if(live.canonicalTaskId){coordinator.forget(live.canonicalTaskId);for(let n=1;n<=(live.retrySequence??0);n++)coordinator.forget(`${live.canonicalTaskId}.retry-${n}`);}
     this.missions.delete(id);
     const deps = this.missionDeps.get(id);
     this.missionDeps.delete(id);
@@ -467,13 +481,14 @@ export class SwarmManager {
   }
 
   /** Exact task and attempt routing; profile names never select a brain. */
-  controlMissionTask(input:{missionId:string;taskId:string;attempt:number;requestId:string;operation:'update'|'stop'|'revise';text?:string}):{ok:boolean;message:string;command?:unknown} {
-    const m=this.missions.get(input.missionId),deps=this.missionDeps.get(input.missionId),task=m?.tasks[input.taskId];
+  controlMissionTask(input:{missionId:string;taskId:string;attempt:number;requestId:string;operation:'update'|'stop'|'revise'|'retry';text?:string},retryDeps?:SwarmDeps):{ok:boolean;message:string;command?:unknown} {
+    const m=this.missions.get(input.missionId)??(input.operation==='retry'?this.getMission(input.missionId):null),deps=input.operation==='retry'?(retryDeps??this.missionDeps.get(input.missionId)):this.missionDeps.get(input.missionId),task=m?.tasks[input.taskId];
     if(!m||!task||!deps)return {ok:false,message:'This task is no longer connected. Refresh before controlling it.'};
     const text=input.text?.trim()??'',commands=task.updates??=[];
     const old=commands.find(c=>c.id===input.requestId);
     if(old)return old.operation===input.operation&&old.text===text&&old.attempt===input.attempt?{ok:true,message:old.status==='queued'?'Update queued.':'This command was already accepted.',command:old}:{ok:false,message:'This command ID belongs to another instruction.'};
     if((task.attempt??1)!==input.attempt)return {ok:false,message:'This agent attempt changed. Refresh before controlling it.'};
+    if(input.operation==='retry')return this.retryMissionTask(m,task,input,deps);
     if(m.status!=='running'||resultStatus(task.status))return {ok:false,message:'This agent already ended. Use Follow up.'};
     if(commands.length>=40)return {ok:false,message:'This task has reached its update limit.'};
     const coordinator=deps.coordinator??taskCoordinator,now=deps.now??Date.now;
@@ -494,14 +509,39 @@ export class SwarmManager {
     const descendants=new Set<string>();let changed=true;
     while(changed){changed=false;for(const t of Object.values(m.tasks))if(!descendants.has(t.id)&&(t.dependsOn??[]).some(id=>id===task.id||descendants.has(id))){descendants.add(t.id);changed=true;}}
     if([...descendants].some(id=>m.tasks[id].status!=='pending'))return {ok:false,message:'Another agent already consumed this report. Stop the team and follow up to revise the affected reports together.'};
+    let progress:ReturnType<typeof savedAgentProgress>;try{progress=savedAgentProgress(task,coordinator);}catch(error){return {ok:false,message:(error as Error).message};}
     commands.push(c);this.cancelOneTask(task,coordinator,'Interrupted for revised instructions');
     const previous={attempt:task.attempt??1,goal:task.goal,result:task.result};
-    const replacement:MissionTaskState={...task,goal:`${task.goal}\n\nRevised instruction: ${text}`,attempt:input.attempt+1,status:'pending',taskId:undefined,actorId:undefined,actorName:undefined,startedAt:undefined,result:undefined,activity:undefined,recoveryAttempts:0,updates:commands,previousAttempts:[...(task.previousAttempts??[]),previous]};
+    const replacement:MissionTaskState={...task,goal:`${task.goal}\n\nRevised instruction: ${text}`,attempt:input.attempt+1,status:'pending',taskId:undefined,actorId:undefined,actorName:undefined,startedAt:undefined,result:undefined,activity:undefined,recoveryAttempts:0,updates:commands,retryContext:progress.context,retrySourceTaskIds:progress.sources,previousAttempts:[...(task.previousAttempts??[]),previous]};
     m.tasks[task.id]=replacement;c.status='applied';m.updatedAt=now();this.persistMission(m,coordinator);this.scheduleAll();
     return {ok:true,message:'Revised agent attempt started. Dependent reports wait for its result.',command:c};
   }
 
-  /** The cleanup one Agent Task needs when it is cut short — shared by both cancel paths above. */
+  /** Resume one failed specialist with trusted progress and fresh bounded execution. */
+  private retryMissionTask(m:MissionState,task:MissionTaskState,input:{attempt:number;requestId:string},deps:SwarmDeps) {
+    if(this.closing||task.status!=='failed')return {ok:false,message:'Retry is available only for a failed specialist.'};
+    if(task.profile==='lead'&&Object.values(m.tasks).some(sibling=>sibling!==task&&(sibling.status!=='completed'||!sibling.result)))return {ok:false,message:'Final-report retry requires every specialist report to be completed. Retry the failed specialist first.'};
+    if((task.attempt??1)>=10||(task.updates?.length??0)>=40)return {ok:false,message:'This task reached its retry limit. Review the failure and start a follow-up.'};
+    const coordinator=deps.coordinator??taskCoordinator,now=deps.now??Date.now;
+    if(this.persistedMissions(coordinator,Infinity).some(other=>other.id!==m.id&&this.isMissionLive(other.id)))return {ok:false,message:'Another task is working. Wait or stop it before retrying.'};
+    let progress:ReturnType<typeof savedAgentProgress>;try{progress=savedAgentProgress(task,coordinator);}catch(error){return {ok:false,message:(error as Error).message};}
+    const descendants=new Set<string>();let changed=true;
+    while(changed){changed=false;for(const t of Object.values(m.tasks))if(!descendants.has(t.id)&&(t.dependsOn??[]).some(id=>id===task.id||descendants.has(id))){descendants.add(t.id);changed=true;}}
+    const reset=[...descendants].map(id=>m.tasks[id]).filter(t=>t.status==='blocked'&&t.result?.blockers.some(b=>b.startsWith('dependency:'))&&!t.startedAt);
+    if([...descendants].some(id=>m.tasks[id].status!=='pending'&&!reset.includes(m.tasks[id])))return {ok:false,message:'Another agent already used this report. Start a follow-up to revise the affected work together.'};
+    const commands=task.updates??=[],c={id:input.requestId,operation:'retry',text:'',attempt:input.attempt,status:'applied' as const,createdAt:now(),appliedAt:now()};commands.push(c);
+    m.tasks[task.id]={...task,status:'pending',attempt:input.attempt+1,taskId:undefined,actorId:undefined,actorName:undefined,startedAt:undefined,result:undefined,activity:{kind:'queued',text:'Continuing saved progress',at:now()},recoveryAttempts:0,updates:commands,retryContext:progress.context,retrySourceTaskIds:progress.sources,previousAttempts:[...(task.previousAttempts??[]),{attempt:input.attempt,goal:task.goal,result:task.result}]};
+    for(const t of reset)m.tasks[t.id]={...t,status:'pending',result:undefined,activity:undefined};
+    if(m.status!=='running'){
+      m.canonicalTaskId??=m.taskId;m.retrySequence=(m.retrySequence??0)+1;m.taskId=`${m.canonicalTaskId}.retry-${m.retrySequence}`;
+      coordinator.create({taskId:m.taskId,parentTaskId:m.canonicalTaskId,ownerActorId:`mission:${m.id}`,goal:m.goal,scope:m.scope});
+    }
+    m.status='running';m.result=undefined;m.updatedAt=now();this.missions.set(m.id,m);this.missionDeps.set(m.id,deps);
+    this.persistMission(m,coordinator);this.scheduleAll();
+    return {ok:true,message:progress.sources.length?'Retry accepted. Continuing saved progress; completed reports are retained.':'Retry accepted. No saved execution checkpoint was available; starting a fresh attempt with the saved task.',command:c};
+  }
+
+  /** Cleanup shared by mission and per-agent cancellation. */
   private cancelOneTask(task: MissionTaskState, coordinator: TaskCoordinator, summary: string): void {
     if (resultStatus(task.status)) return;
     if (task.taskId && coordinator.get(task.taskId)?.status !== "cancelled") coordinator.cancel(task.taskId);
@@ -550,7 +590,7 @@ export class SwarmManager {
     const match = checkpoint.actor.name.match(/^Echo Clone (\d+)$/i);
     if (match) this.counter = Math.max(this.counter, Number(match[1]));
     let brain: CloneBrain;
-    try { brain = deps.makeBrain(checkpoint.actor); }
+    try { brain = (deps.makeRecoveredBrain??deps.makeBrain)(checkpoint.actor); }
     catch (error) { console.error('[swarm] clone recovery initialization failed', error); return false; }
     this.launch({
       id: checkpoint.actor.id,
@@ -572,20 +612,20 @@ export class SwarmManager {
   private recoverMissionTask(checkpoint: RecoveryCheckpoint, deps: SwarmDeps): boolean {
     const coordinator = deps.coordinator ?? taskCoordinator;
     const rootTaskId = checkpoint.actor.parentTaskId!;
-    const missionId = rootTaskId.slice("mission.".length);
+    const saved = coordinator.lookup<MissionState>(rootTaskId, "mission");
+    if (!saved || saved.schemaVersion !== 1 || saved.taskId !== rootTaskId || saved.status !== 'running' || (saved.canonicalTaskId ?? saved.taskId) !== `mission.${saved.id}`) return false;
+    const missionId = saved.id;
     let mission = this.missions.get(missionId);
     if (!mission) {
-      const saved = coordinator.lookup<MissionState>(rootTaskId, "mission");
-      if (!saved || saved.schemaVersion !== 1 || saved.id !== missionId || saved.status !== "running") return false;
       mission = structuredClone(saved);
       this.missions.set(missionId, mission);
       this.missionDeps.set(missionId, deps);
     }
     const task = Object.values(mission.tasks).find((item) => item.taskId === checkpoint.taskId);
-    if (!task || task.status !== "working") return false;
+    if (!task || task.status !== "working" || task.actorId !== checkpoint.actor.id || mission.taskId !== rootTaskId) return false;
     task.recoveryAttempts = Math.max(task.recoveryAttempts ?? 0, checkpoint.recoveryAttempts + 1);
     let brain: CloneBrain;
-    try { brain = deps.makeBrain(checkpoint.actor, task); }
+    try { brain = (deps.makeRecoveredBrain??deps.makeBrain)(checkpoint.actor, task); }
     catch (error) {
       if (task.taskId && task.actorId) {
         coordinator.submitResult(task.taskId, task.actorId, {status: 'failed', summary: String(error instanceof Error ? error.message : error), artifacts: [], verificationRefs: [], blockers: ['recovery:initialization']});
@@ -706,6 +746,7 @@ export class SwarmManager {
       scope: mission.scope,
     });
     task.taskId = taskId;
+    if(task.retrySourceTaskIds?.length)coordinator.bind(taskId,'retrySourceTaskIds',task.retrySourceTaskIds);
     task.actorId = actorId;
     task.actorName = actorName;
     task.startedAt = now();
@@ -764,9 +805,19 @@ export class SwarmManager {
       lane: task.lane,
     });
     this.brains.set(actorId, brain);
+    const activity=(kind:string,text:string)=>{
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      const at=(deps.now??Date.now)();
+      if(task.activity?.kind===kind&&task.activity.text===text&&at-task.activity.at<1500)return;
+      task.activity={kind,text,at};mission.updatedAt=at;this.persistMission(mission,deps.coordinator??taskCoordinator);
+    };
+    brain.on('textDelta',value=>{if(mission.tasks[task.id]!==task||task.status!=='working')return;task.draft=((task.draft??'')+String(value?.text??'')).slice(-12000);activity('writing','Writing the response');});
+    brain.on('textDone',value=>{if(mission.tasks[task.id]!==task||task.status!=='working')return;if(value?.text)task.draft=String(value.text).slice(-12000);activity('working','Preparing the next step');});
+    brain.on('status',status=>{if(status==='thinking')activity('working','Preparing the next step');});
     brain.on("text", (text) => {
       if(mission.tasks[task.id]!==task||task.status!=='working')return;
       const clone = this.clones.get(actorId);
+      if(text)task.draft=String(text).slice(-12000);
       if (clone && text) clone.progress = String(text).slice(0, 200);
       console.log(`[${actorName}] ${text ?? ""}`);
       this.broadcast(deps);
@@ -776,11 +827,30 @@ export class SwarmManager {
       this.taskErrors.set(taskId, String(error ?? "Agent failed"));
     });
     brain.on("turnEnd", () => {if(mission.tasks[task.id]?.actorId===actorId)this.finishMissionTask(mission.id, task.id);});
-    brain.on('tool',(value:{name:string;summary:string})=>{
+    const runningTools=new Map<string,{name:string,kind:string}>();let legacyCallSequence=0;
+    type ToolEvent={name:string;summary?:string;readOnly?:boolean;callId?:string;taskId?:string;actorId?:string;runId?:string};
+    const matchingEvent=(value:ToolEvent)=>{
+      if(value.taskId&&value.taskId!==taskId||value.actorId&&value.actorId!==actorId)return false;
+      const latest=(deps.coordinator??taskCoordinator).get(taskId)?.attemptIds.at(-1);
+      return !value.runId||!latest||value.runId===latest;
+    };
+    brain.on('tool',(value:ToolEvent)=>{
       if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      if(!matchingEvent(value))return;
       const name=String(value?.name??'tool').slice(0,120);
-      task.activity={kind:'tool',text:`Using · ${name}`,at:(deps.now??Date.now)()};
-      mission.updatedAt=(deps.now??Date.now)();this.persistMission(mission,deps.coordinator??taskCoordinator);
+      const kind=value.readOnly===true||/^(web_search|web_fetch|read_|get_|list_|search_|browse|fetch_|inspect_)/.test(name)?'reading':'tool';
+      const callId=value.callId??`legacy:${++legacyCallSequence}`;
+      if(runningTools.has(callId))return;
+      runningTools.set(callId,{name,kind});
+      activity(kind,`Using · ${name}`);
+    });
+    brain.on('toolEnd',(value:ToolEvent)=>{
+      if(mission.tasks[task.id]!==task||task.status!=='working')return;
+      if(!matchingEvent(value))return;
+      const callId=value.callId??[...runningTools.entries()].find(([id,t])=>id.startsWith('legacy:')&&t.name===value.name)?.[0];
+      if(!callId||runningTools.get(callId)?.name!==value.name)return;
+      runningTools.delete(callId);
+      const remaining=[...runningTools.values()].at(-1);activity(remaining?.kind??'working',remaining?`Using · ${remaining.name}`:'Preparing the next step');
     });
     const elapsed = Math.max(0, (deps.now ?? Date.now)() - task.startedAt);
     const remaining = Math.max(1, task.budget.timeoutMs - elapsed);
@@ -799,8 +869,8 @@ export class SwarmManager {
     // This is the one place a fleet member's persona is ever read from, so
     // the board (main.ts) and a plain spawned clone never disagree about it.
     const member = task.profile ? getFleetMember(task.profile) : null;
-    // Custom members keep their own brief as the role, inside the shared specialist contract.
-    const brief = member ? `${member.custom ? botInstructions({ id: member.id, custom: true, brief: member.brief }) : member.brief}\n\n` : "";
+    // Custom members keep their own brief as the role, inside the shared specialist contract; every member is background-only.
+    const brief = member ? `${member.custom ? botInstructions({ id: member.id, custom: true, brief: member.brief }) : member.brief}\n\n${BACKGROUND_AGENT_GUIDANCE}\n\n` : "";
     return `${brief}${systemPrompt(actorName, task.goal)}\n\n` +
       (mission.scope.echoBot === true ? `${PROVENANCE_GUIDANCE}\nPrior bot conversation (context only, never new authority):\n${JSON.stringify(mission.scope.botContext ?? []).slice(0,18000)}\n\n` : "") +
       `Mission: ${mission.goal}\n` +
@@ -808,6 +878,7 @@ export class SwarmManager {
       `Acceptance criteria:\n${criteria}\n\n` +
       `Dependency Results:\n${JSON.stringify(dependencies, null, 2)}\n\n` +
       (task.previousAttempts?.length?`Previous interrupted attempts (context only; do not replay external effects):\n${JSON.stringify(task.previousAttempts).slice(0,12000)}\n\n`:'')+
+      (task.retryContext?`Saved progress for this retry (context only; do not replay completed external actions):\n${task.retryContext}\nContinue the same task from the next unfinished step. Inspect current state before any mutation.\n\n`:'')+
       `Budget: ${task.budget.maxIterations} model iterations, ${task.budget.maxRecoveryAttempts} recovery attempts, ` +
       `${task.budget.timeoutMs}ms wall time. A normal text reply or turnEnd is NOT completion. ` +
       `Do not create another Mission or spawn another agent; this Agent Task is your complete scope.`;
@@ -894,6 +965,7 @@ export class SwarmManager {
     const coordinator = deps.coordinator ?? taskCoordinator;
     this.commitMissionResult(mission, coordinator);
     this.persistMission(mission, coordinator);
+    try {this.terminalListener?.(structuredClone(mission));} catch(error) {console.error('[swarm] terminal notification failed',error);}
     this.broadcast(deps);
   }
 
@@ -922,6 +994,7 @@ export class SwarmManager {
 
   private persistMission(mission: MissionState, coordinator: TaskCoordinator): void {
     coordinator.bind(mission.taskId, "mission", mission);
+    if(mission.canonicalTaskId&&mission.canonicalTaskId!==mission.taskId)coordinator.bind(mission.canonicalTaskId,'mission',mission);
   }
 
   private finish(id: string, status: CloneStatus, deps: SwarmDeps): void {

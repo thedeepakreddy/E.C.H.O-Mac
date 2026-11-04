@@ -50,8 +50,13 @@ export function compactToolResult(out: ToolOutput): ToolOutput {
 }
 
 export function modelToolResult(out: ToolOutput): Record<string, unknown> {
-  const small = compactToolResult(out);
-  return {result: small.text ?? 'done', data: small.data, status: out.status, error: out.error,
+  const small = compactToolResult(out.computerContent?{...out,data:undefined}:out);
+  const originals=(out.data as any)?.originalComputerResults;
+  return {result: small.text ?? 'done', data: out.computerContent?(out.data as any)?.toolData:small.data,
+    // Original app instructions/state must not be excerpted or HTML-stripped.
+    computerContent:out.computerContent?.filter(block=>block.type!=='image'), status: out.status, error: out.error,
+    computerResults:out.computerContent&&Array.isArray(originals)?originals.map((result:any)=>({isError:result?.isError})):undefined,
+    computerInputCallsReturned:out.computerContent?(out.data as any)?.inputCallsReturned:undefined,
     verification: out.verification, verificationRefs: out.verificationRefs, callId: out.callId,
     resultRef: out.callId ? `read_tool_result(callId=${out.callId})` : undefined};
 }

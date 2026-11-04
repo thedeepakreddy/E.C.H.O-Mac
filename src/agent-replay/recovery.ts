@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { ReplayEvent } from "./recorder.js";
 import type { AgentIdentity } from "./context.js";
 
-export type RecoveryStatus = "running" | "pending" | "completed" | "cancelled" | "exhausted";
+export type RecoveryStatus = "running" | "pending" | "waiting" | "completed" | "cancelled" | "exhausted";
 
 export interface RecoveryAction {
   callId?: string;
@@ -32,6 +32,8 @@ export interface RecoveryCheckpoint {
   scope?: Record<string, any>;
   actor: AgentIdentity;
   originalPrompt: string;
+  /** Latest accepted foreground GUI obligation within this logical task. */
+  appRequest?: string;
   restartable: boolean;
   followUpPrompts?: string[];
   provider?: string;
@@ -126,7 +128,7 @@ export function pendingRecoveryCheckpoints(root: string): RecoveryCheckpoint[] {
     const end = [...tape].reverse().find((event) => event.type === "run.end");
     // run.end is fsynced before the checkpoint listener runs. If power dies in
     // that tiny gap, trust the terminal tape and do not repeat a finished task.
-    if (end && exit?.reason === "completed") checkpoint.status = "completed";
+    if (end && exit?.reason === "completed" && (checkpoint.status === 'running' || checkpoint.status === 'pending')) checkpoint.status = "completed";
     if (end && (exit?.reason === "abort_signal" || exit?.reason === "aborted")) checkpoint.status = "cancelled";
     const previous = newest.get(checkpoint.taskId);
     if (!previous || checkpoint.updatedAt > previous.updatedAt ||

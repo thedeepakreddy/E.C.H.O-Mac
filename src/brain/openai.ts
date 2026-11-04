@@ -8,6 +8,7 @@ import { TOOLS, ToolDef } from "../tools/registry.js";
 import { selectToolNames } from "./tool-router.js";
 import { INTERNAL_TOOLS } from '../memory/read-cache.js';
 import { modelToolResult } from "../memory/tool-context.js";
+import {computerImageEntries,computerImageLabel} from '../tools/lcu-evidence.js';
 import { ExternalToolCatalog } from "./external-tool-catalog.js";
 import { currentAgentRunContext } from "../agent-replay/context.js";
 import { assess, styleFor, noteActivity } from "../frontier/struggle.js";
@@ -24,6 +25,7 @@ import { chatgpt, explainPlanError } from "./chatgpt-auth.js";
 import type { OpenAIAuth } from "./openai-auth.js";
 import { completionRequest, readCompletionStream } from './chat-completions.js';
 import { streamStep } from './stream-deadline.js';
+import {scopedModelHealth} from './model-health.js';
 
 /**
  * The OpenAI brain, on the Responses API.
@@ -131,9 +133,10 @@ export class OpenAIRequestError extends Error {
 
 export function openAIFallbackReason(error: unknown): "quota" | "not found" | "temporarily overloaded" | null {
   const status = (error as any)?.status;
+  const code=(error as any)?.code;
   const text = String((error as any)?.message ?? error ?? "");
   if (status === 429 || text.includes("insufficient_quota")) return "quota";
-  if (status === 404 || text.includes("model_not_found")) return "not found";
+  if (status === 404 || ['model_not_found','unknown_model','invalid_model'].includes(code) || text.includes("model_not_found")) return "not found";
   if (status === 503 || text.includes("server_error")) return "temporarily overloaded";
   return null;
 }
@@ -169,10 +172,11 @@ function unknownToolAdvice(called: string, known: string[]): string {
 const KEEP_IMAGES = 2;
 
 /** Replace all but the newest images with a note, so a long task does not resend megabytes per step. */
-export function trimResponseImages(items: any[], keep = KEEP_IMAGES): number {
+export function trimResponseImages(items: any[], keep = KEEP_IMAGES, protectFrom=items.length): number {
   let seen = 0;
   let freed = 0;
   for (let i = items.length - 1; i >= 0; i--) {
+    if(i>=protectFrom)continue; // Every new image gets at least one model delivery.
     const content = items[i]?.content;
     if (!Array.isArray(content)) continue;
     for (let j = content.length - 1; j >= 0; j--) {
@@ -239,6 +243,9 @@ export class OpenAIBrain extends Brain {
   private turnAbort: AbortController | null = null;
   /** The plan model, resolved once from the account's catalog when none is configured. */
   private planModel: string | null = null;
+  private planModels:string[]|null=null;
+  private planHealth:ReturnType<typeof scopedModelHealth>|null=null;
+  private readonly healthEnvironment:string;
 
   /**
    * @param auth How to pay. null only for a recorded-run replay, where no
@@ -251,6 +258,8 @@ export class OpenAIBrain extends Brain {
     private readonly endpoint: ResponsesEndpoint = OPENAI_ENDPOINT
   ) {
     super();
+    this.healthEnvironment=endpoint.label==='openrouter'?cfg.openrouter.apiKeyEnv
+      :endpoint.label==='nvidia'?cfg.nvidia.apiKeyEnv:cfg.openai.apiKeyEnv;
     this.memory = new ProviderMemoryContext(endpoint.label);
     this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
     this.memory.configure(cfg.context);
@@ -355,6 +364,12 @@ export class OpenAIBrain extends Brain {
     }
   }
 
+  /** Cache authority follows the actual credential/plan account and deployment. */
+  private healthFor(token:string):ReturnType<typeof scopedModelHealth> {
+    const account=this.auth?.via==='chatgpt'?`chatgpt:${chatgpt.session().email?.trim().toLowerCase()||token}`:`apiKey:${token}`;
+    return scopedModelHealth({provider:this.endpoint.label,account,environment:this.healthEnvironment,endpoint:this.endpoint.url});
+  }
+
   /** The bearer token and model for the next request. */
   private async credential(): Promise<{ token: string; model: string }> {
     if (!this.auth) throw new Error("No OpenAI credential: this brain was built for replay only.");
@@ -362,12 +377,15 @@ export class OpenAIBrain extends Brain {
     const token = await chatgpt.accessToken();
     const configured = this.cfg.openai.chatgptModel?.trim();
     if (configured) return { token, model: configured };
-    if (!this.planModel) {
+    const health=this.healthFor(token);
+    if(this.planHealth!==health){this.planHealth=health;this.planModel=null;this.planModels=null;}
+    if (!this.planModels) {
       const models = await chatgpt.listModels();
       if (!models.length) throw new OpenAIRequestError("Your ChatGPT plan didn't offer any models to Echo.", 403);
-      this.planModel = models[0].slug;
-      console.log(`[openai] using ${models[0].displayName} (${models[0].slug}) from your ChatGPT plan`);
+      this.planModels=models.map(model=>model.slug);
     }
+    this.planModel=health.ladder([this.planModel??undefined,...this.planModels])[0]??null;
+    if(!this.planModel)throw new OpenAIRequestError('No usable model remains in this ChatGPT account catalogue. Choose an available model; no additional discovery request was made.',404,'cached_model_unavailable');
     return { token, model: this.planModel };
   }
 
@@ -549,8 +567,20 @@ export class OpenAIBrain extends Brain {
         if (this.memory.takeInvalidation()) {
           this.items = [{ role: "user", content: [{ type: "input_text", text: "Continue from the saved task state. Forgotten evidence is unavailable; re-observe if needed." }] }];
         }
-        const { token, model } = await this.credential();
+        const { token, model: requestedModel } = await this.credential();
+        let model=requestedModel;
+        const health=this.healthFor(token);
+        const automaticPlan=this.auth?.via==='chatgpt'&&!this.cfg.openai.chatgptModel?.trim();
+        const models=health.ladder([model,...(automaticPlan?this.planModels??[]:[])])
+          .slice(0,1+LOOP_CAPS.openai.modelFallbacks);
+        if(!models.length)throw new OpenAIRequestError(
+          `${this.endpoint.label} model ${model} is unavailable for this account (${health.explain([model])}). Choose an available model; no unconfigured fallback was attempted.`,404,'cached_model_unavailable');
         const tools = this.toolsForRequest();
+        let res:Awaited<ReturnType<typeof this.streamResponse>>|undefined;
+        let startedAt=Date.now(),previousFailed:string|undefined;
+        for(const [attempt,candidate] of models.entries()){
+        if(!health.usable(candidate))continue;
+        model=candidate;
         const used = this.memory.prepareHistory(this.items, tools, this.systemPrompt, "openai", model);
         // Exactly the fields the plan route accepts — see the header comment.
         const request = {
@@ -564,9 +594,31 @@ export class OpenAIBrain extends Brain {
         };
         log?.enterState("awaiting_llm", `${this.endpoint.label}:${model}`);
         log?.setModel(model);
-        const startedAt = Date.now();
+        startedAt = Date.now();
         const wireRequest = this.endpoint.protocol === 'chat-completions' ? completionRequest(request, this.endpoint.reasoningEffort) : request;
-        const res = await recordLLM(wireRequest, () => this.streamResponse(wireRequest, token), 0, { willRetry: () => false });
+        if(previousFailed){
+          log?.note('llm.model_fallback',{from:previousFailed,to:model,reason:'not found',attempt});
+          this.emitEvent('progress',`${this.endpoint.label} model ${previousFailed} is unavailable. Trying ${this.endpoint.label} model ${model}; saved work is preserved.`);
+        }
+        try{
+        res = await recordLLM(wireRequest, async () => {
+          try{return await this.streamResponse(wireRequest, token);}
+          catch(error){
+            const reason=openAIFallbackReason(error);
+            if(reason==='not found')health.markDead(model,'not found');
+            throw error;
+          }
+        }, attempt, {willRetry:error=>openAIFallbackReason(error)==='not found'
+          &&models.slice(attempt+1).some(next=>health.usable(next))});
+        if(automaticPlan)this.planModel=model;
+        break;
+        }catch(error){
+          if(openAIFallbackReason(error)!=='not found'||!models.slice(attempt+1).some(next=>health.usable(next)))throw error;
+          previousFailed=model;
+        }
+        }
+        if(!res)throw new OpenAIRequestError('No authorized model remains available. The task is not finished.',404,'cached_model_unavailable');
+        this.emitEvent('progress',`Using ${this.endpoint.label} model ${model}.`);
 
         const output = res.output ?? [];
         const calls = output.filter((o: any) => o?.type === "function_call");
@@ -631,7 +683,7 @@ export class OpenAIBrain extends Brain {
 
         this.emitEvent("status", "acting");
         didAnyToolCall = true;
-        const images: Array<{ tool: string; mimeType: string; data: string }> = [];
+        const images: Array<{ label:string; mimeType:string; data:string }> = [];
 
         const runOneCall = async (call: any): Promise<any> => {
           const called = this.bareCallName(call.name);
@@ -659,7 +711,7 @@ export class OpenAIBrain extends Brain {
               allowedTools: this.limits.allowedTools,
               emit: (e, p) => this.emitEvent(e as any, p),
             });
-            if (out.image) images.push({ tool: called, mimeType: out.image.mimeType, data: out.image.data });
+            for(const entry of computerImageEntries(out))images.push({label:`${called}: ${computerImageLabel(entry,out,call.call_id)}`,...entry.image});
             return reply(modelToolResult(out));
           } catch (err: any) {
             return reply({ error: String(err?.message ?? err) });
@@ -690,16 +742,17 @@ export class OpenAIBrain extends Brain {
         this.items.push(...outputs);
         // A tool's screenshot follows its result as an image the model can
         // actually see — the Chat Completions loop dropped these entirely.
+        const protectedImagesFrom=this.items.length;
         if (images.length) {
           this.items.push({
             role: "user",
             content: images.flatMap((img) => [
-              { type: "input_text", text: `Screenshot returned by ${img.tool}:` },
+              { type: "input_text", text: img.label },
               { type: "input_image", image_url: `data:${img.mimeType};base64,${img.data}`, detail: "auto" },
             ]),
           });
         }
-        const freed = trimResponseImages(this.items);
+        const freed = trimResponseImages(this.items,KEEP_IMAGES,protectedImagesFrom);
         if (freed > 1_000_000) console.log(`[openai] released ${(freed / 1_048_576).toFixed(1)} MB of old screenshots from context`);
       }
 

@@ -3,8 +3,21 @@ import { performance } from "node:perf_hooks";
 import type { JarvisConfig } from "../config.js";
 import { SentenceChunker, splitSentences } from "./chunker.js";
 import { createTtsStream, isLatinText, languageOf, offlineTtsStream, GeminiTtsStream, OFFLINE_STREAMS, type TtsStream, type TtsAudio } from "./tts-stream.js";
-import type { AudioPlayer } from "./player.js";
+import type { AudioPlayer, PlaybackDrainOutcome } from "./player.js";
 import { vibeVoiceSupportsText } from "./vibevoice.js";
+
+export interface SpeechPlaybackAcknowledgment {status:'completed'|'interrupted'|'failed'}
+interface PlaybackAcknowledgment {
+  generation:number;
+  expected:number;
+  sentences:Set<number>;
+  audio:Set<number>;
+  started:boolean;
+  drained:boolean;
+  resolve:(result:SpeechPlaybackAcknowledgment)=>void;
+  signal?:AbortSignal;
+  onAbort?:()=>void;
+}
 
 /**
  * Speaks a reply while it is still being written.
@@ -55,6 +68,9 @@ export class SpeechStream extends EventEmitter {
   private lastFailedStream = "";
   /** The open stream is the offline stand-in, not the configured voice. */
   private onFallback = false;
+  private acknowledgment?:PlaybackAcknowledgment;
+  // A native Stop receipt separates old player's events from a new reservation.
+  private playbackFenced=false;
 
   constructor(
     private readonly cfg: JarvisConfig,
@@ -69,8 +85,15 @@ export class SpeechStream extends EventEmitter {
     }
   ) {
     super();
-    player.on("drained", () => this.onDrained());
-    player.on("started", () => this.emit("playerStarted"));
+    player.on("drained", (outcome?: PlaybackDrainOutcome) => this.onDrained(outcome));
+    player.on("started", () => {
+      const ack=this.acknowledgment;
+      if(ack?.generation===this.generation&&ack.audio.size)ack.started=true;
+      this.emit("playerStarted");
+    });
+    player.on('stopped',()=>{this.playbackFenced=false;this.finishAcknowledgment('interrupted');});
+    player.on('error',()=>this.finishAcknowledgment('failed'));
+    player.on('exit',()=>this.finishAcknowledgment('failed'));
   }
 
   get isSpeaking(): boolean {
@@ -79,6 +102,7 @@ export class SpeechStream extends EventEmitter {
 
   /** A new brain turn: reset the per-turn sentence budget. */
   newTurn(): void {
+    this.supersedeAcknowledgment();
     // The stand-in voice would otherwise be reused for as long as it stays
     // open; once the cooldown is over, a new turn tries the real voice again.
     if (this.onFallback && this.tts && !this.awaitingAudio.size
@@ -104,6 +128,7 @@ export class SpeechStream extends EventEmitter {
   }
 
   private async ensureTts(text: string, rechecks = 0): Promise<TtsStream | null> {
+    const gen = this.generation;
     const lang = languageOf(text);
     const sarvamSwitch = this.tts?.name === "sarvam-ws" && !!this.ttsLang && this.ttsLang !== lang;
     const vibeSwitch = this.cfg.voice.ttsEngine === "vibevoice" && !!this.tts && !this.onFallback
@@ -133,11 +158,11 @@ export class SpeechStream extends EventEmitter {
     if (this.tts) return this.tts;
     if (this.ttsOpening) {
       await this.ttsOpening;
+      if(gen!==this.generation)return null;
       // The voice that just opened was chosen for an earlier sentence; check
       // once more that it suits this one (a Telugu line after an English one).
       return rechecks >= 3 ? this.tts : this.ensureTts(text, rechecks + 1);
     }
-    const gen = this.generation;
     const now = (this.opts.now ?? Date.now)();
     const coolingDown = now - this.cloudFailedAt < CLOUD_RETRY_MS;
     const stream = coolingDown ? this.fallbackFor(text) : (this.opts.createTts ?? createTtsStream)(this.cfg, text);
@@ -145,7 +170,7 @@ export class SpeechStream extends EventEmitter {
     const standIn = coolingDown;
     this.ttsLang = lang;
     this.wire(stream, gen);
-    this.ttsOpening = stream.open().then(
+    const opening = stream.open().then(
       () => {
         if (gen === this.generation) {
           this.tts = stream;
@@ -153,8 +178,10 @@ export class SpeechStream extends EventEmitter {
         } else stream.abort();
       },
       async (err: any) => {
+        if(gen===this.generation)this.finishAcknowledgment('failed');
         console.log(`[voice] tts stream failed to open: ${err?.message ?? err}`);
-        if (OFFLINE_STREAMS.has(stream.name) || gen !== this.generation) return;
+        if(gen!==this.generation){stream.abort();return;}
+        if (OFFLINE_STREAMS.has(stream.name)) return;
         // A cloud voice that cannot connect (offline, rate-limited, bad key)
         // used to leave the reply silent. Speak it locally instead.
         this.abandoned.add(stream);
@@ -173,9 +200,10 @@ export class SpeechStream extends EventEmitter {
         }
       }
     );
-    await this.ttsOpening;
-    this.ttsOpening = null;
-    return this.tts;
+    this.ttsOpening = opening;
+    await opening;
+    if(this.ttsOpening===opening)this.ttsOpening = null;
+    return gen===this.generation?this.tts:null;
   }
 
   private offline(): TtsStream {
@@ -235,19 +263,25 @@ export class SpeechStream extends EventEmitter {
     });
     stream.on("sentenceDone", (idx: number) => {
       if (!live()) return;
+      if(this.acknowledgment?.sentences.has(idx)&&!this.acknowledgment.audio.has(idx))this.finishAcknowledgment('failed');
+      if(!live())return;
       this.awaitingAudio.delete(idx);
       this.player.endSentence(idx);
+      if(!live())return;
       this.checkIdle();
     });
     stream.on("error", (m: string) => {
       console.log(`[voice] tts stream: ${m}`);
+      if(live())this.finishAcknowledgment('failed');
       if (live() && this.tts === stream && !OFFLINE_STREAMS.has(stream.name)) void this.failOver(stream, gen);
     });
     stream.on("closed", () => {
       if (this.tts !== stream) return;
-      this.tts = null;
       // Closed by the server with sentences still owed: a dropped connection,
       // not the end of the turn.
+      if(live()&&this.awaitingAudio.size)this.finishAcknowledgment('failed');
+      if(!live())return;
+      this.tts = null;
       if (live() && this.awaitingAudio.size && !OFFLINE_STREAMS.has(stream.name)) void this.failOver(stream, gen);
     });
   }
@@ -258,7 +292,7 @@ export class SpeechStream extends EventEmitter {
    * and one that was cut off part-way is let go rather than restarted.
    */
   private async failOver(stream: TtsStream, gen: number): Promise<void> {
-    if (this.abandoned.has(stream)) return;
+    if (gen!==this.generation||this.abandoned.has(stream)) return;
     this.abandoned.add(stream);
     this.cloudFailedAt = (this.opts.now ?? Date.now)();
     this.lastFailedStream = stream.name;
@@ -279,7 +313,7 @@ export class SpeechStream extends EventEmitter {
     this.wire(local, gen);
     // Held as the opening stream, so a sentence arriving meanwhile waits for
     // this voice rather than starting a second one.
-    this.ttsOpening = local.open().then(
+    const opening = local.open().then(
       () => {
         if (gen === this.generation) {
           this.tts = local;
@@ -288,8 +322,9 @@ export class SpeechStream extends EventEmitter {
       },
       (e: any) => console.log(`[voice] offline voice failed to open: ${e?.message ?? e}`)
     );
-    await this.ttsOpening;
-    this.ttsOpening = null;
+    this.ttsOpening = opening;
+    await opening;
+    if(this.ttsOpening===opening)this.ttsOpening = null;
     if (gen !== this.generation) return;
     for (const idx of owed) {
       if (!this.awaitingAudio.has(idx)) continue;
@@ -301,12 +336,14 @@ export class SpeechStream extends EventEmitter {
 
   /** Streamed model text. */
   feed(delta: string): void {
+    this.supersedeAcknowledgment();
     this.blockTookDeltas = true;
     for (const s of this.chunker.feed(delta)) void this.speakSentence(s);
   }
 
   /** The model finished the block the deltas belonged to. */
   endBlock(): void {
+    this.supersedeAcknowledgment();
     for (const s of this.chunker.flush()) void this.speakSentence(s);
   }
 
@@ -322,13 +359,63 @@ export class SpeechStream extends EventEmitter {
 
   /** A whole text at once — the `Tts.say()` path for non-streaming callers. */
   speakText(text: string): void {
+    this.supersedeAcknowledgment();
     for (const s of splitSentences(text)) void this.speakSentence(s);
   }
+
+  /** Only a reserved, whole-text delivery can receive a completion ACK. Live
+   * model text keeps its existing path; any new foreground text supersedes it. */
+  speakWithAcknowledgment(text:string,options:{signal?:AbortSignal}={}):Promise<SpeechPlaybackAcknowledgment> {
+    if(options.signal?.aborted)return Promise.resolve({status:'interrupted'});
+    const sentences=splitSentences(text);
+    // Reserve only adapters that opt into truthful, cancellation-fenced outcomes.
+    if(this.player.supportsPlaybackAcknowledgment!==true)return Promise.resolve({status:'failed'});
+    if(!sentences.length||this.speaking||this.awaitingAudio.size||this.chunker.pending.trim()
+      ||this.player.playing||this.playbackFenced||this.acknowledgment)return Promise.resolve({status:'failed'});
+    // An idle report is its own turn, not the tail of the last foreground reply.
+    // Keep this after the checks: a rejected report must not reset live output.
+    this.newTurn();
+    // A whole report owns a fresh synthesis generation. Reusing an idle stream
+    // also reuses sentence indices, so its late callbacks could certify a later
+    // delivery. Live text outside this API continues to reuse its connection.
+    const old=this.tts;
+    this.generation++;
+    this.tts=null;
+    this.ttsOpening=null;
+    old?.abort();
+    return new Promise(resolve=>{
+      const ack:PlaybackAcknowledgment={generation:this.generation,expected:sentences.length,
+        sentences:new Set(),audio:new Set(),started:false,drained:false,resolve,signal:options.signal};
+      this.acknowledgment=ack;
+      ack.onAbort=()=>{if(this.acknowledgment===ack)this.cancel();};
+      ack.signal?.addEventListener('abort',ack.onAbort,{once:true});
+      for(const sentence of sentences){
+        if(this.acknowledgment!==ack||ack.generation!==this.generation)break;
+        void this.speakSentence(sentence).catch(()=>this.finishAcknowledgment('failed',ack));
+      }
+    });
+  }
+
+  private finishAcknowledgment(status:SpeechPlaybackAcknowledgment['status'],expected=this.acknowledgment):void {
+    if(!expected||this.acknowledgment!==expected)return;
+    this.acknowledgment=undefined;
+    if(expected.onAbort)expected.signal?.removeEventListener('abort',expected.onAbort);
+    // Releasing a failed report must release its sound too. Clear its identity
+    // before cancel (which emits callbacks); never let an old failure stop a
+    // newer foreground generation or turn this failure into an interruption.
+    if(status==='failed'&&expected.generation===this.generation){
+      try{this.cancel();}catch{console.warn('[voice] failed report cleanup could not fully stop output');}
+    }
+    expected.resolve({status});
+  }
+  private supersedeAcknowledgment():void {if(this.acknowledgment)this.cancel();}
 
   private async speakSentence(text: string): Promise<void> {
     const gen = this.generation;
     const cap = this.opts.maxSentences();
     if (cap > 0 && this.spokenThisTurn >= cap) {
+      this.finishAcknowledgment('failed');
+      if(gen!==this.generation)return;
       if (!this.capped) {
         this.capped = true;
         this.emit("capped");
@@ -337,6 +424,7 @@ export class SpeechStream extends EventEmitter {
     }
     this.spokenThisTurn++;
     const idx = this.nextIndex++;
+    if(this.acknowledgment?.generation===gen)this.acknowledgment.sentences.add(idx);
     this.sentences[idx] = text;
     this.awaitingAudio.add(idx);
     this.setSpeaking(true);
@@ -348,13 +436,20 @@ export class SpeechStream extends EventEmitter {
       return;
     }
     this.emit("sentence", text, idx);
+    if(gen!==this.generation)return;
     tts.speak(text, idx);
+    if(gen!==this.generation)return;
     this.armIdleClose();
   }
 
   private onAudio(a: TtsAudio): void {
+    const gen=this.generation;
+    if(this.acknowledgment?.sentences.has(a.sentence)&&a.pcm.length){
+      this.acknowledgment.audio.add(a.sentence);this.acknowledgment.drained=false;
+    }
     this.audioPending = true;
     this.player.play(a.pcm, a.sampleRate, a.sentence);
+    if(gen!==this.generation)return;
     const ms = (a.pcm.length / 2 / a.sampleRate) * 1000;
     const prev = this.audioMsEnd.length ? this.audioMsEnd[this.audioMsEnd.length - 1] : 0;
     this.audioMsEnd[a.sentence] = Math.max(this.audioMsEnd[a.sentence] ?? 0, prev) + ms;
@@ -364,7 +459,13 @@ export class SpeechStream extends EventEmitter {
     }
   }
 
-  private onDrained(): void {
+  private onDrained(outcome?: PlaybackDrainOutcome): void {
+    const gen=this.generation;
+    if(outcome?.status==='failed')this.finishAcknowledgment('failed');
+    if(gen!==this.generation)return;
+    const ack=this.acknowledgment;
+    // A stale/empty drain cannot win while this generation still owes audio.
+    if(ack?.generation===this.generation&&ack.audio.size&&ack.started)ack.drained=true;
     this.audioPending = false;
     this.checkIdle();
   }
@@ -372,6 +473,11 @@ export class SpeechStream extends EventEmitter {
   /** Nothing left to say and nothing left to play: speech is over. */
   private checkIdle(): void {
     if (this.awaitingAudio.size === 0 && !this.audioPending && !this.player.playing && !this.chunker.pending.trim()) {
+      const ack=this.acknowledgment;
+      const gen=this.generation;
+      if(ack)this.finishAcknowledgment(ack.generation===this.generation&&ack.started&&ack.drained
+        &&ack.sentences.size===ack.expected&&ack.audio.size===ack.expected?'completed':'failed',ack);
+      if(gen!==this.generation)return;
       this.setSpeaking(false);
     }
   }
@@ -400,6 +506,7 @@ export class SpeechStream extends EventEmitter {
         void t.close();
       }
     }, 20000);
+    this.idleClose.unref();
   }
 
   /** What has actually been heard so far, for patching the model's history after an interruption. */
@@ -422,17 +529,23 @@ export class SpeechStream extends EventEmitter {
 
   /** Drop everything: queued text, in-flight synthesis, queued and playing audio. */
   cancel(): void {
+    this.finishAcknowledgment('interrupted');
     this.generation++;
+    if(this.idleClose)clearTimeout(this.idleClose);
+    this.idleClose=null;
     this.chunker.reset();
     this.awaitingAudio.clear();
     this.audioPending = false;
     const t = this.tts;
     this.tts = null;
     this.ttsOpening = null;
-    t?.abort();
-    this.player.stop();
-    this.blockTookDeltas = false;
-    this.speaking = true; // force the reset below even if nothing was playing yet
-    this.setSpeaking(false);
+    try{t?.abort();}finally{
+      this.playbackFenced=true;
+      try{this.player.stop();}finally{
+        this.blockTookDeltas = false;
+        this.speaking = true; // force the reset below even if nothing was playing yet
+        this.setSpeaking(false);
+      }
+    }
   }
 }

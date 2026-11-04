@@ -1,5 +1,6 @@
 import { sendToOverlay, toOverlaySpace } from "../overlay.js";
 import { record as recordRemote } from "./remote.js";
+import {currentAgentRunContext} from '../agent-replay/context.js';
 
 /**
  * Turns tool calls into something worth watching.
@@ -26,6 +27,7 @@ export interface FeedEvent {
 }
 
 export function feed(event: FeedEvent) {
+  if(currentAgentRunContext()?.identity.background)return;
   try {
     // Coordinates arrive in the GLOBAL screen space; the overlay window draws
     // in its own, which starts at the top-left of the whole desktop — negative

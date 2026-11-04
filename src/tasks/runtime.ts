@@ -24,7 +24,7 @@ export const INSPECTOR_TOOLS=new Set(['inspect_supervised_task','read_supervised
   'read_browser_page','web_search','list_ui_elements','read_screen_text','screenshot','frontmost_app','read_tool_result']);
 const DELEGATION_TOOLS=new Set(['run_supervised_task','run_agent_mission','spawn_subagent','delegate_task','schedule_task',
   'start_project_build','try_approaches_in_parallel','send_message','switch_brain','submit_task_review','cancel_supervised_task','cancel_agent_mission','show_task_report']);
-const DESKTOP_TOOLS=new Set(['open_url','open_app','click','click_ui_element','click_text','type_text','press_keys','scroll','drag','move_mouse','background_click','background_type','set_value','run_shortcut']);
+const DESKTOP_TOOLS=new Set(['inspect_app','verify_app_state','ask_app_question','click_in_app','type_in_app','press_app_key','scroll_in_app','drag_in_app','set_app_value','move_echo_cursor','open_url','open_app','click','click_ui_element','click_text','type_text','press_keys','scroll','drag','move_mouse','background_click','background_type','set_value','run_shortcut']);
 
 /** Shared factory: all five provider adapters receive hard authority limits, not just prompt advice. */
 export function makeSupervisedBrain(cfg: JarvisConfig, identity: AgentIdentity, spec: SupervisedSpec, inspector: boolean, create=createBrain) {

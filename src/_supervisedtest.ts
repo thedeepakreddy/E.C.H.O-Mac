@@ -3,8 +3,8 @@ import {EventEmitter} from 'node:events';
 import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {TaskCoordinator} from './memory/task-state.js';
-import {TaskSupervisor} from './tasks/supervisor.js';
+import {TaskCoordinator, taskCoordinator, type TaskCall} from './memory/task-state.js';
+import {TaskSupervisor, type SupervisedSpec} from './tasks/supervisor.js';
 
 class Agent extends EventEmitter {
   sent: any[] = []; stops = 0;
@@ -15,15 +15,15 @@ class Agent extends EventEmitter {
 const root = mkdtempSync(join(tmpdir(), 'echo-supervised-'));
 const tick = () => new Promise(resolve => setTimeout(resolve, 15));
 let count = 0;
-function fixture(name: string, overrides: any = {}) {
-  const coordinator = new TaskCoordinator(join(root, name));
+function fixture(name: string, overrides: any = {}, spec: Partial<SupervisedSpec> = {}) {
+  const coordinator:TaskCoordinator = overrides.coordinator ?? new TaskCoordinator(join(root, name));
   const workers: Agent[] = [], inspectors: Agent[] = [], reports: any[] = [];
   const supervisor = new TaskSupervisor({coordinator,
     makeWorker: () => {const a = new Agent(); workers.push(a); return a;},
     makeInspector: () => {const a = new Agent(); inspectors.push(a); return a;},
     verify: async () => [], onReport: state => reports.push(state), ...overrides});
   const state = supervisor.start({goal:'Build a working calculator', steps:['Implement', 'Test'],
-    acceptanceCriteria:['2 + 3 displays 5'], timeoutMs:5000, inspectionIntervalMs:1000, maxRepairs:1});
+    acceptanceCriteria:['2 + 3 displays 5'], timeoutMs:5000, inspectionIntervalMs:1000, maxRepairs:1,...spec});
   return {coordinator, supervisor, workers, inspectors, reports, id:state.id};
 }
 function finishWorker(f: ReturnType<typeof fixture>, valid = true) {
@@ -36,18 +36,133 @@ function finishWorker(f: ReturnType<typeof fixture>, valid = true) {
     artifacts:[{kind:'text',label:'Output',value:'Calculator output'}], verificationRefs:['check:regression'], blockers:[]});
   w.emit('turnEnd');
 }
-function review(f: ReturnType<typeof fixture>, verdict: 'pass'|'repair', refs = ['check:independent']) {
+function review(f: ReturnType<typeof fixture>, verdict: 'pass'|'repair', refs = ['check:independent'], summary?: string) {
   const inspector = f.inspectors.at(-1)!;
   const taskId = inspector.sent[0].opts.taskId;
   const task = f.coordinator.get(taskId)!;
   f.coordinator.recordVerification(taskId, ['check:independent']);
   const snapshot = f.supervisor.inspect(f.id)!;
   f.supervisor.submitReview(taskId, task.ownerActorId, {viewToken:snapshot.viewToken!, verdict,
-    summary: verdict === 'pass' ? 'Observed output and regression results' : 'Addition displays the wrong value; fix and rerun regression',
+    summary: summary ?? (verdict === 'pass' ? 'Observed output and regression results' : 'Addition displays the wrong value; fix and rerun regression'),
     checks:[{criterion:'2 + 3 displays 5',passed:verdict==='pass',verificationRefs:refs}]});
   inspector.emit('turnEnd');
 }
+function saveCall(f: ReturnType<typeof fixture>, effect: TaskCall['effect'], status: TaskCall['status']) {
+  const taskId=f.workers.at(-1)!.sent[0].opts.taskId;
+  const task=f.coordinator.get(taskId)!;
+  const invocation={taskId,actorId:task.ownerActorId,callId:`call${Object.keys(task.calls).length+1}`,stepId:'step1',
+    generation:task.generation,baseRevision:task.revision,resources:[]};
+  f.coordinator.startCall(invocation,'fixture_tool',effect);
+  if(status!=='running')f.coordinator.endCall(invocation,{status,text:'Saved fixture outcome'});
+  return invocation.callId;
+}
 try {
+  for(const status of ['failed','cancelled'] as const) {
+    const f=fixture(`final-pass-${status}-action`);
+    try {
+      const callId=saveCall(f,'action',status);finishWorker(f);await tick();review(f,'pass');await tick();
+      assert.equal(f.supervisor.inspect(f.id)?.status,'blocked',`final acceptance must reject a ${status} action even when verification passes`);
+      assert.equal(f.workers.length,1);
+      assert(f.supervisor.inspect(f.id)!.blockers.some(b=>b.includes(callId)&&b.includes(status)));count++;
+    } finally {await f.supervisor.close();}
+  }
+  {
+    const keys=['ECHO_DATA_ROOT','ECHO_MEMORY_ROOT','JARVIS_EPISODIC_DIR','ECHO_LOG_DIR','ECHO_MCP'] as const;
+    const previous=keys.map(key=>process.env[key]);
+    process.env.ECHO_DATA_ROOT=join(root,'gate-data');process.env.ECHO_MEMORY_ROOT=join(root,'gate-memory');
+    process.env.JARVIS_EPISODIC_DIR=join(root,'gate-episodes');process.env.ECHO_LOG_DIR=join(root,'gate-logs');process.env.ECHO_MCP='0';
+    const f=fixture('repair-reuses-successful-write',{coordinator:taskCoordinator},{maxRepairs:2});
+    try {
+      const {createInvocation}=await import('./memory/invocation.js');
+      const args={path:join(root,'saved-write.txt'),text:'Fixture output'};
+      const source=f.workers[0].sent[0].opts.taskId;
+      const invocation=createInvocation(source,f.coordinator.get(source)!.ownerActorId,'write_local_file',args,root);
+      f.coordinator.startCall(invocation,'write_local_file','action');
+      f.coordinator.endCall(invocation,{status:'success',verification:'verified',text:'Previously saved write',data:{revision:7}});
+      finishWorker(f);await tick();review(f,'repair');await tick();
+      const repairId=f.workers[1].sent[0].opts.taskId;
+      assert.deepEqual(f.coordinator.lookup(repairId,'retrySourceTaskIds'),[source],'repair worker must inherit the completed write journal');
+      finishWorker(f);await tick();review(f,'repair');await tick();
+      const nextId=f.workers[2].sent[0].opts.taskId;
+      assert.deepEqual(f.coordinator.lookup(nextId,'retrySourceTaskIds'),[source,repairId],'all prior workers must be bound, excluding the new worker');
+      const {runGated}=await import('./safety/gate.js');
+      const {runInAgentContext}=await import('./agent-replay/context.js');
+      let dispatched=0;
+      const cached=await runInAgentContext({identity:{id:f.coordinator.get(nextId)!.ownerActorId,name:'Fixture worker',kind:'clone'},
+        taskId:nextId,payloadRecording:false,privateMode:true,recorder:null!,loop:null!},()=>runGated({
+          name:'write_local_file',description:'Fixture write',schema:{},readOnly:false,
+          handler:async()=>{dispatched++;throw Error('A completed write must not be dispatched again');},
+        },args,{workingDir:root}));
+      assert.equal(dispatched,0,'actual gate must reuse the earlier write without invoking its handler');
+      assert.equal(cached.text,'Previously saved write');assert.deepEqual(cached.data,{revision:7});
+      assert.equal(cached.status,'success');assert.equal(cached.taskId,nextId);count++;
+    } finally {
+      await f.supervisor.close();
+      keys.forEach((key,index)=>{if(previous[index]===undefined)delete process.env[key];else process.env[key]=previous[index];});
+    }
+  }
+  {
+    const f=fixture('repair-uncertain-action');
+    try {
+      saveCall(f,'action','timeout');finishWorker(f);await tick();review(f,'repair');await tick();
+      assert.equal(f.workers.length,1,'an inspector repair must not launch a worker after an uncertain action');
+      assert.equal(f.supervisor.inspect(f.id)?.status,'blocked');
+      assert.equal(f.supervisor.inspect(f.id)?.repairs,0);count++;
+    } finally {await f.supervisor.close();}
+  }
+  for(const path of ['missing','repair','pass'] as const) {
+    const cases:Array<{effect:TaskCall['effect'];status:TaskCall['status'];blocked:boolean}>=[
+      {effect:'action',status:'running',blocked:true},
+      {effect:'action',status:'timeout',blocked:true},
+      {effect:'action',status:'uncertain',blocked:true},
+      {effect:'action',status:'partial',blocked:true},
+      {effect:'action',status:'failed',blocked:true},
+      {effect:'action',status:'cancelled',blocked:true},
+      {effect:undefined,status:'timeout',blocked:true},
+      {effect:undefined,status:'failed',blocked:true},
+      {effect:'observation',status:'failed',blocked:false},
+      {effect:'observation',status:'timeout',blocked:false},
+      {effect:'internal',status:'failed',blocked:false},
+      {effect:'action',status:'success',blocked:false},
+      {effect:'action',status:'denied',blocked:false},
+    ];
+    for(const {effect,status,blocked} of cases) {
+      const f=fixture(`repair-${path}-${effect??'unknown'}-${status}`,{verify:async()=>['Regression test failed']});
+      try {
+        const callId=saveCall(f,effect,status);finishWorker(f);await tick();
+        if(path==='missing')f.inspectors.at(-1)!.emit('turnEnd');
+        else review(f,path);await tick();
+        assert.equal(f.workers.length,blocked?1:2,`${path}: ${effect??'unknown'} ${status} repair launch`);
+        const saved=f.supervisor.inspect(f.id)!;
+        assert.equal(saved.status,blocked?'blocked':'repairing');
+        assert.equal(saved.repairs,blocked?0:1);
+        if(blocked) {
+          assert(saved.blockers.some(b=>b.includes(callId)&&b.includes(status)), 'blocker must identify the saved uncertain call');
+          assert.equal(f.reports.length,1);assert.equal(saved.cleanup.finished,true);
+        }
+        count++;
+      } finally {await f.supervisor.close();}
+    }
+  }
+  {
+    const f=fixture('repair-read-with-misleading-review');
+    try {
+      saveCall(f,'observation','failed');finishWorker(f);await tick();
+      review(f,'repair',undefined,'There are unresolved tool calls; fetch the missing source again');await tick();
+      assert.equal(f.workers.length,2,'review wording cannot block a safe failed read');count++;
+    } finally {await f.supervisor.close();}
+  }
+  {
+    const f=fixture('repair-missing-saved-worker');
+    try {
+      finishWorker(f);await tick();
+      f.coordinator.forget(f.supervisor.inspect(f.id)!.workerTaskIds[0]);
+      review(f,'repair');await tick();
+      assert.equal(f.workers.length,1,'missing saved outcomes cannot authorize repair');
+      assert.equal(f.supervisor.inspect(f.id)?.status,'blocked');
+      assert.match(f.supervisor.inspect(f.id)!.blockers.join(' '),/unavailable/);count++;
+    } finally {await f.supervisor.close();}
+  }
   {
     const f = fixture('complete'); finishWorker(f); await tick();
     assert.equal(f.supervisor.panelMissions()[0].status,'running');assert.equal(f.supervisor.panelMissions()[0].tasks.inspector.status,'working');assert.equal(f.supervisor.companionMetadata()[0].live,true);

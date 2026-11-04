@@ -25,9 +25,10 @@ const result = (summary: string, extra: Partial<{ status: string; verificationRe
 console.log("\nSix-agent intelligence foundation\n");
 
 const builtIns = listFleet().filter(m => !m.custom);
-ok(builtIns.length === 6, "six built-in agents (Lead and five specialists)");
+ok(builtIns.length === 7, "seven built-in agents (Lead, five specialists and Verify)");
 ok(builtIns.every(m => m.brief.includes("SPECIALIST CONTRACT") && m.brief.includes("Verdict: <PASS")), "every built-in brief carries the shared contract and verdict");
-ok(new Set(builtIns.map(m => m.brief)).size === 6, "every built-in brief is distinct");
+ok(new Set(builtIns.map(m => m.brief)).size === 7, "every built-in brief is distinct");
+ok(/source auditor/.test(getFleetMember("verify")!.brief) && getFleetMember("verify")!.brief.includes("SPECIALIST CONTRACT"), "Verify keeps its source-audit brief inside the shared contract");
 ok(/READ the primary sources/.test(getFleetMember("research")!.brief) && /read_browser_page/.test(getFleetMember("research")!.brief), "Research reads primary sources with Mac's page tools");
 ok(/correlation from causation/.test(getFleetMember("analyse")!.brief), "Analyse separates correlation from causation");
 ok(/preserve every user-provided fact/.test(getFleetMember("write")!.brief), "Write preserves user-provided facts");

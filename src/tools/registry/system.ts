@@ -324,19 +324,14 @@ export const SYSTEM_TOOLS: ToolDef[] = [
   },
   {
     name: "adjust_brightness",
-    description: "Adjusts the Mac screen brightness by simulating the physical brightness keys. You cannot set an absolute percentage.",
+    description: "Unavailable: direct brightness-key simulation is unsupported by Echo's verified LCU Mac API. This tool reports that limitation without sending input. Use macOS Control Center manually, or inspect an approved settings app and use only verified native controls; do not promise an absolute percentage.",
     schema: {
       action: z.enum(["up", "down"]).describe("Whether to turn the brightness up or down."),
       steps: z.number().optional().describe("How many times to press the key (default 1, max 16)."),
     },
     readOnly: false,
     handler: async (a: { action: "up" | "down"; steps?: number }) => {
-      const steps = Math.min(Math.max(Math.round(a.steps || 1), 1), 16);
-      const keyCode = a.action === "up" ? 144 : 145;
-      const lines = Array.from({ length: steps }, () => `key code ${keyCode}`).join("\n");
-      const r = await runFile("/usr/bin/osascript", ["-e", `tell application "System Events"\n${lines}\nend tell`]);
-      if (!r.ok) return { text: `Could not change the brightness: ${r.error}`, status: "failed" };
-      return { text: `Pressed brightness ${a.action} ${steps} time(s).` };
+      return {text:'Brightness-key simulation is unavailable through the verified LCU Mac API. No legacy key injection was used. Use macOS Control Center manually or inspect an approved settings app.',status:'failed',error:{category:'unsupported_input',message:'LCU brightness-key capability is not verified',retryable:false}};
     },
   },
   {

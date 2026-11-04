@@ -229,7 +229,7 @@ export const SKILL_TOOLS: ToolDef[] = [
       if (!wf) return { text: `I don't know a workflow called "${a.name}". Known: ${demo.list().join(", ") || "none yet"}.` };
       const steps = demo.bind(wf.steps, a.values ?? {});
       const report = await replayWorkflow(wf, steps);
-      return { text: report.summary };
+      return {text:report.summary,status:report.status,verification:'unverified',computerContent:report.computerContent,data:report.data};
     },
   },
   {

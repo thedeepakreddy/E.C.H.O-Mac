@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { withProsody, speakableText } from "./prosody.js";
 import type { SpeechStream } from "./speech-stream.js";
 import { PiperWorker, piperPaths } from "./tts-stream.js";
@@ -6,14 +6,27 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+export interface TtsAcknowledgment {status:'completed'|'interrupted'|'failed'}
+export interface TtsPlaybackProcess {
+  on(event:string,listener:(...args:any[])=>void):unknown;
+  kill(signal?:NodeJS.Signals):unknown;
+}
+interface PendingAcknowledgment {
+  resolve:(result:TtsAcknowledgment)=>void;
+  signal?:AbortSignal;
+  onAbort?:()=>void;
+}
+
 /**
  * Speaks text aloud via the macOS `say` command or API (FakeYou / ElevenLabs).
  * Emits nothing; callers can await speak() or fire-and-forget. stop() cuts the
  * current utterance and clears the queue (used when the user interrupts Jarvis).
  */
 export class Tts {
-  private queue: string[] = [];
-  private current: ChildProcess | null = null;
+  private queue: Array<{text:string;ack?:PendingAcknowledgment}> = [];
+  private current: TtsPlaybackProcess | null = null;
+  private acknowledgment?:PendingAcknowledgment;
+  private detachStream?:()=>void;
   private speaking = false;
   /** Bumped by stop(), so an interrupted drain knows it has been superseded. */
   private generation = 0;
@@ -33,19 +46,26 @@ export class Tts {
   private stream: SpeechStream | null = null;
 
   attachStream(stream: SpeechStream) {
+    if(this.stream===stream)return;
+    if(this.stream||this.speaking||this.acknowledgment)this.stop();
+    this.detachStream?.();
     this.stream = stream;
-    stream.on("speaking", (on: boolean) => {
+    const state=(on: boolean) => {
+      if(this.stream!==stream)return;
       if (this.speaking === on) return;
       this.speaking = on;
       this.onStateChange?.(on);
-    });
-    stream.on("firstAudio", (text: string) => {
+    };
+    const audio=(text: string) => {
+      if(this.stream!==stream)return;
       try {
         this.audioStartHook?.(text);
       } catch {
         /* logging must never break speech */
       }
-    });
+    };
+    stream.on('speaking',state);stream.on('firstAudio',audio);
+    this.detachStream=()=>{stream.off('speaking',state);stream.off('firstAudio',audio);};
   }
 
   constructor(
@@ -55,7 +75,8 @@ export class Tts {
     private elevenLabsVoiceId?: string,
     private onStateChange?: (speaking: boolean) => void,
     private sarvam: { speaker?: string; pace?: number } = {},
-    private piperVoice?: string
+    private piperVoice?: string,
+    private readonly playback:{spawn?:(bin:string,args:string[])=>TtsPlaybackProcess}={}
   ) {}
 
   say(text: string) {
@@ -63,12 +84,45 @@ export class Tts {
     // voices used to be handed raw markdown and read the asterisks aloud.
     const clean = speakableText(text);
     if (!this.enabled || !clean) return;
+    // Foreground speech owns the lane; it supersedes a background reservation.
+    if(this.acknowledgment)this.stop();
     if (this.stream) {
       this.stream.speakText(clean);
       return;
     }
-    this.queue.push(clean);
+    this.queue.push({text:clean});
     if (!this.speaking) void this.drain();
+  }
+
+  /** Reserve local output only. Busy/disabled output is never queued or routed
+   * through say(), which the host may monkeypatch for Phone/remote delivery. */
+  speakWithAcknowledgment(text:string,options:{signal?:AbortSignal}={}):Promise<TtsAcknowledgment> {
+    const clean=speakableText(text);
+    if(options.signal?.aborted)return Promise.resolve({status:'interrupted'});
+    if(!this.enabled||!clean||this.isSpeaking()||this.queue.length)return Promise.resolve({status:'failed'});
+    return new Promise(resolve=>{
+      const ack:PendingAcknowledgment={resolve,signal:options.signal};
+      this.acknowledgment=ack;
+      ack.onAbort=()=>{if(this.acknowledgment===ack)this.stop();};
+      ack.signal?.addEventListener('abort',ack.onAbort,{once:true});
+      if(this.stream){
+        try{
+          void this.stream.speakWithAcknowledgment(clean,options).then(
+            result=>this.finishAcknowledgment(ack,result),
+            ()=>this.finishAcknowledgment(ack,{status:'failed'}));
+        }catch{this.finishAcknowledgment(ack,{status:'failed'});}
+      }else{
+        this.queue.push({text:clean,ack});
+        void this.drain().catch(()=>this.finishAcknowledgment(ack,{status:'failed'}));
+      }
+    });
+  }
+
+  private finishAcknowledgment(ack:PendingAcknowledgment|undefined,result:TtsAcknowledgment):void {
+    if(!ack||this.acknowledgment!==ack)return;
+    this.acknowledgment=undefined;
+    if(ack.onAbort)ack.signal?.removeEventListener('abort',ack.onAbort);
+    ack.resolve(result);
   }
 
   private async fetchElevenLabs(text: string): Promise<string | null> {
@@ -238,7 +292,8 @@ export class Tts {
     this.onStateChange?.(true);
 
     while (this.queue.length && generation === this.generation) {
-      const text = this.queue.shift()!;
+      const item = this.queue.shift()!;
+      const text = item.text;
       
       let audioPath: string | null = null;
       if (this.engine === "fakeyou") {
@@ -257,29 +312,34 @@ export class Tts {
       // If stop() was called while downloading audio, don't play it.
       if (generation !== this.generation) break;
 
-      await new Promise<void>((resolve) => {
+      const result=await new Promise<TtsAcknowledgment>((resolve) => {
         // Never let two utterances overlap. Anything still playing is stale by
         // definition — one voice at a time is the whole contract of this class.
         if (this.current) {
           this.current.kill("SIGTERM");
           this.current = null;
         }
-        if (audioPath) {
-          this.current = spawn("/usr/bin/afplay", [audioPath]);
+        let child:TtsPlaybackProcess;
+        try{if (audioPath) {
+          child = (this.playback.spawn??spawn)("/usr/bin/afplay", [audioPath]);
         } else {
           // Give the line a delivery rather than reading it flat: pitch,
           // expressiveness, pace and real pauses chosen from what it says.
-          this.current = spawn("/usr/bin/say", ["-v", this.voice, withProsody(text)]);
-        }
+          child = (this.playback.spawn??spawn)("/usr/bin/say", ["-v", this.voice, withProsody(text)]);
+        }}catch{resolve({status:'failed'});return;}
+        this.current=child;
+        child.on('exit',(code:number|null,signal:string|null)=>resolve({status:
+          generation!==this.generation||signal?'interrupted':code===0?'completed':'failed'}));
+        child.on('error',()=>resolve({status:'failed'}));
         try {
           this.audioStartHook?.(text);
         } catch {
           /* logging must never break speech */
         }
-        this.current.on("exit", () => resolve());
-        this.current.on("error", () => resolve());
       });
+      if(generation!==this.generation)return;
       this.current = null;
+      this.finishAcknowledgment(item.ack,result);
     }
 
     // If stop() ran, it already reported that speech ended and a newer drain may
@@ -292,6 +352,7 @@ export class Tts {
 
   /** Cut speech off immediately — used when the user talks over Echo. */
   stop() {
+    this.finishAcknowledgment(this.acknowledgment,{status:'interrupted'});
     this.generation++;
     this.queue = [];
     this.stream?.cancel();
@@ -311,6 +372,6 @@ export class Tts {
   }
 
   isSpeaking() {
-    return this.speaking;
+    return this.speaking||!!this.acknowledgment||!!this.stream?.isSpeaking;
   }
 }

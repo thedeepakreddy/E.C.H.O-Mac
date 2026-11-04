@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {parseUniqueJson} from './manifest.mjs';
+assert.deepEqual(parseUniqueJson('{"scripts":{"one":"ok"},"array":[{"x":1}]}'),{scripts:{one:'ok'},array:[{x:1}]});
+assert.throws(()=>parseUniqueJson('{"scripts":{"one":"first","one":"hidden"}}'),/Duplicate.*scripts.one/);
+assert.throws(()=>parseUniqueJson('{"a":[{"x":1,"\\u0078":2}]}'),/Duplicate.*a\[0\].x/);
+assert.doesNotThrow(()=>parseUniqueJson('{"a":{"x":1},"b":{"x":2}}'));
+assert.throws(()=>parseUniqueJson('{"a":1,}'),/JSON/);
+const manifest=parseUniqueJson(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+assert(manifest.scripts.researchtest.includes('src/_researchtest.ts'),'Original overnight research suite must not be overwritten');
+assert(manifest.scripts.researchsourcestest.includes('scripts/research-test.mjs'),'Public-source research suite must retain its own discoverable entry');
+console.log('PASS unique manifest keys, escaped/nested duplicates and both research suites');

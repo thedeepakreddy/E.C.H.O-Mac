@@ -29,6 +29,11 @@ import { getAppPath } from "../utils/appPath.js";
 /** Never pruned: safety, memory and control-flow tools the model must always be able to reach. */
 /** Shared with the Claude brain, which keeps these loaded rather than deferred. */
 export const ROUTER_ALWAYS_INCLUDE = new Set([
+  'ask_app_question',
+  // Every provider's actual request must retain the approved app controller.
+  // Local-tool membership alone does not protect cloud pruning passes.
+  'open_app','open_url','frontmost_app','inspect_app','click_in_app','type_in_app',
+  'press_app_key','scroll_in_app','drag_in_app','set_app_value','move_echo_cursor','verify_app_state',
   // Keep creator follow-ups reachable even when they only say "tell me about it".
   "read_creator_project", "show_creator_project",
   "confirm_action", "undo_last", "list_undo", "remember", "recall", "forget",

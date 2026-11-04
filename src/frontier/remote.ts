@@ -20,6 +20,8 @@ import {
   Signalling, ConfirmRelay, normaliseCommand, type Sdp, type IceCandidate,
 } from "./remotesignal.js";
 import { moveMouseBy, clickHere, hotkey, scroll, typeText } from "../tools/computer-actions.js";
+import {withHumanComputerControl,humanComputerInputBlocked} from '../tools/human-control.js';
+import {outsideAgentContext} from '../agent-replay/context.js';
 
 /**
  * Watching a long job from your phone.
@@ -350,7 +352,7 @@ export function setStatusProvider(fn: StatusProvider) {
  * picked up by someone else while it is still signed in.
  */
 export type RemoteAction =
-  | {type:'control-bot';missionId:string;taskId:string;attempt:number;requestId:string;operation:'update'|'stop'|'revise';text?:string}
+  | {type:'control-bot';missionId:string;taskId:string;attempt:number;requestId:string;operation:'update'|'stop'|'revise'|'retry';text?:string}
   | {type:"run-bot";name:string;goal:string;requestId:string;botRevision:string;parentId?:string;agentIds?:string[]}
   | {type:"stop-bot";missionId:string}
   | { type: "switch-model"; provider: string }
@@ -368,7 +370,7 @@ export function setActionHandler(fn: ActionHandler) {
 /** Validate a phone's action against the allowlist; anything else is null. */
 export function parseRemoteAction(body: any): RemoteAction | null {
   const type = body?.type;
-  if(type==='control-bot'&&typeof body.missionId==='string'&&isBotRunId(body.missionId)&&typeof body.taskId==='string'&&/^[a-zA-Z0-9_.-]{1,64}$/.test(body.taskId)&&Number.isInteger(body.attempt)&&body.attempt>=1&&typeof body.requestId==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId)&&['update','stop','revise'].includes(body.operation)&&(body.operation==='stop'||typeof body.text==='string'&&body.text.trim()&&body.text.length<=16000))return {type,missionId:body.missionId,taskId:body.taskId,attempt:body.attempt,requestId:body.requestId,operation:body.operation,...(body.operation!=='stop'?{text:body.text}:{})};
+  if(type==='control-bot'&&typeof body.missionId==='string'&&isBotRunId(body.missionId)&&typeof body.taskId==='string'&&/^[a-zA-Z0-9_.-]{1,64}$/.test(body.taskId)&&Number.isInteger(body.attempt)&&body.attempt>=1&&typeof body.requestId==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId)&&['update','stop','revise','retry'].includes(body.operation)&&(['stop','retry'].includes(body.operation)||typeof body.text==='string'&&body.text.trim()&&body.text.length<=16000))return {type,missionId:body.missionId,taskId:body.taskId,attempt:body.attempt,requestId:body.requestId,operation:body.operation,...(!['stop','retry'].includes(body.operation)?{text:body.text}:{})};
   if(type==='run-bot' && typeof body.name==='string' && (body.name===TEAM_BOT_ID||/^[a-z][a-z0-9-]{0,23}$/.test(body.name)) && typeof body.goal==='string' && body.goal.trim() && body.goal.length<=16000 && typeof body.requestId==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.requestId) && typeof body.botRevision==='string' && /^[a-f0-9]{24}$/.test(body.botRevision) && (body.parentId===undefined||typeof body.parentId==='string'&&isBotRunId(body.parentId)) && (body.agentIds===undefined||body.name===TEAM_BOT_ID&&Array.isArray(body.agentIds)&&body.agentIds.length>0&&body.agentIds.length<=12&&body.agentIds.every((id:unknown)=>typeof id==='string'&&/^[a-z][a-z0-9-]{0,23}$/.test(id))))return {type,name:body.name,goal:body.goal,requestId:body.requestId,botRevision:body.botRevision,parentId:body.parentId,...(body.agentIds?{agentIds:[...new Set<string>(body.agentIds)]}:{})};
   if(type==='stop-bot' && typeof body.missionId==='string' && isBotRunId(body.missionId))return {type,missionId:body.missionId};
   if (type === "switch-model" && typeof body.provider === "string" && /^[a-z]{2,20}$/.test(body.provider)) {
@@ -402,6 +404,10 @@ export const MAX_TYPED = 500;
  */
 let pendingMove = { dx: 0, dy: 0 };
 let moving = false;
+/** Only called after the HTTP handler has authenticated an actual Phone input.
+ * A remote opened by an agent must not lend that old agent context to users.
+ */
+function phoneHumanInput<T>(action:()=>T|Promise<T>):Promise<T>{return outsideAgentContext(()=>withHumanComputerControl(action));}
 function queueMove(dx: number, dy: number): void {
   pendingMove.dx += dx;
   pendingMove.dy += dy;
@@ -411,7 +417,7 @@ function queueMove(dx: number, dy: number): void {
     while (pendingMove.dx || pendingMove.dy) {
       const { dx: x, dy: y } = pendingMove;
       pendingMove = { dx: 0, dy: 0 };
-      await moveMouseBy(x, y).catch(() => {});
+      try{await phoneHumanInput(()=>moveMouseBy(x,y));}catch{pendingMove={dx:0,dy:0};break;}
     }
     moving = false;
   })();
@@ -687,15 +693,16 @@ export async function startRemote(opts: {
     }
     if (route === "mouse") {
       if (req.method !== "POST") return deny();
+      if(humanComputerInputBlocked())return json({ok:false,reason:'Echo owns the desktop. Stop Echo before using Phone controls.'},409);
       return readJsonBody(req, async (body) => {
         try {
           const action = body?.action;
           const step = (n: unknown) => Math.max(-400, Math.min(400, Number(n) || 0));
           if (action === "move") queueMove(step(body.dx), step(body.dy));
-          else if (action === "click") await clickHere("left");
-          else if (action === "rclick") await clickHere("right");
-          else if (action === "dclick") await clickHere("double");
-          else if (action === "scroll-up" || action === "scroll-down") await scroll(action === "scroll-up" ? "up" : "down", 3);
+          else if (action === "click") await phoneHumanInput(()=>clickHere("left"));
+          else if (action === "rclick") await phoneHumanInput(()=>clickHere("right"));
+          else if (action === "dclick") await phoneHumanInput(()=>clickHere("double"));
+          else if (action === "scroll-up" || action === "scroll-down") await phoneHumanInput(()=>scroll(action === "scroll-up" ? "up" : "down", 3));
           // The arrow pad of the old page, kept so a stale tab keeps working.
           else if (action === "up") queueMove(0, -40);
           else if (action === "down") queueMove(0, 40);
@@ -704,27 +711,28 @@ export async function startRemote(opts: {
           else return json({ ok: false }, 400);
           return json({ ok: true });
         } catch {
-          return json({ ok: false }, 500);
+          return humanComputerInputBlocked()?json({ok:false,reason:'Echo owns the desktop. Stop Echo before using Phone controls.'},409):json({ok:false,reason:'Mouse input could not be delivered to your Mac.'},500);
         }
       });
     }
     if (route === "keys") {
       if (req.method !== "POST") return deny();
+      if(humanComputerInputBlocked())return json({ok:false,reason:'Echo owns the desktop. Stop Echo before typing from Phone.'},409);
       return readJsonBody(req, async (body) => {
         try {
           if (typeof body?.text === "string") {
             const text = body.text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
             if (!text || text.length > MAX_TYPED) return json({ ok: false, reason: `Type 1–${MAX_TYPED} characters.` }, 400);
-            await typeText(text);
+            await phoneHumanInput(()=>typeText(text));
             record(`Typed ${text.length} characters on the Mac from your phone`, "go");
             return json({ ok: true });
           }
           const chord = REMOTE_KEYS[String(body?.key ?? "")];
           if (!chord) return json({ ok: false }, 400);
-          await hotkey(chord[0], chord[1]);
+          await phoneHumanInput(()=>hotkey(chord[0], chord[1]));
           return json({ ok: true });
         } catch {
-          return json({ ok: false }, 500);
+          return humanComputerInputBlocked()?json({ok:false,reason:'Echo owns the desktop. Stop Echo before typing from Phone.'},409):json({ok:false,reason:'Keyboard input could not be delivered to your Mac.'},500);
         }
       });
     }
