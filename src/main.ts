@@ -1569,7 +1569,10 @@ function brainHandlers(): BrainHandlers {
             remoteRecord(`Action: ${info.summary}`, "action");
             send("message", { kind: "action", text: info.summary });
         },
-        'progress': (text: string) => { send('message', { kind: 'action', text }); controlTelemetry.observe('notice', { level: 'info', text }); publishControlUpdate(); },
+        // `send` already files the line in the control panel's activity feed and
+        // schedules its refresh (observeControlEvent). Filing it a second time as
+        // a notice put every progress update in the feed twice.
+        'progress': (text: string) => { send('message', { kind: 'action', text }); },
         "risk": (r: {
             tool: string;
             tier: string;

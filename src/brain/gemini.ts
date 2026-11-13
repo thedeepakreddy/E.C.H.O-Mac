@@ -207,6 +207,11 @@ export class GeminiBrain extends Brain {
   private systemPrompt = JARVIS_PERSONA;
   private externalCatalog: ExternalToolCatalog | null = null;
   private readonly modelHealth:ReturnType<typeof scopedModelHealth>;
+  /**
+   * The model that answered the last request, for saying so when it changes.
+   * Starts as the configured one, so the ordinary case announces nothing.
+   */
+  private servingModel:string;
 
   constructor(private cfg: JarvisConfig, apiKey: string, private readonly limits: BrainExecutionLimits = {}) {
     super();
@@ -214,6 +219,7 @@ export class GeminiBrain extends Brain {
       environment:cfg.gemini.apiKeyEnv,endpoint:'generativelanguage:v1beta'});
     this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
     this.ai = new GoogleGenAI({ apiKey });
+    this.servingModel = cfg.gemini.model;
     this.memory.configure(cfg.context);
     // A restricted agent (a custom fleet member — see frontier/fleet.ts) never
     // sees a tool outside its allowlist in the first place; per-turn pruning
@@ -623,9 +629,21 @@ export class GeminiBrain extends Brain {
                   geminiFallbackReason(error) !== null && nextUsableModel(attempt + 1) < FALLBACK_MODELS.length,
               }
             );
-            // If it succeeded, persist the successful model for the next turn
-            this.cfg.gemini.model = currentModel;
-            this.emitEvent('progress',`Using Gemini model ${currentModel}.`);
+            // The configured model is the user's choice and is left alone.
+            // This used to overwrite it with whichever fallback answered, so
+            // one brief 503 moved the whole session to a lesser model until
+            // restart — and every agent built from the same live config with
+            // it. `successfulModelIndex` keeps this turn on what works, and
+            // model health keeps the next turn off what does not; once the
+            // chosen model's pause has passed it is simply asked again.
+            this.modelHealth.noteSuccess(currentModel);
+            // Said when it changes, not on every request: a forty-step task
+            // otherwise wrote the same sentence into the activity feed forty
+            // times and pushed the actual work out of it.
+            if (currentModel !== this.servingModel) {
+              this.servingModel = currentModel;
+              this.emitEvent('progress',`Using Gemini model ${currentModel}.`);
+            }
             successfulModelIndex = attempt;
             break;
           } catch (err: any) {
