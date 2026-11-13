@@ -721,7 +721,11 @@ function createWindow() {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  win.loadFile(join(__dirname, "..", "renderer", "index.html"));
+  win.loadFile(join(__dirname, "..", "renderer", "index.html")).catch((error) => {
+    // Without the HUD there is no reactor and no visible state at all, so say
+    // exactly what failed rather than leaving an unexplained rejection.
+    console.error("[jarvis] the HUD failed to load:", (error as any)?.message ?? error);
+  });
 
   win.on("closed", () => {
     win = null;
@@ -1380,6 +1384,10 @@ function wireConfirmations() {
       answered.then((approved) => {
         if (approved) confirmations.settle(id, true, "approved from phone");
         else confirmations.settle(id, false, "denied from phone");
+      }).catch((error) => {
+        // The relay failing is not an answer. The local prompt is still open
+        // and still decides; only the phone's copy of the question is lost.
+        console.error("[confirm] phone mirror failed:", (error as any)?.message ?? error);
       });
     } catch {
       /* the phone mirror must never break the local confirmation */
