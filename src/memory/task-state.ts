@@ -138,6 +138,16 @@ export class TaskCoordinator {
     return copy(state);
   }
   get(taskId: string): TaskState | null { this.load(); const state = this.states.get(taskId); return state ? copy(state) : null; }
+  /**
+   * Tasks that still claim to be in flight but that nothing has touched since
+   * `before`. Ids only — a boot-time scan must not clone every saved trace.
+   */
+  untouchedSince(before: number, statuses: ReadonlyArray<TaskState["status"]>): string[] {
+    this.load();
+    return [...this.states.values()]
+      .filter(state => statuses.includes(state.status) && !(Date.parse(state.updatedAt) >= before))
+      .map(state => state.taskId);
+  }
   list(): TaskState[] { this.load(); return [...this.states.values()].map(copy); }
   /** Bounded owner dashboard metadata; never clone payloads, calls or screenshots per poll. */
   overview(limit=40) {

@@ -26,7 +26,7 @@ const { MemoryService, memoryService } = await import("./memory/service.js");
 const { routeMemory } = await import("./memory/router.js");
 const { executeMemoryCommand, isMemoryCommand } = await import("./memory/commands.js");
 const { forgetEverywhere } = await import("./memory/deletion.js");
-const { consolidateTask, noteToolOutcome, recordProcedure, noteProcedureRun, recordTaskStarted } = await import("./memory/consolidate.js");
+const { consolidateTask, noteToolOutcome, recordProcedure, noteProcedureRun, recordTaskStarted, reconcileInterruptedTasks, INTERRUPTED_TASK_SUMMARY } = await import("./memory/consolidate.js");
 const { taskCoordinator } = await import("./memory/task-state.js");
 const { eligible } = await import("./memory/policy.js");
 const { RecordingBrain } = await import("./agent-replay/runtime.js");
@@ -514,6 +514,60 @@ console.log("  the privacy switches do what they say");
   priv.begin("what is the staging server called", { scope, privateMode: true });
   ok(!priv.packet().includes("harbour"), "and a private task recalls nothing whatever the switches say");
   for (const c of [on, off, localBrain, disabled, priv]) c.close();
+}
+
+// --------------------------------------------- what a dead process left ---
+//
+// A crash mid-task leaves the task `running` and its working record `active`
+// with nothing to close either. The startup sweep closes exactly those, and
+// nothing that this process resumed or that genuinely finished its turn.
+console.log("  a restart closes what the last process left open");
+{
+  const scope = { projectId: "restart" };
+  // Earlier sections of this file leave tasks open on purpose. Close those
+  // first, so the counts below are about this section's fixtures alone.
+  reconcileInterruptedTasks({ startedAt: Date.now() + 1 });
+  const start = (taskId: string, goal: string) => {
+    taskCoordinator.create({ taskId, ownerActorId: "echo", goal, scope });
+    recordTaskStarted({ taskId, scope, goal, actorId: "echo" });
+  };
+  start("crashed-running", "export the quarterly figures");
+  start("crashed-waiting", "which calendar should this go in");
+  taskCoordinator.finish("crashed-waiting", { status: "waiting", summary: "Which calendar?" });
+  start("ended-unproved", "rename the draft");
+  taskCoordinator.finish("ended-unproved", { status: "verifying" });
+  // Everything above belongs to "the previous process": the sweep's clock
+  // starts after it. What follows was started, or resumed, by this one.
+  await new Promise((r) => setTimeout(r, 15));
+  const startedAt = Date.now();
+  start("resumed-after-restart", "continue the migration");
+  start("owned-by-this-process", "summarise the meeting");
+  // An orphaned working record whose task state no longer exists at all.
+  recordTaskStarted({ taskId: "state-lost", scope, goal: "a task whose state was lost", actorId: "echo" });
+
+  const closed = reconcileInterruptedTasks({ startedAt, isLive: (id) => id === "owned-by-this-process" });
+  const state = (id: string) => taskCoordinator.get(id)!;
+  const working = (id: string) => memoryService.get(`task-${id}`)!;
+
+  ok(state("crashed-running").status === "cancelled" && state("crashed-running").summary === INTERRUPTED_TASK_SUMMARY,
+    "a task the dead process left running is closed, and says why");
+  ok(state("crashed-waiting").status === "cancelled", "so is one left waiting on a question nobody can now answer");
+  ok(state("crashed-running").generation === 1, "its generation is bumped, so a late result from the old run is refused");
+  ok(working("crashed-running").status === "superseded" && working("crashed-waiting").status === "superseded",
+    "and their working records stop reading as live");
+  ok(state("ended-unproved").status === "verifying", "a task that finished its turn unverified keeps its own status as history");
+  ok(working("ended-unproved").status === "superseded", "but its working record is closed: it is not in flight either");
+  ok(state("resumed-after-restart").status === "running" && working("resumed-after-restart").status === "active",
+    "a task this process started or resumed is left alone");
+  ok(state("owned-by-this-process").status === "running" && working("owned-by-this-process").status === "active",
+    "and so is one the caller says it owns");
+  ok(working("state-lost").status === "superseded", "a working record with no task state behind it is closed too");
+  ok(closed.tasks === 2 && closed.working === 4, `the sweep reports what it closed (${closed.tasks} tasks, ${closed.working} records)`);
+
+  const again = reconcileInterruptedTasks({ startedAt, isLive: (id) => id === "owned-by-this-process" });
+  ok(again.tasks === 0 && again.working === 0, "running it again closes nothing more");
+  ok(!memoryService.list(undefined, { layer: "episodic", includeInactive: true }).some((m) => /crashed-|state-lost/.test(m.key ?? "")),
+    "no episode is invented for a task nobody finished");
 }
 
 rmSync(root, { recursive: true, force: true });

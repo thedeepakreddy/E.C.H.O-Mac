@@ -1,5 +1,6 @@
 import {companionProjection,companionMemory,saveCompanionMemory,forgetCompanionMemory,phoneUpdateIntent,type CompanionWork} from './control-companion.js';
 import {taskCoordinator} from './memory/task-state.js';
+import {reconcileInterruptedTasks} from './memory/consolidate.js';
 import {PhoneUpdates} from './frontier/phone-updates.js';
 import {phoneUpdateInventory,sendPhoneUpdate} from './frontier/remote.js';
 import {answerBuildQuestion,startProjectBuild,projectIsBuilding} from './coding/dialogue.js';
@@ -2985,6 +2986,20 @@ app.whenReady().then(async () => {
       supervisor.reconcile();
       if (closed.tasks) {
         console.warn(`[echo:recovery] closed ${closed.tasks} abandoned Agent Task(s) across ${closed.missions} mission(s)`);
+      }
+      // The same question for ordinary tasks and their working memory. Last,
+      // so everything recovered or reconciled above has already been written
+      // to by this process and is recognised as its own.
+      try {
+        const interrupted = reconcileInterruptedTasks({
+          startedAt: Date.now() - Math.round(process.uptime() * 1000),
+          isLive: (taskId) => taskId === brain?.currentTaskState?.taskId,
+        });
+        if (interrupted.tasks || interrupted.working) {
+          console.warn(`[echo:recovery] closed ${interrupted.tasks} task(s) and ${interrupted.working} working record(s) left open by the previous run`);
+        }
+      } catch (error) {
+        console.error("[echo:recovery] could not reconcile interrupted tasks:", (error as any)?.message ?? error);
       }
     }
     
