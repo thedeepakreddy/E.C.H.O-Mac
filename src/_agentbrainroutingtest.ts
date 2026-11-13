@@ -23,10 +23,29 @@ try{
  await TOOLS.find(t=>t.name==='run_agent_mission')!.handler({goal:'Fixture',tasks:[{id:'review',profile:'review',goal:'Read facts',dependsOn:[],acceptanceCriteria:[],lane:'knowledge',maxIterations:2,maxRecoveryAttempts:0,timeoutMs:1000}]} as any);
 }finally{swarm.spawn=spawn;swarm.submitMission=submit;}
 console.log('PASS chat-tool agent launches inherit Echo’s live brain configuration.');
-const interval=global.setInterval,log=console.error,crons=(global as any).__activeCrons;let tick:()=>void=()=>{},logged='';
+// A scheduled run is an ordinary swarm Mission built on the brain selected when
+// it fires. With that brain's key missing, the run fails and says why; the
+// scheduler itself must carry on. (This used to intercept a bare setInterval.)
+const {mkdtempSync,rmSync}=await import('node:fs');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+const scheduleRoot=mkdtempSync(join(tmpdir(),'echo-routing-schedules-'));
+const savedRoots={data:process.env.ECHO_DATA_ROOT,memory:process.env.ECHO_MEMORY_ROOT};
+process.env.ECHO_DATA_ROOT=scheduleRoot;process.env.ECHO_MEMORY_ROOT=join(scheduleRoot,'memory');
+const {scheduler,_resetSchedulerForTests}=await import('./frontier/schedules.js');
+const log=console.error,realNow=Date.now;let logged='';
 try{
- global.setInterval=((fn:any)=>{tick=fn;return 42;}) as any;console.error=(...args)=>{logged=args.join(' ');};
- await TOOLS.find(t=>t.name==='schedule_task')!.handler({intervalSeconds:10,goal:'Read facts'} as any);
- assert.doesNotThrow(()=>tick(),'An unavailable active brain must not crash a scheduled launch');assert.match(logged,/ECHO_ROUTING_TEST_ACTIVE_BRAIN/);
-}finally{global.setInterval=interval;console.error=log;(global as any).__activeCrons=crons;}
+ _resetSchedulerForTests();
+ const made=await TOOLS.find(t=>t.name==='schedule_task')!.handler({intervalSeconds:600,goal:'Read facts'} as any);
+ assert.equal(made.status,'success',made.text);
+ const schedules=await scheduler();
+ console.error=(...args)=>{logged+=args.join(' ')+'\n';};
+ Date.now=()=>realNow()+601_000;
+ assert.doesNotThrow(()=>schedules.runDue(),'An unavailable active brain must not crash a scheduled launch');
+ assert.match(logged,/ECHO_ROUTING_TEST_ACTIVE_BRAIN/);
+ assert.match(schedules.list()[0].lastOutcome??'',/^failed: .*ECHO_ROUTING_TEST_ACTIVE_BRAIN/,'The schedule itself says why its run did not start');
+ assert.equal(swarm.count(),0,'A run that could not be built leaves no agent behind');
+}finally{
+ Date.now=realNow;console.error=log;(await scheduler()).stop();_resetSchedulerForTests();
+ for(const [key,value] of [['ECHO_DATA_ROOT',savedRoots.data],['ECHO_MEMORY_ROOT',savedRoots.memory]] as const){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+ rmSync(scheduleRoot,{recursive:true,force:true});
+}
 console.log('PASS scheduled agents use the live brain and report unavailable credentials without crashing.');

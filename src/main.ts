@@ -1,6 +1,7 @@
 import {companionProjection,companionMemory,saveCompanionMemory,forgetCompanionMemory,phoneUpdateIntent,type CompanionWork} from './control-companion.js';
 import {taskCoordinator} from './memory/task-state.js';
 import {reconcileInterruptedTasks} from './memory/consolidate.js';
+import {scheduler} from './frontier/schedules.js';
 import {PhoneUpdates} from './frontier/phone-updates.js';
 import {phoneUpdateInventory,sendPhoneUpdate} from './frontier/remote.js';
 import {answerBuildQuestion,startProjectBuild,projectIsBuilding} from './coding/dialogue.js';
@@ -3010,6 +3011,15 @@ app.whenReady().then(async () => {
         console.error("[echo:recovery] could not reconcile interrupted tasks:", (error as any)?.message ?? error);
       }
     }
+
+    // Recurring tasks are saved, so "every morning at nine" outlives a restart.
+    // Each run is built on the brain selected when it fires, like every agent.
+    void scheduler().then((schedules) => {
+      if (shuttingDown) return;
+      schedules.start(() => ({ makeBrain: makeFleetBrain() }));
+      const restored = schedules.list().length;
+      if (restored) console.log(`[scheduler] restored ${restored} scheduled task(s)`);
+    }).catch((error) => console.error("[scheduler] could not restore scheduled tasks:", (error as any)?.message ?? error));
     
     // Futuristic Features: Background Tasks
     if (cfg.helpers?.screenHistory === true) {
@@ -3140,6 +3150,9 @@ async function shutdown(): Promise<void> {
   await shutdownStep('speech recognition', () => stopSttServer(), 3000);
   await shutdownStep('audio player', () => player?.dispose(), 3000);
   await shutdownStep('task reports', () => closeTaskReports(), 3000);
+  // Before the agents close: a schedule firing mid-shutdown would start a run
+  // the very next step has to cancel.
+  await shutdownStep('scheduled tasks', async () => (await scheduler()).stop(), 3000);
   await Promise.all([
     shutdownStep('background agents', () => swarm.close()),
     shutdownStep('supervised tasks', () => supervisor.close()),

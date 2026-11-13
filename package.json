@@ -227,6 +227,7 @@
     "embedder": "node scripts/fetch_embedder.mjs",
     "cursorpathtest": "esbuild src/_cursorpathtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_cursorpathtest.js --log-level=error && node dist/_cursorpathtest.js",
     "researchsourcestest": "node --test scripts/research-test.mjs scripts/image-search-test.mjs",
+    "schedulestest": "esbuild src/_schedulestest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_schedulestest.js --log-level=error && ECHO_MCP=0 node dist/_schedulestest.js",
     "localllmtest": "esbuild src/_localllmtest.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/_localllmtest.js --log-level=error && ECHO_MCP=0 node dist/_localllmtest.js"
   },
   "author": "",

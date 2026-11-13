@@ -489,38 +489,62 @@ export const AGENT_TOOLS: ToolDef[] = [
   },
   {
     name: "schedule_task",
-    description: "Schedule a task to run automatically in the future by spawning a Clone. Useful for recurring checks (cron).",
+    description:
+      "Run a task again and again on a schedule, in the background: \"check the build every ten minutes\", \"every morning at nine tell me what is on my calendar\". Give EITHER intervalSeconds (at least 60) OR dailyAt as a 24-hour local HH:MM. Each run is a background agent whose result is saved and readable with check_agents. Schedules survive a restart. Use list_scheduled_tasks to see them and cancel_scheduled_task to stop one. For something that should happen once, do it now or use the other agent tools instead.",
     schema: {
-      intervalSeconds: z.number().describe("The number of seconds between each run."),
-      goal: z.string().describe("The instruction to give the Clone when it wakes up.")
+      goal: z.string().min(1).describe("What the agent should do on every run, written so it makes sense with no other context."),
+      intervalSeconds: z.number().optional().describe("Seconds between runs, 60 or more. Omit when using dailyAt."),
+      dailyAt: z.string().optional().describe("Local time of day for a once-a-day run, 24-hour HH:MM, e.g. 09:00. Omit when using intervalSeconds."),
     },
     readOnly: false,
     handler: async (a) => {
-      const g = global as any;
-      if (!g.__activeCrons) g.__activeCrons = new Map<number, NodeJS.Timeout>();
-      
       const { makeFleetBrain } = await import("../../frontier/fleet-brain.js");
       const { activeConfig } = await import("../../config.js");
-
-      const cronId = Date.now();
-      const intervalMs = Math.max(1000, a.intervalSeconds * 1000);
-      
-      const timer = setInterval(() => {
-        const identity = {
-          id: `scheduled_${cronId}_${Date.now()}`,
-          name: `Echo Scheduled ${cronId}`,
-          kind: "scheduled" as const,
+      const { scheduler, describeCadence, MIN_INTERVAL_SECONDS } = await import("../../frontier/schedules.js");
+      const schedules = await scheduler();
+      // The live config, read when each run starts: a schedule made on one
+      // brain follows Echo to whichever brain is selected when it fires.
+      schedules.start(() => ({ makeBrain: makeFleetBrain(activeConfig(appRoot())) }));
+      try {
+        const created = schedules.add({ goal: a.goal, intervalSeconds: a.intervalSeconds, dailyAt: a.dailyAt, scope: { ...(await memoryScope()) } });
+        const raised = typeof a.intervalSeconds === "number" && a.intervalSeconds < MIN_INTERVAL_SECONDS
+          ? ` The shortest interval is ${MIN_INTERVAL_SECONDS} seconds, so that is what it uses.` : "";
+        return {
+          text: `Scheduled ${created.id}: ${describeCadence(created)}, first run at ${new Date(created.nextRunAt).toLocaleString()}.${raised} It keeps running after a restart until cancelled with cancel_scheduled_task.`,
+          status: "success",
+          data: { schedule: created },
         };
-        try {
-          const subBrain = makeFleetBrain(activeConfig(appRoot()))(identity);
-          subBrain.send(`[SYSTEM: CRON TRIGGER] Your recurring task is: ${a.goal}. When finished, remember to save results.`);
-        } catch(error) {
-          console.error('[scheduler] Agent could not start on Echo’s active brain:', error instanceof Error ? error.message : 'Brain unavailable.');
-        }
-      }, intervalMs);
-      
-      g.__activeCrons.set(cronId, timer);
-      return { text: `Task scheduled successfully with Cron ID: ${cronId}.` };
+      } catch (error: any) {
+        return { text: `Not scheduled: ${error?.message ?? error}`, status: "failed" };
+      }
+    }
+  },
+  {
+    name: "list_scheduled_tasks",
+    description: "List the recurring tasks set up with schedule_task: what each does, how often, when it next runs, and what its last run came to. Use this when the user asks what is scheduled, or before cancelling one.",
+    schema: {},
+    readOnly: true,
+    handler: async () => {
+      const { scheduler, describeCadence } = await import("../../frontier/schedules.js");
+      const all = (await scheduler()).list();
+      if (!all.length) return { text: "Nothing is scheduled.", data: { schedules: [] } };
+      const lines = all.map((s) =>
+        `${s.id} — ${describeCadence(s)} — next ${new Date(s.nextRunAt).toLocaleString()} — ${s.runs} run(s)` +
+        `${s.lastOutcome ? ` — last: ${s.lastOutcome}` : ""}\n    ${s.goal.slice(0, 300)}`);
+      return { text: lines.join("\n"), data: { schedules: all } };
+    }
+  },
+  {
+    name: "cancel_scheduled_task",
+    description: "Stop a recurring task for good, by the id list_scheduled_tasks shows (e.g. sched-1a2b3c4d). A run already in progress is left to finish; use cancel_agent_mission to stop that too.",
+    schema: { id: z.string().min(1).describe("The schedule id, from list_scheduled_tasks.") },
+    readOnly: false,
+    handler: async (a) => {
+      const { scheduler, describeCadence } = await import("../../frontier/schedules.js");
+      const removed = (await scheduler()).cancel(String(a.id).trim());
+      return removed
+        ? { text: `Cancelled ${removed.id} (${describeCadence(removed)}): ${removed.goal.slice(0, 200)}`, status: "success" }
+        : { text: `There is no scheduled task with id "${a.id}". list_scheduled_tasks shows the ones that exist.`, status: "failed" };
     }
   },
   {
