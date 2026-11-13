@@ -11,6 +11,29 @@ export const DEFAULT_TEAM = ['research','plan','review'];
 export const MAX_GOAL = 16000;
 /** Saved results keep the agent's full output; this only bounds a runaway payload. */
 const MAX_RESULT_TEXT = 200000;
+/**
+ * Wall time for one agent.
+ *
+ * A team's ten minutes used to be divided by its size: 150 seconds each for
+ * the default team of four, 85 for all six specialists and Lead. Research is
+ * told to read primary sources and cross-check them at high reasoning, and
+ * cannot do that in a minute and a half — it timed out, the timeout was
+ * recorded as a failure, and a failure blocks everything downstream. Adding a
+ * specialist made every other one more likely to fail.
+ *
+ * Each agent now gets a budget sized for its own job, whatever the team's
+ * size. A specialist's work does not shrink because it has colleagues.
+ */
+export const BOT_BUDGET_MS = {
+  /** A specialist working alone. */
+  solo: 10 * 60_000,
+  /** A specialist reporting to a team: slightly narrower, since Lead combines. */
+  specialist: 8 * 60_000,
+  /** Lead reads finished reports and writes one answer; it gathers nothing itself. */
+  lead: 6 * 60_000,
+  /** The independent Review step after a single specialist. */
+  verify: 5 * 60_000,
+} as const;
 /** Every bot task: the full deliverable is saved, and the agent judges it honestly. */
 const DELIVERABLE_CRITERION = 'Put the COMPLETE deliverable in a text artifact (label it with what it is); keep summary to the outcome. End the deliverable with a Quality check and one Verdict line (PASS, PASS WITH MINOR ISSUES, PARTIAL PASS, FAIL or BLOCKED BY MISSING INFORMATION). Submit status completed only if that verdict is PASS or PASS WITH MINOR ISSUES and verificationRefs hold real evidence (URLs or tool results you read); otherwise submit partial or blocked and list what remains.';
 const hash = (value:unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -53,7 +76,7 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
     if(!result.artifacts.some(a=>a.label==='Independent review'))result.artifacts.push({kind:'text',label:'Independent review',value:text.slice(0,MAX_RESULT_TEXT)});
     if(!(verdict==='PASS'||verdict==='PASS WITH MINOR ISSUES')){const line=`Independent review: ${verdict??check.status} · ${check.summary.split('\n')[0].slice(0,300)}`;if(!result.blockers.includes(line))result.blockers.push(line);}}
    const compiler=m.tasks.lead;
-   const reportRetry=team&&compiler?.status==='failed'&&Object.values(m.tasks).every(t=>t===compiler||t.status==='completed'&&!!t.result)?{taskId:compiler.id,attempt:compiler.attempt??1}:undefined;
+   const reportRetry=team&&compiler?.status==='failed'&&Object.values(m.tasks).every(t=>t===compiler||(t.status==='completed'||compiler.usePartialDependencies===true&&t.status==='partial')&&!!t.result)?{taskId:compiler.id,attempt:compiler.attempt??1}:undefined;
    return {id:m.id,botId:team?TEAM_BOT_ID:String(m.scope.botId??ids[0]??''),botName:team?'Team of specialists':String(m.scope.botName??getFleetMember(ids[0])?.name??ids[0]??'Specialist'),agentIds:ids.filter(id=>id!=='lead'),goal:m.goal,status:m.status==='running'&&!host.isMissionLive(m.id)?'interrupted':m.status,createdAt:m.createdAt,updatedAt:m.updatedAt,result,reportRetry,steps:Object.values(m.tasks).map(t=>({id:t.id,name:t.actorName??getFleetMember(t.profile??'')?.name??t.profile??t.id,goal:t.goal,status:t.status,result:bounded(t.result)})),live:host.isMissionLive(m.id)};
   });
   for(const job of jobs){const mission=host.getMission(job.id);if(!mission)continue;for(const step of job.steps){const task=mission.tasks[step.id];if(!task)continue;Object.assign(step,{name:task.profile==='lead'?'Echo':step.name,profile:task.profile,attempt:task.attempt??1,commands:task.updates??[],dependsOn:task.dependsOn??[],activity:task.activity,draft:task.draft,updateSupported:host.taskControlSupported(mission.id,task.id)});}}
@@ -86,10 +109,14 @@ export function createMacBots(host:Host,deps:()=>SwarmDeps,scope:()=>Record<stri
   if(parent?.status==='running')return {ok:false,message:'Wait for that task to finish, or stop it before following up.'};
   const history=toProviderMessages({guidance:PROVENANCE_GUIDANCE,messages:parent?[{role:'user',content:parent.goal},{role:'assistant',content:JSON.stringify({status:parent.status,result:parent.result,steps:Object.values(parent.tasks).map(t=>t.result??{status:t.status})}).slice(0,16000)}]:[]});
   const tasks:AgentTaskSpec[]=taskIds.map(profile=>{
-   const candidates=profile==='lead'?ids:profile==='review'?ids.filter(p=>p!=='review'):profile==='write'?ids.filter(p=>['research','analyse','plan'].includes(p)):profile==='plan'?ids.filter(p=>['research','analyse'].includes(p)):[];
-   return {id:profile,goal,profile,runtime:'openbot',botRevision:botRevision(getFleetMember(profile)!),readOnly:true,dependsOn:team?candidates:[],lane:'knowledge',acceptanceCriteria:[team?'Use reading tools to prepare your role’s report. Do not perform external changes. Cite evidence and report blockers. For current research use search_research and read_browser_page under your grants, cite actual retrieved sources and name specific access gaps. Use readable Markdown; retain source/author/license credits for relevant pictures from image_search.':'Deliver the requested background report with evidence. Use only granted reads; desktop actions and external writes must be reported as remaining blocked steps for Echo, never performed or claimed complete. For current research use search_research and read_browser_page under your grants; cite retrieved sources, not guessed trends. Use readable Markdown and, when helpful for public research, image_search with credited relevant illustrations.',DELIVERABLE_CRITERION],budget:{timeoutMs:team?Math.floor(10*60_000/taskIds.length):10*60_000,maxIterations:40,maxRecoveryAttempts:2}};
+   // Verify audits the sources behind the other reports, so it needs those
+   // reports. It used to have no dependencies at all: in a team it started
+   // beside Research with nothing but the goal, and audited nothing. Review
+   // still comes after it (everything but itself), so it can weigh the audit.
+   const candidates=profile==='lead'?ids:profile==='review'?ids.filter(p=>p!=='review'):profile==='verify'?ids.filter(p=>p!=='verify'&&p!=='review'):profile==='write'?ids.filter(p=>['research','analyse','plan'].includes(p)):profile==='plan'?ids.filter(p=>['research','analyse'].includes(p)):[];
+   return {id:profile,goal,profile,runtime:'openbot',botRevision:botRevision(getFleetMember(profile)!),readOnly:true,dependsOn:team?candidates:[],usePartialDependencies:team,lane:'knowledge',acceptanceCriteria:[team?'Use reading tools to prepare your role’s report. Do not perform external changes. Cite evidence and report blockers. For current research use search_research and read_browser_page under your grants, cite actual retrieved sources and name specific access gaps. Use readable Markdown; retain source/author/license credits for relevant pictures from image_search.':'Deliver the requested background report with evidence. Use only granted reads; desktop actions and external writes must be reported as remaining blocked steps for Echo, never performed or claimed complete. For current research use search_research and read_browser_page under your grants; cite retrieved sources, not guessed trends. Use readable Markdown and, when helpful for public research, image_search with credited relevant illustrations.',DELIVERABLE_CRITERION],budget:{timeoutMs:!team?BOT_BUDGET_MS.solo:profile==='lead'?BOT_BUDGET_MS.lead:BOT_BUDGET_MS.specialist,maxIterations:40,maxRecoveryAttempts:2}};
   });
-  if(verify&&!team&&VERIFIED_ROLES.has(b.name)&&getFleetMember('review'))tasks.push({id:VERIFY_TASK,goal:`Independently verify the ${getFleetMember(b.name)!.name} deliverable for this task: ${goal}`,profile:'review',runtime:'openbot',botRevision:botRevision(getFleetMember('review')!),readOnly:true,dependsOn:[b.name],lane:'knowledge',acceptanceCriteria:[VERIFY_CRITERION,DELIVERABLE_CRITERION],budget:{timeoutMs:5*60_000,maxIterations:25,maxRecoveryAttempts:1}});
+  if(verify&&!team&&VERIFIED_ROLES.has(b.name)&&getFleetMember('review'))tasks.push({id:VERIFY_TASK,goal:`Independently verify the ${getFleetMember(b.name)!.name} deliverable for this task: ${goal}`,profile:'review',runtime:'openbot',botRevision:botRevision(getFleetMember('review')!),readOnly:true,dependsOn:[b.name],lane:'knowledge',acceptanceCriteria:[VERIFY_CRITERION,DELIVERABLE_CRITERION],budget:{timeoutMs:BOT_BUDGET_MS.verify,maxIterations:25,maxRecoveryAttempts:1}});
   const submitted=host.submitMission({id,goal,scope:{...currentScope,echoBot:true,echoTeam:team,botId:b.name,botName:team?'Team of specialists':getFleetMember(b.name)!.name,botRevision:b.botRevision,botRequestHash:requestHash,botParentId:b.parentId??null,botContext:history},tasks},deps());
   return submitted.ok?{ok:true,message:team?'Team task started. Specialists report first; Lead combines the results.':`${getFleetMember(b.name)!.name} started.`,data:{missionId:submitted.missionId,repeated:false}}:{ok:false,message:submitted.reason??'The task could not start.'};
  }
