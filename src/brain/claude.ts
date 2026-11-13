@@ -109,6 +109,18 @@ export class ClaudeBrain extends Brain {
   private started = false;
   private memory = new ProviderMemoryContext("claude");
   private sessionGeneration = 0;
+  /**
+   * User messages handed to the current SDK session that have not yet had
+   * their `result`. Greater than zero when the stream ends means a turn was in
+   * flight and was cut off; zero means the session simply went away while idle.
+   *
+   * This replaces a `sawResult` flag that was set by the first result of a
+   * session and never cleared. A stream that died during any LATER turn of the
+   * same session therefore looked like "a result was seen", so nothing was
+   * said and the run closed as `unknown_fallthrough` instead of
+   * `stream_closed` — the one reason that is supposed to mean a loop bug.
+   */
+  private turnsAwaitingResult = 0;
 
   constructor(private cfg: JarvisConfig, private readonly limits: BrainExecutionLimits = {}) {
     super();
@@ -328,11 +340,16 @@ export class ClaudeBrain extends Brain {
   }
 
   private async consume(generation: number) {
-    let sawResult = false;
+    // `resetSession()` hands the conversation to a new SDK session and bumps
+    // the generation. From then on this consumer is only draining a stream
+    // that was closed on purpose, while `this.log()` and `emitEvent` already
+    // resolve to the turn that REPLACED it. It must not speak, record an exit,
+    // or reset session state on that turn's behalf.
+    const superseded = () => generation !== this.sessionGeneration;
     try {
       this.log()?.enterState("awaiting_llm", `claude:${this.cfg.claude.model}`);
       for await (const msg of this.q as AsyncIterable<any>) {
-        if (generation !== this.sessionGeneration) return;
+        if (superseded()) return;
         if (msg.type === "stream_event") {
           // Only the top-level reply is spoken; a subagent's stream is not.
           if (msg.parent_tool_use_id) continue;
@@ -385,7 +402,7 @@ export class ClaudeBrain extends Brain {
           log?.enterState(sawTool ? "awaiting_tool" : "awaiting_llm", toolNames[0] ?? `claude:${this.cfg.claude.model}`);
           this.emitEvent("status", sawTool ? "acting" : "thinking");
         } else if (msg.type === "result") {
-          sawResult = true;
+          this.turnsAwaitingResult = Math.max(0, this.turnsAwaitingResult - 1);
           // Every one of these was being thrown away. `terminal_reason` is the
           // SDK telling us, in its own words, that it stopped for a structural
           // reason — a turn cap, a context overflow, a blocking rate limit —
@@ -415,10 +432,17 @@ export class ClaudeBrain extends Brain {
           this.emitEvent("status", "idle");
         }
       }
-      // The stream ended without a result message: the CLI subprocess died, the
-      // pipe closed, or auth dropped. This is the path that used to end a run
-      // with nothing said, nothing logged, and the HUD quietly back to idle.
-      if (!sawResult) {
+      // A session closed by `resetSession()` ends here too, with no result —
+      // deliberately. Announcing that as a dropped connection told the user
+      // something false in the middle of the turn that replaced it, and the
+      // `stream_closed` exit below landed on that live turn's log and sent a
+      // healthy run into recovery.
+      if (superseded()) return;
+      // The stream ended while a turn was still owed its result: the CLI
+      // subprocess died, the pipe closed, or auth dropped. This is the path
+      // that used to end a run with nothing said, nothing logged, and the HUD
+      // quietly back to idle.
+      if (this.turnsAwaitingResult > 0) {
         this.emitEvent(
           "text",
           "My connection to the model closed before that finished. I'm restarting the session from the checkpoint."
@@ -426,24 +450,33 @@ export class ClaudeBrain extends Brain {
         this.log()?.exit("stream_closed", { iteration: this.iteration, detail: "SDK stream ended without a result message" });
       }
     } catch (err: any) {
+      // Closing a superseded session can surface as a rejected read. That is
+      // this consumer's own teardown, not a failure of the turn now running.
+      if (superseded()) return;
       const reason = classifyProviderError(err);
       this.log()?.exit(reason, { iteration: this.iteration, error: err });
       throw err;
     } finally {
-      if (generation !== this.sessionGeneration) return;
-      // The underlying CLI process has exited (crash, auth failure, or a clean
-      // end of stream). Reset so the NEXT message starts a fresh session —
-      // otherwise every later send would queue into a stream nobody reads and
-      // Jarvis would look permanently deaf until the app was restarted.
-      this.started = false;
-      this.q = null;
-      this.input = new Pushable<SDKUserMessage>();
-      this.log()?.exit("unknown_fallthrough", {
-        iteration: this.iteration,
-        detail: "consume() unwound without naming an exit",
-      });
-      this.log()?.enterState("idle");
-      this.emitEvent("status", "idle");
+      // No `return` in here: a return from `finally` replaces whatever the
+      // try/catch was doing, including the rethrow above, so a real provider
+      // failure could leave consume() resolving as if nothing had happened.
+      if (!superseded()) {
+        // The underlying CLI process has exited (crash, auth failure, or a
+        // clean end of stream). Reset so the NEXT message starts a fresh
+        // session — otherwise every later send would queue into a stream
+        // nobody reads and Jarvis would look permanently deaf until the app
+        // was restarted.
+        this.started = false;
+        this.q = null;
+        this.input = new Pushable<SDKUserMessage>();
+        this.turnsAwaitingResult = 0;
+        this.log()?.exit("unknown_fallthrough", {
+          iteration: this.iteration,
+          detail: "consume() unwound without naming an exit",
+        });
+        this.log()?.enterState("idle");
+        this.emitEvent("status", "idle");
+      }
     }
   }
 
@@ -468,6 +501,7 @@ export class ClaudeBrain extends Brain {
     const used = this.memory.prepareHistory(history, tools.map(tool => ({ name: tool.name, description: tool.description, parameters: z.toJSONSchema(z.object(tool.schema), { io: "input" }) })), buildSystemPrompt(this.projectHint, undefined, false), "ollama", this.cfg.claude.model);
     const content = `${current}\n\n${this.memory.packet(used, true, this.cfg.claude.model)}`;
 
+    this.turnsAwaitingResult++;
     this.input.push({
       type: "user",
       message: { role: "user", content },
@@ -478,6 +512,8 @@ export class ClaudeBrain extends Brain {
 
   private resetSession(): void {
     this.sessionGeneration++;
+    // Whatever the old session still owed dies with it; the caller re-sends.
+    this.turnsAwaitingResult = 0;
     try { this.q?.close?.(); } catch { /* already closed */ }
     this.input.end();
     this.input = new Pushable<SDKUserMessage>();

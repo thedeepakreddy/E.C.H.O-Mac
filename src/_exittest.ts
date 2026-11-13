@@ -345,6 +345,104 @@ function check(label: string, condition: unknown): void {
   else { console.log(`  ✗ ${label}`); fail++; }
 }
 
+// ---- a session replaced by the next turn ----------------------------------
+//
+// Every new task resets the Claude SDK session (`send()` -> `resetSession()`),
+// so the previous session's consume() is still unwinding while the new turn is
+// already running — and `currentLoop()` already resolves to the NEW turn. That
+// old consumer used to (a) announce "my connection to the model closed" if its
+// own turn had not reached a result, (b) record `stream_closed` or a provider
+// error on the new turn's log, sending a healthy run into recovery, and (c)
+// swallow its own rethrow through a `return` inside `finally`.
+console.log("\na superseded Claude session does not speak or fail the turn that replaced it");
+{
+  const { ClaudeBrain } = await import("./brain/claude.js");
+  const { Recorder } = await import("./agent-replay/recorder.js");
+  const { LoopLog, setCurrentLoop } = await import("./agent-replay/loop-log.js");
+  const events = (rec: any) =>
+    readFileSync(join(rec.dir, "events.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const mkLog = (label: string) => {
+    const rec = new Recorder(root, `superseded-${label}`);
+    const log = new LoopLog(rec, "claude", "claude-sonnet-5");
+    log.runStart({ maxTurns: 150 });
+    setCurrentLoop(log);
+    return { rec, log };
+  };
+  const assistant = (text: string) => ({
+    type: "assistant",
+    message: { content: [{ type: "text", text }], stop_reason: "end_turn", usage: {} },
+  });
+  const result = () => ({
+    type: "result", subtype: "success", is_error: false,
+    terminal_reason: "completed", num_turns: 1, usage: {}, permission_denials: [],
+  });
+
+  for (const ending of ["ends", "throws"] as const) {
+    const held = { release: null as null | (() => void) };
+    async function* stream() {
+      yield assistant("working on the first request");
+      await new Promise<void>((r) => { held.release = r; });
+      if (ending === "throws") throw new Error("read ECONNRESET: session closed");
+      // otherwise the closed stream simply ends, with no result message
+    }
+    const brain = new ClaudeBrain(cfg);
+    const said: string[] = [];
+    brain.on("text", (t: string) => said.push(String(t)));
+    (brain as any).started = true;
+    (brain as any).q = stream();
+    (brain as any).turnsAwaitingResult = 1;
+    mkLog(`${ending}-old`);
+    const generation = ++(brain as any).sessionGeneration;
+    const consumed: Promise<void> = (brain as any).consume(generation);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // What send() does for the next task: a new turn's logger exists, the old
+    // session is reset, and a new one is started and handed the message.
+    const next = mkLog(`${ending}-new`);
+    (brain as any).resetSession();
+    (brain as any).started = true;
+    (brain as any).q = "the replacing session";
+    (brain as any).turnsAwaitingResult = 1;
+    held.release?.();
+    let threw = false;
+    await consumed.catch(() => { threw = true; });
+
+    check(`${ending}: the old session's teardown is not reported as a failure`, !threw);
+    check(`${ending}: nothing is said about a closed connection`, !said.some((t) => /connection to the model closed/i.test(t)));
+    check(`${ending}: the replacing turn's log has no exit recorded on it`, !events(next.rec).some((e) => e.type === "loop.exit"));
+    check(`${ending}: the replacing session's state is left alone`,
+      (brain as any).started === true && (brain as any).q === "the replacing session" && (brain as any).turnsAwaitingResult === 1);
+    next.log.exit("completed", { detail: "test cleanup" });
+  }
+
+  // The other half: a stream that really does die mid-turn must say so on ANY
+  // turn of the session, not only the first.
+  const held = { release: null as null | (() => void) };
+  async function* dying() {
+    yield assistant("turn one"); yield result();
+    await new Promise<void>((r) => { held.release = r; });
+    yield assistant("turn two, cut off");
+  }
+  const brain = new ClaudeBrain(cfg);
+  const said: string[] = [];
+  brain.on("text", (t: string) => said.push(String(t)));
+  (brain as any).started = true;
+  (brain as any).q = dying();
+  (brain as any).turnsAwaitingResult = 1;
+  mkLog("dying-a");
+  const generation = ++(brain as any).sessionGeneration;
+  const consumed: Promise<void> = (brain as any).consume(generation);
+  await new Promise((r) => setTimeout(r, 30));
+  const second = mkLog("dying-b");
+  (brain as any).turnsAwaitingResult++; // the follow-up message send() pushed
+  held.release?.();
+  await consumed;
+  const exit = events(second.rec).find((e) => e.type === "loop.exit");
+  check(`a stream that dies on a later turn is named stream_closed (got ${exit?.reason ?? "NONE"})`, exit?.reason === "stream_closed");
+  check("and the user is told the connection closed", said.some((t) => /connection to the model closed/i.test(t)));
+  check("the dead session is cleared so the next message starts a fresh one", (brain as any).started === false && (brain as any).q === null);
+}
+
 // ---- the watchdog must outlive the deadlines it backs up -------------------
 //
 // `STALL_AFTER_MS` and the `ECHO_LLM_TIMEOUT_MS` deadline were both 120000, so
