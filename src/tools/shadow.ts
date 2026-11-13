@@ -1,6 +1,7 @@
 import { Tts } from "../voice/tts.js";
 import { frontmostApp } from "./computer-actions.js";
 import { ocr } from "./vision.js";
+import { localGenerate } from "./local-llm.js";
 
 let shadowInterval: NodeJS.Timeout | null = null;
 export let shadowPendingCode = "";
@@ -42,35 +43,22 @@ Are they in the middle of writing a function and stuck?
 If NO, output exactly the word "NONE".
 If YES, output a 1-sentence plan of how to finish the code, followed by the exact delimiter "|||", followed by ONLY the exact raw code required to finish the function (no markdown, no backticks, just the code to type).`;
 
-      const res = await fetch("http://localhost:11434/api/generate", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "llama3.2:3b",
-          prompt: prompt,
-          stream: false
-        })
-      });
-      
-      if (res.ok) {
-        const json = await res.json();
-        const reply = json.response.trim();
-        if (reply && reply.toUpperCase() !== "NONE" && reply.includes("|||")) {
-          const parts = reply.split("|||");
-          const plan = parts[0].trim();
-          const code = parts[1].trim();
-          
-          if (plan && code) {
-            shadowPendingCode = code;
-            tts.say(`Sir, I notice you paused. ${plan} Shall I take control and type it out?`);
-            // Pause the interval for 60 seconds so it doesn't spam while waiting for answer
-            isShadowModeActive = false;
-            setTimeout(() => { isShadowModeActive = true; }, 60000);
-          }
+      const reply = await localGenerate(prompt);
+      if (reply && reply.toUpperCase() !== "NONE" && reply.includes("|||")) {
+        const parts = reply.split("|||");
+        const plan = parts[0].trim();
+        const code = parts[1].trim();
+
+        if (plan && code) {
+          shadowPendingCode = code;
+          tts.say(`Sir, I notice you paused. ${plan} Shall I take control and type it out?`);
+          // Pause the interval for 60 seconds so it doesn't spam while waiting for answer
+          isShadowModeActive = false;
+          setTimeout(() => { isShadowModeActive = true; }, 60000);
         }
       }
     } catch (e) {
-      // Silently fail if offline or OCR fails
+      // The screen could not be read; localGenerate already reports a model that is not answering.
     }
   }, period);
 }

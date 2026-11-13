@@ -5,6 +5,7 @@ import { loadRange } from "../frontier/history.js";
 import { scrubSecrets } from "../safety/redact.js";
 import { dataRoot, atomicWrite } from "../memory/paths.js";
 import { captureAllowed, deletionEpoch } from "../memory/capture-policy.js";
+import { localModel } from "./local-llm.js";
 
 export const EMBEDDING_MODEL = "nomic-embed-text";
 export interface MemoryEntry {
@@ -27,7 +28,9 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 async function getEmbedding(text: string): Promise<number[] | null> {
   try {
-    const res = await fetch("http://localhost:11434/api/embeddings", {
+    // The configured Ollama host, not a literal localhost: a remote or
+    // re-ported server was otherwise invisible to this index alone.
+    const res = await fetch(`${localModel().host}/api/embeddings`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: EMBEDDING_MODEL, prompt: text }), signal: AbortSignal.timeout(2500),
     });
