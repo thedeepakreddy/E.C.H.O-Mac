@@ -16,6 +16,33 @@ Office/Retry/report-Retry/trackpad browser fixtures passed. Runtime was Node
 v26.8.2. These are local dirty-checkout results, not a committed/deployed revision
 or native Calculator, audible voice, multi-display or physical-iPhone proof.
 
+## Technology upgrade checked on November 14, 2026
+
+Same environment as the entry below: a Linux container with Node.js `v22.23.4`, plus a virtual display (`xvfb`) so Electron itself could run. The code under test is the upgraded stack: Electron 45.3.2, TypeScript 7.0.2, esbuild 0.28.2, `@anthropic-ai/claude-agent-sdk` 0.3.325, `@google/genai` 3.3.0, `openai` 7.57.0, `@modelcontextprotocol/sdk` 1.32.2.
+
+| Executed check | Before the upgrade | After |
+| --- | --- | --- |
+| `npm run typecheck` | Passed, about 8s | Passed, about 1.5s |
+| `npm test` | 157/161 | 157/161, the same four environment-bound failures |
+| `npm run build` | Completed | Completed |
+| The real app launched under `xvfb` with `JARVIS_NO_VOICE=1` and an empty data folder | Window created, brain ready, HUD loaded | Identical startup lines, no new warnings |
+| `npm run test:ui` | 6/10 on Electron 33 | 6/10 on Electron 45, the same six |
+
+The four UI suites that fail do so on both Electron versions here. `test:calculator-ui` and `test:panel-office` write to paths that exist on macOS, `test:panel-world` fails a layout assertion with this container's fonts, and `test:panel-bots` fails because the 3D office renders slowly enough under software WebGL that a submit button is still disabled when the fixture clicks it. That last one was run six times on each Electron version under identical conditions and failed at the same assertion all twelve times, so it is not attributed to the upgrade. Whether it passes on a Mac at this revision was not established: run `npm run test:panel-bots` there.
+
+Chromium no longer falls back to software WebGL by itself, so `scripts/test-gl.mjs` enables it for the 3D fixtures off macOS. Without it `test:panel-companion` failed on Electron 45 on a console error from `THREE.WebGLRenderer`; with it the suite passes as it did on 33.
+
+Real model calls were made in this round, which the earlier entry had none of. Credentials for Claude were available in the environment:
+
+- A turn through `createBrain` on the default configuration called the `list_scheduled_tasks` tool through the gate and answered from its result.
+- `claude.keepWarm` was timed over four runs of four turns. Time to first text on turns after the first: about 3.8s without it (3835, 3895, 3851, 3633, 3687, 3781 ms) and about 2.3s with it (2897, 2297, 2225, 2188, 2270, 2235 ms). No run produced an error.
+
+Electron's breaking-change notes for versions 34 through 45 were read against every Electron API the source calls; the commit that performs the upgrade lists what changed and what was checked and found unaffected.
+
+Not verified by this round: anything on macOS, including the native helpers, voice, screen control and the Keychain-backed ChatGPT sign-in on the new Electron; Gemini, OpenAI, OpenRouter, NVIDIA or Ollama against their real services on the new SDKs; a real MCP server; the phone remote's screen capture. The size of the keep-warm saving on a Mac is not measured.
+
+Required before Electron 46: `src/brain/chatgpt-auth.ts` stores the ChatGPT sign-in with the synchronous `safeStorage` calls, which Electron 45 deprecates and 46 removes. It must move to `isAsyncEncryptionAvailable`, `encryptStringAsync` and `decryptStringAsync`. Until then the code refuses to save a sign-in on an Electron that lacks the synchronous calls, rather than fall back to an unencrypted file.
+
 ## Check performed on November 13–14, 2026
 
 Baseline: `main` at `1220956`. Runtime: a Linux container, Node.js `v22.23.4`. This is not macOS, so nothing here exercises voice, screen control, native helpers, Electron windows or a live model.

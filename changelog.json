@@ -17,5 +17,14 @@
       "Reliability: a new command no longer inherits a false \"connection closed\" from the previous Claude session, a temporary Gemini fallback no longer replaces the chosen model, and tasks left running by a crash are closed at the next start.",
       "Background helpers (ghost, shadow, auto-debug) use the configured local model and host."
     ]
+  },
+  {
+    "date": "2026-11-14",
+    "features": [
+      "Runtime: Electron 33 to 45 (Chromium 130 to 156, Node 20 to 24). Echo now needs macOS 13 or later.",
+      "Faster replies on Claude: the next session is started while you are still reading the last answer, about 1.4 seconds sooner to the first word in measurement. Turn off with claude.keepWarm.",
+      "Updated AI SDKs for Claude, Gemini, OpenAI and MCP, with the Gemini API version pinned so the update changes nothing unasked.",
+      "TypeScript 7 (the native compiler) and esbuild 0.28: the typecheck runs in about 1.5 seconds instead of 8."
+    ]
   }
 ]
