@@ -511,9 +511,13 @@ const DEFAULTS: JarvisConfig = {
   context: { maxTokens: 128000, outputReserveTokens: 16000, compactAt: 0.75, providerLimits: {} },
   brain: "claude",
   persona: { character: "jarvis", address: "sir" },
-  claude: { model: "claude-sonnet-5-5", systemPromptPreset: "none" },
-  // gemini-2.5-flash is retired for new keys; 2.0-flash still resolves.
-  gemini: { model: "gemini-2.0-flash", apiKeyEnv: "GEMINI_API_KEY" },
+  claude: { model: "claude-sonnet-5-5", systemPromptPreset: "none", keepWarm: true },
+  // The model the fallback ladder itself leads with (GEMINI_MODEL_FALLBACKS in
+  // brain/types.ts), which is ordered by measured latency on a real key. The
+  // default used to be gemini-2.0-flash, which that same measurement found
+  // retired ("no longer available"): a fresh install spent its first request
+  // on a 404 before falling back. _wiringtest keeps the two in step.
+  gemini: { model: "gemini-3.1-flash-lite", apiKeyEnv: "GEMINI_API_KEY" },
   ollama: { model: "llama3.2:3b", host: "http://localhost:11434" },
   openai: { model: "gpt-4o", apiKeyEnv: "OPENAI_API_KEY", auth: "auto", chatgptModel: "", chatgptRedirectPort: 8797, chatgptSendHostId: false },
   openrouter: {

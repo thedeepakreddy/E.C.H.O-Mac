@@ -163,8 +163,8 @@ async function listenWithinBudget(
   let ai: any;
   try {
     if (!options.generate) {
-      const { GoogleGenAI } = await import("@google/genai");
-      ai = new GoogleGenAI({ apiKey: key });
+      const { geminiClient } = await import("../brain/gemini-client.js");
+      ai = geminiClient(key);
     }
     audio = readFileSync(turn.path).toString("base64");
   } catch (err: any) {

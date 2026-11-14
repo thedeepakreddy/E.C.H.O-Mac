@@ -47,8 +47,9 @@ await run("/usr/bin/afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", a
 const pcm = readWav16k(wav);
 try { unlinkSync(aiff); unlinkSync(wav); } catch { /* ignore */ }
 
-const { GoogleGenAI, Modality } = await import("@google/genai");
-const ai = new GoogleGenAI({ apiKey: key });
+const { Modality } = await import("@google/genai");
+const { geminiClient } = await import("./brain/gemini-client.js");
+const ai = geminiClient(key);
 const models = [process.env.ECHO_LIVE_MODEL, "gemini-2.5-flash-native-audio-preview-12-2025"].filter(Boolean) as string[];
 
 for (const model of models) {

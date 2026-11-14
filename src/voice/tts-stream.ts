@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { GEMINI_API_VERSION } from "../brain/gemini-version.js";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -705,7 +706,7 @@ export class GeminiTtsStream extends EventEmitter implements TtsStream {
           // made the nominal streaming adapter wait for the entire sentence.
           const streaming = /^gemini-(?:3\.[1-9]|[4-9])/.test(this.model);
           const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:${streaming ? 'streamGenerateContent?alt=sse&' : 'generateContent?'}key=${this.apiKey}`,
+            `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models/${this.model}:${streaming ? 'streamGenerateContent?alt=sse&' : 'generateContent?'}key=${this.apiKey}`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },

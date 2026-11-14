@@ -89,8 +89,9 @@ async function gemini(label: string, pcm: Buffer, wantTool: boolean): Promise<vo
   const model = process.env.ECHO_LIVE_MODEL || "gemini-2.5-flash-native-audio-preview-12-2025";
   console.log(`\nGemini Live — ${label}`);
   if (!key) { console.log("  no GEMINI_API_KEY"); return; }
-  const { GoogleGenAI, Modality } = await import("@google/genai");
-  const ai = new GoogleGenAI({ apiKey: key });
+  const { Modality } = await import("@google/genai");
+  const { geminiClient } = await import("./brain/gemini-client.js");
+  const ai = geminiClient(key);
   const r: Result = { provider: `gemini:${label}`, connectMs: null, firstAudioMs: null, heard: "", said: "", toolCalled: null, error: null };
   const t0 = performance.now();
   let firstAudio = -1, done = false, tEnd = 0;

@@ -39,7 +39,8 @@ if (!key) { console.error("no GEMINI_API_KEY in .env"); process.exit(1); }
 
 const outDir = join(ROOT, ".voice-preview");
 mkdirSync(outDir, { recursive: true });
-const ai = new GoogleGenAI({ apiKey: key });
+// v1beta, as src/brain/gemini-client.ts pins it: @google/genai 3 defaults to v1.
+const ai = new GoogleGenAI({ apiKey: key, apiVersion: "v1beta" });
 
 /** Wrap raw 24 kHz mono PCM16 in a WAV header so it plays anywhere. */
 function wav(pcm) {

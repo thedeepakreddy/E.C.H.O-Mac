@@ -275,8 +275,9 @@ export class RealtimeVoiceSession extends EventEmitter {
       });
       return;
     }
-    const { GoogleGenAI, Modality } = await import("@google/genai");
-    const ai = new GoogleGenAI({ apiKey: this.apiKey });
+    const { Modality } = await import("@google/genai");
+    const { geminiClient } = await import("../brain/gemini-client.js");
+    const ai = geminiClient(this.apiKey);
     const model = this.cfg.voice.realtime?.model || DEFAULT_MODEL;
     const settings = contextSettings(this.cfg.context);
     const window = contextWindow(settings, "gemini-live", model);

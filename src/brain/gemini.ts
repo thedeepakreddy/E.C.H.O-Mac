@@ -3,6 +3,7 @@ import {toolGranted} from '../safety/tool-permissions.js';
 import {codingRequestToolAllowed} from '../coding/tool-selection.js';
 import {codingContinuationEligible, codingActionRequest, CODING_ACTION_TOOLS} from '../coding/continuation.js';
 import { FunctionCallingConfigMode, GoogleGenAI, Type } from "@google/genai";
+import { geminiClient, GEMINI_API_VERSION } from "./gemini-client.js";
 import { z } from "zod";
 import {
   AUDIO_TURN_GUIDANCE,
@@ -216,9 +217,9 @@ export class GeminiBrain extends Brain {
   constructor(private cfg: JarvisConfig, apiKey: string, private readonly limits: BrainExecutionLimits = {}) {
     super();
     this.modelHealth=scopedModelHealth({provider:'gemini',account:apiKey,
-      environment:cfg.gemini.apiKeyEnv,endpoint:'generativelanguage:v1beta'});
+      environment:cfg.gemini.apiKeyEnv,endpoint:`generativelanguage:${GEMINI_API_VERSION}`});
     this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
-    this.ai = new GoogleGenAI({ apiKey });
+    this.ai = geminiClient(apiKey);
     this.servingModel = cfg.gemini.model;
     this.memory.configure(cfg.context);
     // A restricted agent (a custom fleet member — see frontier/fleet.ts) never
