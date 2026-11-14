@@ -71,7 +71,12 @@ const t0 = Date.now();
 if (mode === "offline" && !filters.length) {
   total++;
   process.stdout.write("typecheck".padEnd(20));
-  const r = await run("npx", ["tsc", "--noEmit"]);
+  // By path, not `npx tsc`. Two packages here ship a `tsc`: TypeScript 7 (the
+  // native compiler, which does the type checking) and TypeScript 6 under the
+  // name typescript-compiler-api (the last release with a JavaScript API, which
+  // a few suites use to parse source). npm links only one of them as
+  // node_modules/.bin/tsc and does not promise which.
+  const r = await run("node", [join(ROOT, "node_modules/typescript/bin/tsc"), "--noEmit"]);
   console.log(r.code === 0 ? `ok      ${(r.ms / 1000).toFixed(1)}s` : "FAILED");
   if (r.code !== 0) failed.push({ name: "typecheck", out: r.out });
 }

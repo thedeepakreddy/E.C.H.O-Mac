@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFileSync,readdirSync,statSync,mkdtempSync,mkdirSync,writeFileSync,utimesSync,rmSync} from 'node:fs';
-import {tmpdir} from 'node:os';import {join} from 'node:path';import vm from 'node:vm';import ts from 'typescript';
+import {tmpdir} from 'node:os';import {join} from 'node:path';import vm from 'node:vm';import ts from 'typescript-compiler-api';
 const root=mkdtempSync(join(tmpdir(),'echo-voice-log-path-'));
 try{
  const ast=ts.createSourceFile('log.ts',readFileSync('src/_voicelog.ts','utf8'),ts.ScriptTarget.Latest,true);

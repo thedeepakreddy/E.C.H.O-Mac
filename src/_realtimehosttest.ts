@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 import {SpeechClock, type SpeechClockOptions} from './voice/speech-clock.js';
 const source=readFileSync('src/main.ts','utf8'),ast=ts.createSourceFile('main.ts',source,ts.ScriptTarget.Latest,true);
 const names=['ensureRealtime','dispatchToRealtime'];

@@ -17,7 +17,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import ts from "typescript";
+import ts from "typescript-compiler-api";
 import { TOOLS, TOOL_MAP } from "./tools/registry.js";
 import { JARVIS_PERSONA } from "./brain/types.js";
 import { LOCAL_TOOL_NAMES, resolveToolName } from "./brain/localtools.js";

@@ -2705,7 +2705,7 @@ app.whenReady().then(async () => {
   // explicitly. assets/echo.icns is ready for a future packaged build; other
   // desktop platforms pick up the BrowserWindow icon above.
   if (process.platform === "darwin" && existsSync(ECHO_ICON_PATH)) {
-    app.dock.setIcon(ECHO_ICON_PATH);
+    app.dock?.setIcon(ECHO_ICON_PATH);
   }
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['*://*.youtube.com/*', '*://*.youtube-nocookie.com/*'] },

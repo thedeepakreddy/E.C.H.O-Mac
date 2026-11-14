@@ -78,7 +78,8 @@ function startRecording(contents, { width }) {
 
   const timer = setInterval(() => {
     if (!latest) return;
-    const bitmap = latest.resize({ width, quality: "better" }).getBitmap();
+    // toBitmap(): getBitmap() has been deprecated since Electron 36 and returns the same pixels.
+    const bitmap = latest.resize({ width, quality: "better" }).toBitmap();
     if (!ffmpeg) {
       frameBytes = bitmap.length;
       const height = bitmap.length / 4 / width;

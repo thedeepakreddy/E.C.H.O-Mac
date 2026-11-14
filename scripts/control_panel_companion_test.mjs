@@ -1,3 +1,4 @@
+import './test-gl.mjs';
 import assert from 'node:assert/strict';
 import {app,BrowserWindow,ipcMain} from 'electron';
 import {resolve} from 'node:path';
@@ -14,7 +15,7 @@ let state={checkedAt:now,approval:{id:'exact-approval-a',question:'May I remove 
 ipcMain.removeHandler('control:companion');ipcMain.handle('control:companion',async(_e,r)=>{reads.push(r);await new Promise(r=>setTimeout(r,15));if(fail)throw Error('Private store details');const d=structuredClone(state);if(!r.memory)delete d.memory;else if(r.query&&!memory.summary.toLowerCase().includes(r.query.toLowerCase()))d.memory.items=[];return d;});
 ipcMain.removeHandler('control:action');ipcMain.handle('control:action',(_e,a)=>{actions.push(a);return {ok:true,message:'Fixture action accepted'};});
 app.whenReady().then(async()=>{
- const win=new BrowserWindow({width:1180,height:760,show:false,webPreferences:{preload:resolve(root,'dist/preload.cjs'),contextIsolation:true,sandbox:true}});let failed=false;const errors=[];win.webContents.on('console-message',(_e,level,msg)=>{if(level>=3&&!msg.includes('Content Security Policy'))errors.push(msg);});
+ const win=new BrowserWindow({width:1180,height:760,show:false,webPreferences:{preload:resolve(root,'dist/preload.cjs'),contextIsolation:true,sandbox:true}});let failed=false;const errors=[];win.webContents.on('console-message',event=>{if(event.level==='error'&&!event.message.includes('Content Security Policy'))errors.push(event.message);});
  const js=code=>win.webContents.executeJavaScript(code);
  const settle=()=>new Promise(r=>setTimeout(r,100));
  try{
