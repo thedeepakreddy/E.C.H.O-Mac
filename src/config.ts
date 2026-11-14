@@ -7,6 +7,19 @@ export interface JarvisConfig {
   /** Shared working context across providers. All token sizes are estimates. */
   context?: import("./memory/conversation.js").ContextSettings;
   brain: "claude" | "gemini" | "ollama" | "openai" | "openrouter" | "nvidia";
+  /**
+   * How Echo carries itself in conversation (brain/character.ts).
+   *
+   * `character`: "jarvis" (the default) is composed, exact and dry — it
+   * acknowledges then acts, leads with the outcome, warns before a problem and
+   * disagrees once. "plain" turns that off and leaves the concise assistant.
+   *
+   * `address`: how it addresses you — "sir", "ma'am", "boss", your name. Used
+   * sparingly, at most once in a reply. An empty string means no form of
+   * address at all. It never appears in reports, code or messages Echo writes
+   * for someone else.
+   */
+  persona?: { character?: "jarvis" | "plain"; address?: string };
   /** NVIDIA's hosted Chat Completions API; inference runs in the cloud. */
   nvidia: {model: string; apiKeyEnv: string; baseUrl: string; maxOutputTokens: number; reasoningEffort: 'low' | 'high' | 'max'};
   /**
@@ -483,6 +496,7 @@ const DEFAULTS: JarvisConfig = {
   nvidia: {model: 'moonshotai/kimi-k3', apiKeyEnv: 'NVIDIA_API_KEY', baseUrl: 'https://integrate.api.nvidia.com/v1', maxOutputTokens: 16384, reasoningEffort: 'low'},
   context: { maxTokens: 128000, outputReserveTokens: 16000, compactAt: 0.75, providerLimits: {} },
   brain: "claude",
+  persona: { character: "jarvis", address: "sir" },
   claude: { model: "claude-sonnet-5-5", systemPromptPreset: "none" },
   // gemini-2.5-flash is retired for new keys; 2.0-flash still resolves.
   gemini: { model: "gemini-2.0-flash", apiKeyEnv: "GEMINI_API_KEY" },

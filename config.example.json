@@ -1,5 +1,9 @@
 {
   "brain": "claude",
+  "persona": {
+    "character": "jarvis",
+    "address": "sir"
+  },
   "nvidia": {
     "model": "moonshotai/kimi-k3",
     "apiKeyEnv": "NVIDIA_API_KEY",

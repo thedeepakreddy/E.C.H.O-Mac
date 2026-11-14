@@ -2,6 +2,8 @@ import { getAppPath } from "../utils/appPath.js";
 import { loadRecent } from "../frontier/history.js";
 import { Tts } from "../voice/tts.js";
 import { localGenerate } from "./local-llm.js";
+import { addressed } from "../brain/character.js";
+import { activeConfig } from "../config.js";
 
 let ghostInterval: NodeJS.Timeout | null = null;
 
@@ -19,7 +21,7 @@ export function startGhostMode(tts: Tts) {
       
       const reply = await localGenerate(prompt);
       if (reply && reply.toUpperCase() !== "NONE") {
-        tts.say("Sir, ghost mode has detected a pattern. " + reply);
+        tts.say(addressed(activeConfig().persona, "Ghost mode has detected a pattern. ") + reply);
       }
     } catch (e) {
       // History unreadable; localGenerate already reports a model that is not answering.

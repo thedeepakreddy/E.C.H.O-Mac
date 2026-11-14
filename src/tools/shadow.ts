@@ -2,6 +2,8 @@ import { Tts } from "../voice/tts.js";
 import { frontmostApp } from "./computer-actions.js";
 import { ocr } from "./vision.js";
 import { localGenerate } from "./local-llm.js";
+import { addressed } from "../brain/character.js";
+import { activeConfig } from "../config.js";
 
 let shadowInterval: NodeJS.Timeout | null = null;
 export let shadowPendingCode = "";
@@ -51,7 +53,7 @@ If YES, output a 1-sentence plan of how to finish the code, followed by the exac
 
         if (plan && code) {
           shadowPendingCode = code;
-          tts.say(`Sir, I notice you paused. ${plan} Shall I take control and type it out?`);
+          tts.say(addressed(activeConfig().persona, `I notice you paused. ${plan} Shall I take control and type it out?`));
           // Pause the interval for 60 seconds so it doesn't spam while waiting for answer
           isShadowModeActive = false;
           setTimeout(() => { isShadowModeActive = true; }, 60000);

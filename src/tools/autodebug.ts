@@ -2,6 +2,8 @@ import { watch, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Tts } from "../voice/tts.js";
 import { localGenerate } from "./local-llm.js";
+import { addressed } from "../brain/character.js";
+import { activeConfig } from "../config.js";
 
 let debugWatcher: import("node:fs").FSWatcher | null = null;
 let lastSize = 0;
@@ -36,7 +38,7 @@ export function startAutoDebug(tts: Tts) {
                    `You are Jarvis, an auto-debugger. A terminal error just occurred:\n${newText.substring(0, 1000)}\n\nIn ONE short sentence, tell the user what the error is and ask if you should fix it.`,
                    30_000
                  ).then((reply) => {
-                    tts.say(reply ?? "Sir, I detected a terminal error. Shall I investigate the logs?");
+                    tts.say(reply ?? addressed(activeConfig().persona, "I detected a terminal error. Shall I investigate the logs?"));
                  });
               }
             } else {

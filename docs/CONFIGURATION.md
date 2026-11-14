@@ -21,6 +21,8 @@ These are code defaults, not a description of an existing user's settings. Model
 | Setting | Built-in default | Meaning |
 | --- | --- | --- |
 | `brain` | `claude` | Starting model adapter. |
+| `persona.character` | `jarvis` | Echo's manner in conversation: composed, exact and dry. It acknowledges then acts, leads with the outcome, warns before a problem and disagrees once. `plain` turns the character off. |
+| `persona.address` | `sir` | How Echo addresses you, at most once in a reply: `sir`, `ma'am`, `boss`, your name. An empty string means no form of address. Never used in reports, code or messages written for someone else. |
 | `voice.ttsEngine` | `mac` | Speech synthesis engine; optional engines need their own setup. |
 | `voice.ttsVoice` | `Daniel` | Requested macOS voice. Installed voices vary. |
 | `voice.sttProvider` | `whisper` | Local recognition by default; Apple and Sarvam are alternative paths. |

@@ -1,6 +1,7 @@
 import {toolGranted} from '../safety/tool-permissions.js';
 import { z } from "zod";
-import { Brain, LOOP_CAPS, LOCAL_PERSONA, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
+import { Brain, LOOP_CAPS, LOCAL_PERSONA, personaSettings, turnContract, type AudioTurn, type BrainExecutionLimits, type SendOptions } from "./types.js";
+import { characterGuidance } from "./character.js";
 import {lcuModelGuidance} from '../tools/lcu-guidance.js';
 import { TOOLS, TOOL_MAP } from "../tools/registry.js";
 import { classify, bareToolName } from "../safety/risk.js";
@@ -89,7 +90,9 @@ export class OllamaBrain extends Brain {
         return { tools: [], servers: [], close: async () => {} };
       });
     }
-    const system = `${LOCAL_PERSONA}\n\n${lcuModelGuidance()}`;
+    // The compact form: a small model's prompt has to leave room for tools.
+    const manner = characterGuidance(personaSettings(), true);
+    const system = `${LOCAL_PERSONA}${manner ? `\n${manner}` : ""}\n\n${lcuModelGuidance()}`;
     this.messages.push({ role: "system", content: system });
   }
 

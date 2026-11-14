@@ -6,6 +6,19 @@ import type { MemoryScope } from "../memory/types.js";
 import type {TaskState} from '../memory/task-state.js';
 import type {RecoveryCheckpoint} from '../agent-replay/recovery.js';
 import {lcuModelGuidance} from '../tools/lcu-guidance.js';
+import {characterGuidance, type PersonaSettings} from './character.js';
+import {activeConfig} from '../config.js';
+
+/**
+ * The persona settings in force, read when a prompt is built so a change in
+ * config.json applies to the next brain without a code path to thread it
+ * through. A config that cannot be read must not cost the brain its prompt;
+ * the defaults in character.ts apply instead.
+ */
+export function personaSettings(): PersonaSettings | undefined {
+  try { return activeConfig().persona; }
+  catch { return undefined; }
+}
 
 export type BrainStatus = "idle" | "thinking" | "acting" | "speaking";
 
@@ -35,7 +48,8 @@ export function buildSystemPrompt(
   extra?: string,
   includeLegacyMemory = true
 ): string {
-  const parts = [JARVIS_PERSONA,lcuModelGuidance(),
+  // Character sits directly after the persona it qualifies ("the rules above").
+  const parts = [JARVIS_PERSONA,characterGuidance(personaSettings()),lcuModelGuidance(),
     'Live public research tools are available under your tool grants: search_research queries arXiv and Crossref, web_search finds public sources, and read_browser_page reads actual pages in an isolated browser (including JavaScript). For current research/trends, check these sources, cite real dates/links and distinguish preprints, metadata/abstracts and full-text reads. If one index/page is unavailable, try another and report the specific gap, never a blanket claim that all live access is unavailable. Do not bypass paywalls or imply access to accounts you have not authenticated.' ,
     'Written replies and reports support Markdown: clear headings, bold key points, useful lists/tables and fenced code. For public research and visually useful explanations, use image_search when granted, choose at most two relevant returned pictures, and include their exact Markdown with full source/author/license credits. Never search private notes or names for illustrations, invent picture URLs, or treat illustrations as factual evidence. Keep spoken replies natural and concise.'
   ];
@@ -56,7 +70,7 @@ export function buildSystemPrompt(
     console.error("[brain] episodic facts unavailable:", (err as any)?.message ?? err);
   }
   if (extra) parts.push(extra);
-  return parts.join("\n\n");
+  return parts.filter(Boolean).join("\n\n");
 }
 
 const capFromEnv = (name: string, fallback: number): number => {
