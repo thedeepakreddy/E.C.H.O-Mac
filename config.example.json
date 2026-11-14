@@ -19,7 +19,8 @@
   },
   "claude": {
     "model": "claude-sonnet-5-5",
-    "systemPromptPreset": "none"
+    "systemPromptPreset": "none",
+    "keepWarm": false
   },
   "gemini": {
     "model": "gemini-3.5-flash-lite",

@@ -29,7 +29,21 @@ export interface JarvisConfig {
    * identity and adds several thousand tokens to every turn. Only worth it for
    * a mostly-coding setup.
    */
-  claude: { model: string; systemPromptPreset: "claude_code" | "none" };
+  /**
+   * `keepWarm`: start the next SDK session as soon as a turn ends, instead of
+   * when the next message arrives.
+   *
+   * Every new task resets the Claude session, and a session is a subprocess:
+   * today the first thing a new turn does is boot one, before the model can
+   * begin answering. With this on, that boot happens during the pause after
+   * the previous reply, and the next message goes straight to a session that
+   * is already up. Nothing is sent to the model while it waits.
+   *
+   * Off by default because it has not been timed on real hardware. Turn it on
+   * and compare the time to first speech in the voice log before keeping it.
+   * Background agents never use it: they run one task and stop.
+   */
+  claude: { model: string; systemPromptPreset: "claude_code" | "none"; keepWarm?: boolean };
   gemini: { model: string; apiKeyEnv: string };
   ollama: { model: string; host: string };
   /**

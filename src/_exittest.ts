@@ -443,6 +443,97 @@ console.log("\na superseded Claude session does not speak or fail the turn that 
   check("the dead session is cleared so the next message starts a fresh one", (brain as any).started === false && (brain as any).q === null);
 }
 
+// ---- keeping the next Claude session warm ----------------------------------
+//
+// Every new task resets the Claude SDK session, and a session is a subprocess,
+// so a turn normally begins by booting one. With `claude.keepWarm` the next
+// session is started just after a turn ends and the next message goes to it
+// without a reset. These drive the real send()/consume() against a stand-in
+// for the SDK stream; start() is replaced because the real one spawns the CLI.
+console.log("\nkeeping the next Claude session warm");
+{
+  const { ClaudeBrain } = await import("./brain/claude.js");
+  const assistant = (text: string) => ({
+    type: "assistant",
+    message: { content: [{ type: "text", text }], stop_reason: "end_turn", usage: {} },
+  });
+  const result = () => ({
+    type: "result", subtype: "success", is_error: false,
+    terminal_reason: "completed", num_turns: 1, usage: {}, permission_denials: [],
+  });
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** A brain whose sessions are fakes that answer each message once. */
+  const build = (keepWarm: boolean) => {
+    const brain: any = new ClaudeBrain(cfg, {}, { keepWarm });
+    const sessions: Array<{ closed: boolean; received: number }> = [];
+    const events = { turnEnd: 0, errors: [] as string[], texts: [] as string[] };
+    brain.on("turnEnd", () => events.turnEnd++);
+    brain.on("error", (e: string) => events.errors.push(String(e)));
+    brain.on("text", (t: string) => events.texts.push(String(t)));
+    brain.start = function () {
+      if (this.started) return;
+      this.started = true;
+      const input = this.input, session = { closed: false, received: 0 };
+      sessions.push(session);
+      async function* stream() {
+        for await (const _message of input) {
+          session.received++;
+          yield assistant(`answer ${session.received}`);
+          yield result();
+        }
+      }
+      this.q = Object.assign(stream(), { close() { session.closed = true; }, interrupt: async () => {} });
+      const generation = ++this.sessionGeneration;
+      this.consume(generation).catch(() => {});
+    };
+    return { brain, sessions, events };
+  };
+
+  {
+    const { brain, sessions, events } = build(true);
+    brain.send("first request", undefined, { taskId: "warm-task-1" });
+    await settle(60);
+    check("the first turn runs on a session started when it was sent", sessions.length === 1 && events.turnEnd === 1);
+    await settle(400);
+    check("a moment after the turn ends, the next session is already up", sessions.length === 2 && sessions[0].closed);
+    check("warming it says and ends nothing", events.turnEnd === 1 && events.errors.length === 0 && events.texts.length === 1);
+
+    brain.send("second request", undefined, { taskId: "warm-task-2" });
+    await settle(60);
+    check("the next task's message goes to that session — no reset, no third one", sessions.length === 2 && sessions[1].received === 1 && !sessions[1].closed);
+    check("and its turn ends normally", events.turnEnd === 2 && events.errors.length === 0);
+    await settle(400);
+    check("after which the following session is warmed in turn", sessions.length === 3 && sessions[1].closed);
+    await brain.stop();
+    const before = sessions.length;
+    await settle(400);
+    check("a stopped brain warms nothing more", sessions.length === before);
+  }
+  {
+    // A message that arrives before the warm-up fires must not race it.
+    const { brain, sessions, events } = build(true);
+    brain.send("first request", undefined, { taskId: "quick-task-1" });
+    await settle(60);
+    brain.send("an immediate follow-on task", undefined, { taskId: "quick-task-2" });
+    await settle(60);
+    check("a message sent before the warm-up fires is answered the ordinary way", events.turnEnd === 2 && sessions.length === 2 && sessions[1].received === 1);
+    await settle(400);
+    check("and the pending warm-up never replaces a session that is in use", sessions[1].received === 1 && events.errors.length === 0 && sessions.length <= 3);
+    await brain.stop();
+  }
+  {
+    const { brain, sessions, events } = build(false);
+    brain.send("first request", undefined, { taskId: "cold-task-1" });
+    await settle(450);
+    check("with keepWarm off nothing is started ahead of need", sessions.length === 1 && !sessions[0].closed);
+    brain.send("second request", undefined, { taskId: "cold-task-2" });
+    await settle(60);
+    check("and a new task resets the session when its message arrives, as before", sessions.length === 2 && sessions[0].closed && events.turnEnd === 2);
+    await brain.stop();
+  }
+}
+
 // ---- the watchdog must outlive the deadlines it backs up -------------------
 //
 // `STALL_AFTER_MS` and the `ECHO_LLM_TIMEOUT_MS` deadline were both 120000, so

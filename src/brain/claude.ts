@@ -121,8 +121,17 @@ export class ClaudeBrain extends Brain {
    * `stream_closed` — the one reason that is supposed to mean a loop bug.
    */
   private turnsAwaitingResult = 0;
+  /**
+   * The current session was started ahead of need and has been sent nothing.
+   *
+   * See `claude.keepWarm` in config.ts. A session like this has no history, so
+   * the reset `send()` would normally do for a new task has nothing to clear;
+   * skipping it is what lets the message reach a process that is already up.
+   */
+  private warmSession = false;
+  private warmTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private cfg: JarvisConfig, private readonly limits: BrainExecutionLimits = {}) {
+  constructor(private cfg: JarvisConfig, private readonly limits: BrainExecutionLimits = {}, private readonly session: { keepWarm?: boolean } = {}) {
     super();
     this.limits = {...limits, allowedTools: limits.allowedTools === undefined ? undefined : new Set(limits.allowedTools)};
     this.memory.configure(cfg.context);
@@ -267,8 +276,43 @@ export class ClaudeBrain extends Brain {
 
     const generation = ++this.sessionGeneration;
     this.consume(generation).catch((err) => {
-      if (generation === this.sessionGeneration) this.emitEvent("error", friendlyError(err));
+      if (generation !== this.sessionGeneration) return;
+      // A session that was only being kept warm failed before anyone used it.
+      // No turn is running, so there is nothing to fail: `consume()` has already
+      // cleared it, and the next message starts a fresh one and reports its own
+      // error if the cause is still there.
+      if (this.turnsAwaitingResult === 0 && this.session.keepWarm) {
+        console.warn("[claude] a warm session ended before use:", String(err?.message ?? err).slice(0, 200));
+        return;
+      }
+      this.emitEvent("error", friendlyError(err));
     });
+  }
+
+  /**
+   * Start the next session now, while nobody is waiting on it.
+   *
+   * Called a moment after a turn's result. The finished session is replaced by
+   * a fresh one that sits on an empty input stream; `send()` recognises it and
+   * skips the reset it would otherwise do for a new task.
+   */
+  private warmNextSession(): void {
+    if (!this.session.keepWarm || this.warmTimer) return;
+    this.warmTimer = setTimeout(() => {
+      this.warmTimer = null;
+      // A message arrived first, or the brain was stopped: leave things alone.
+      if (this.turnsAwaitingResult > 0 || !this.started || this.warmSession) return;
+      try {
+        this.resetSession();
+        this.start();
+        this.warmSession = true;
+      } catch (err) {
+        // Warming is an optimisation. If it cannot start, the next message
+        // starts a session the ordinary way.
+        console.warn("[claude] could not warm the next session:", (err as any)?.message ?? err);
+      }
+    }, 250);
+    this.warmTimer.unref?.();
   }
 
   /**
@@ -430,6 +474,7 @@ export class ClaudeBrain extends Brain {
 
           this.emitEvent("turnEnd");
           this.emitEvent("status", "idle");
+          if (this.turnsAwaitingResult === 0) this.warmNextSession();
         }
       }
       // A session closed by `resetSession()` ends here too, with no result —
@@ -470,6 +515,7 @@ export class ClaudeBrain extends Brain {
         this.q = null;
         this.input = new Pushable<SDKUserMessage>();
         this.turnsAwaitingResult = 0;
+        this.warmSession = false;
         this.log()?.exit("unknown_fallthrough", {
           iteration: this.iteration,
           detail: "consume() unwound without naming an exit",
@@ -482,7 +528,12 @@ export class ClaudeBrain extends Brain {
 
   send(userText: string, _audio?: AudioTurn, opts?: SendOptions) {
     this.lastSend = opts ?? {};
-    if (this.memory.begin(userText, opts)) this.resetSession();
+    // `begin` always runs: it records the query and scope the context packet is
+    // built from. A warm session has been sent nothing, so there is no history
+    // for the reset to clear, and keeping it is the whole point of warming it.
+    const needsReset = this.memory.begin(userText, opts);
+    if (needsReset && !(this.warmSession && this.started)) this.resetSession();
+    this.warmSession = false;
     if (!this.started) this.start();
     this.emitEvent("status", "thinking");
 
@@ -514,6 +565,7 @@ export class ClaudeBrain extends Brain {
     this.sessionGeneration++;
     // Whatever the old session still owed dies with it; the caller re-sends.
     this.turnsAwaitingResult = 0;
+    this.warmSession = false;
     try { this.q?.close?.(); } catch { /* already closed */ }
     this.input.end();
     this.input = new Pushable<SDKUserMessage>();
@@ -544,6 +596,8 @@ export class ClaudeBrain extends Brain {
   }
 
   async stop() {
+    if (this.warmTimer) clearTimeout(this.warmTimer);
+    this.warmTimer = null;
     this.memory.close();
     try {await this.pauseForInput();}
     finally {this.resetSession();currentLoop()?.exit("abort_signal", { detail: "brain stopped" });this.input.end();}
