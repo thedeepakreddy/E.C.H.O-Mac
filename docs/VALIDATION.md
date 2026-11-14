@@ -16,6 +16,25 @@ Office/Retry/report-Retry/trackpad browser fixtures passed. Runtime was Node
 v26.8.2. These are local dirty-checkout results, not a committed/deployed revision
 or native Calculator, audible voice, multi-display or physical-iPhone proof.
 
+## Check performed on November 13–14, 2026
+
+Baseline: `main` at `1220956`. Runtime: a Linux container, Node.js `v22.23.4`. This is not macOS, so nothing here exercises voice, screen control, native helpers, Electron windows or a live model.
+
+| Executed check | Result | Scope |
+| --- | --- | --- |
+| `npm run typecheck` | Passed | TypeScript project checking. |
+| `npm test` at the baseline, before any change | **155/159** | Offline suites with controlled dependencies. |
+| `npm test` after the changes | **157/161** | The same suites plus two new ones (`localllmtest`, `schedulestest`). |
+| `npm run build` | Completed | Bundles main and preloads; native helpers are skipped off macOS. |
+
+The four suites that fail do so identically before and after, for reasons in the environment rather than the code: `composetest` looks for installed macOS applications (Safari, Chrome, Finder, Terminal), and `embedtest`, `toolroutertest` and `autoreflextest` need the local embedder in `models/embed/`, which could not be downloaded from this network. They were not made to pass and should be re-run on a Mac with `npm run embedder` done.
+
+A static pass with typescript-eslint (floating promises, misused promises, unsafe `finally`, exhaustive switches) was run over the non-test source outside the project; it is not a project dependency. It reported 26 findings, of which the `return` inside `finally` in `brain/claude.ts` and three unhandled rejections were fixed. The remainder are intentional (`setInterval` callbacks that catch internally, switches with a default).
+
+New or extended assertions in this round: `exittest` 53 (was 31), `modelhealthregressiontest` 15 tests (was 13), `memoryostest` 137 (was 125), `personatest` 65 (was 42), `supervisedtest` 62 groups (was 59), `schedulestest` 26, `localllmtest` 7, plus team cases in `botstest`.
+
+Not run in this round: every UI, live and device suite; the `claude.keepWarm` option against the real SDK (its tests use a stand-in for the SDK stream, and its effect on latency is unmeasured); a scheduled task on a real provider; whether a given model follows the character guidance.
+
 ## Check performed on October 10, 2026
 
 Baseline: GitHub `main` at `4ddebf6` (`Update usage policy in README`), with the remote test fixture correction included in this documentation update. Runtime: macOS, Node.js `v26.8.2`.
