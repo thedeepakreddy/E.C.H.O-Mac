@@ -14,6 +14,14 @@ class Agent extends EventEmitter {
 }
 const root = mkdtempSync(join(tmpdir(), 'echo-supervised-'));
 const tick = () => new Promise(resolve => setTimeout(resolve, 15));
+/** Wait for a condition rather than a fixed time: a loaded machine is slow, not wrong. */
+async function until(condition: () => boolean, label: string, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for: ${label}`);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
 let count = 0;
 function fixture(name: string, overrides: any = {}, spec: Partial<SupervisedSpec> = {}) {
   const coordinator:TaskCoordinator = overrides.coordinator ?? new TaskCoordinator(join(root, name));
@@ -132,10 +140,15 @@ try {
         const callId=saveCall(f,effect,status);finishWorker(f);await tick();
         if(path==='missing')f.inspectors.at(-1)!.emit('turnEnd');
         else review(f,path);await tick();
-        assert.equal(f.workers.length,blocked?1:2,`${path}: ${effect??'unknown'} ${status} repair launch`);
+        // A review that never arrived is the inspector's failure: the inspection
+        // is run again and the worker is left alone. An unknown action outcome
+        // still blocks on every path, this one included.
+        const reinspected=path==='missing'&&!blocked;
+        assert.equal(f.workers.length,blocked||reinspected?1:2,`${path}: ${effect??'unknown'} ${status} repair launch`);
         const saved=f.supervisor.inspect(f.id)!;
-        assert.equal(saved.status,blocked?'blocked':'repairing');
-        assert.equal(saved.repairs,blocked?0:1);
+        assert.equal(saved.status,blocked?'blocked':reinspected?'inspecting':'repairing');
+        assert.equal(saved.repairs,blocked||reinspected?0:1);
+        if(reinspected)assert.equal(f.inspectors.length,2,'a missing review re-runs the inspection, not the worker');
         if(blocked) {
           assert(saved.blockers.some(b=>b.includes(callId)&&b.includes(status)), 'blocker must identify the saved uncertain call');
           assert.equal(f.reports.length,1);assert.equal(saved.cleanup.finished,true);
@@ -262,6 +275,44 @@ try {
     const agent=new Agent();(agent as any).stop=undefined;
     const f=fixture('missing-stop',{makeWorker:()=>agent});await f.supervisor.cancel(f.id);
     assert.equal(f.supervisor.inspect(f.id)?.cleanup.finished,false);assert.match(f.supervisor.inspect(f.id)!.cleanup.errors[0],/no stop implementation/);count++;
+  }
+  {
+    // The inspector running out of time is the inspector's failure, not the
+    // worker's. It used to cost a repair attempt and send the worker back to
+    // redo its work, with "Inspector ended without a structured review" as the
+    // only instruction.
+    const f=fixture('slow-inspector-then-pass',{inspectionMs:{final:400,progress:400}},{maxRepairs:2});
+    try {
+      finishWorker(f);await until(()=>f.inspectors.length===1,'the first final inspector');
+      await until(()=>f.inspectors.length===2,'a final inspection that ends with no review is run once more');
+      assert.equal(f.inspectors[0].stops,1,'the inspector that ran out of time is stopped');
+      assert.equal(f.workers.length,1,'the worker is NOT sent back to redo its work');
+      assert.equal(f.supervisor.inspect(f.id)!.repairs,0,'and no repair attempt is spent');
+      assert.match(f.inspectors[1].sent[0].text,/previous inspector ran out of time/);
+      assert.doesNotMatch(f.inspectors[0].sent[0].text,/previous inspector/);
+      review(f,'pass');await until(()=>f.supervisor.inspect(f.id)?.status==='completed','a second inspector that does review settles the task');count++;
+    } finally {await f.supervisor.close();}
+  }
+  {
+    const f=fixture('inspector-never-reviews',{inspectionMs:{final:40,progress:40}},{maxRepairs:2});
+    try {
+      finishWorker(f);await until(()=>f.supervisor.inspect(f.id)?.status==='blocked','two silent inspections end the task as unverified');
+      // Long enough for a third inspector to have started, had the retry not been bounded.
+      await new Promise(resolve=>setTimeout(resolve,120));
+      const state=f.supervisor.inspect(f.id)!;
+      assert.equal(state.status,'blocked');assert.equal(f.inspectors.length,2,'the inspection is retried once, not indefinitely');
+      assert.equal(f.workers.length,1);assert.equal(state.repairs,0);
+      assert(state.blockers.some(b=>/unverified/.test(b)&&/saved unchanged/.test(b)),'the report says the result is unverified, not that the work was wrong');
+      assert.equal(state.result?.artifacts.length,1,'the worker\'s output is kept with the report');count++;
+    } finally {await f.supervisor.close();}
+  }
+  {
+    // A review that asks for repair is still a repair: only a MISSING review is the inspector's own failure.
+    const f=fixture('real-repair-still-repairs',{inspectionMs:{final:5000,progress:5000}},{maxRepairs:2});
+    try {
+      finishWorker(f);await tick();review(f,'repair');await tick();
+      assert.equal(f.workers.length,2);assert.equal(f.supervisor.inspect(f.id)!.repairs,1);count++;
+    } finally {await f.supervisor.close();}
   }
   console.log(`${count} supervised task lifecycle groups passed`);
 } finally {rmSync(root,{recursive:true,force:true});}
