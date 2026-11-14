@@ -523,6 +523,21 @@ console.log("\nkeeping the next Claude session warm");
     await brain.stop();
   }
   {
+    // A session warmed under one model must not answer after the model changes.
+    const { brain, sessions, events } = build(true);
+    brain.cfg = { ...brain.cfg, claude: { ...brain.cfg.claude } };
+    brain.send("first request", undefined, { taskId: "settings-task-1" });
+    await settle(450);
+    check("a session is warm and waiting", sessions.length === 2 && sessions[1].received === 0);
+    brain.cfg.claude.model = "a-different-model";
+    brain.send("second request", undefined, { taskId: "settings-task-2" });
+    await settle(60);
+    check("a settings change discards the warm session instead of answering from it",
+      sessions.length === 3 && sessions[1].closed && sessions[1].received === 0 && sessions[2].received === 1);
+    check("and the turn still completes", events.turnEnd === 2 && events.errors.length === 0);
+    await brain.stop();
+  }
+  {
     const { brain, sessions, events } = build(false);
     brain.send("first request", undefined, { taskId: "cold-task-1" });
     await settle(450);

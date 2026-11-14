@@ -130,6 +130,8 @@ export class ClaudeBrain extends Brain {
    */
   private warmSession = false;
   private warmTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the warm session was built from; see `sessionSettings`. */
+  private warmSettings = "";
 
   constructor(private cfg: JarvisConfig, private readonly limits: BrainExecutionLimits = {}, private readonly session: { keepWarm?: boolean } = {}) {
     super();
@@ -290,6 +292,24 @@ export class ClaudeBrain extends Brain {
   }
 
   /**
+   * Everything a session fixes when it starts.
+   *
+   * A session started at send time always reflects the settings of that
+   * moment. One started ahead of need reflects the moment it was warmed, so a
+   * model or persona change made in between would otherwise be answered by a
+   * session built under the old settings — one turn late, with nothing to say
+   * why. `send()` compares this and starts cold when it has moved.
+   */
+  private sessionSettings(): string {
+    let servers: string[] = [];
+    try { servers = Object.keys(loadMcpConfig()).sort(); } catch { /* compared as "none" */ }
+    return JSON.stringify([
+      this.cfg.claude.model, this.cfg.claude.systemPromptPreset, this.cfg.control.workingDir,
+      buildSystemPrompt(this.projectHint, undefined, false), servers,
+    ]);
+  }
+
+  /**
    * Start the next session now, while nobody is waiting on it.
    *
    * Called a moment after a turn's result. The finished session is replaced by
@@ -306,6 +326,7 @@ export class ClaudeBrain extends Brain {
         this.resetSession();
         this.start();
         this.warmSession = true;
+        this.warmSettings = this.sessionSettings();
       } catch (err) {
         // Warming is an optimisation. If it cannot start, the next message
         // starts a session the ordinary way.
@@ -532,7 +553,10 @@ export class ClaudeBrain extends Brain {
     // built from. A warm session has been sent nothing, so there is no history
     // for the reset to clear, and keeping it is the whole point of warming it.
     const needsReset = this.memory.begin(userText, opts);
-    if (needsReset && !(this.warmSession && this.started)) this.resetSession();
+    const warm = this.warmSession && this.started;
+    // A warm session is kept only while it still matches the settings a cold
+    // start would use right now.
+    if (warm ? this.warmSettings !== this.sessionSettings() : needsReset) this.resetSession();
     this.warmSession = false;
     if (!this.started) this.start();
     this.emitEvent("status", "thinking");

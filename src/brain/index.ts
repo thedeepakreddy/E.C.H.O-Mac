@@ -143,7 +143,7 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
   // task and is stopped, so warming a second session for it would be a process
   // started only to be killed.
   selected = new ClaudeBrain(cfg, options.limits, {
-    keepWarm: cfg.claude.keepWarm === true && (options.identity?.kind ?? "main") === "main",
+    keepWarm: cfg.claude.keepWarm !== false && (options.identity?.kind ?? "main") === "main",
   });
   provider = "claude";
   return {
