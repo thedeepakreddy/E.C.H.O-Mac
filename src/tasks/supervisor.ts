@@ -47,7 +47,24 @@ export interface SupervisorDeps {
   onReport?(state: SupervisedState): unknown;
   onChange?(): void;
   cleanupTimeoutMs?: number;
+  /** Wall time for one inspection. Defaults to INSPECTION_MS; a test shortens it. */
+  inspectionMs?: {progress?: number; final?: number};
 }
+/**
+ * How long one inspection may take.
+ *
+ * Both kinds used to share a fixed 120 seconds. A progress check can be that
+ * quick. A FINAL review is asked to read the worker's saved calls, open the
+ * actual files and logs, and independently verify every acceptance criterion —
+ * and when 120 seconds ran out before it submitted, the supervisor read "no
+ * review" as "the work needs repair": it spent a repair attempt and made the
+ * worker redo work that may have been correct, with "Inspector ended without a
+ * structured review" as its only instruction. Two slow inspections blocked the
+ * task. Either way the whole task's own deadline still applies on top.
+ */
+export const INSPECTION_MS = {progress: 3 * 60_000, final: 10 * 60_000} as const;
+/** Final inspections that may end with no review before the result is called unverified. */
+const UNREVIEWED_FINALS_ALLOWED = 1;
 interface OwnedAgent {brain: CloneBrain; taskId: string; actorId: string;}
 interface LiveTask {
   state: SupervisedState; worker?: OwnedAgent; inspector?: OwnedAgent;
@@ -55,6 +72,8 @@ interface LiveTask {
   deadline: NodeJS.Timeout; interval: NodeJS.Timeout;
   closing?: Promise<void>;
   workerProgress?:string;inspectorProgress?:string;lastProgressAt?:number;
+  /** Final inspections of the current worker attempt that ended without a review. */
+  unreviewedFinals?:number;
 }
 const terminal = (status: SupervisedState['status']) => ['completed','blocked','cancelled'].includes(status);
 const evidence = (task: TaskState | undefined) => new Set(task?.bindings.observedVerificationRefs as string[] ?? []);
@@ -183,7 +202,7 @@ export class TaskSupervisor {
 
   private startWorker(task: LiveTask, feedback = ''): void {
     if (task.closing || terminal(task.state.status)) return;
-    const state = task.state; state.attempt++; task.workerDone=false;
+    const state = task.state; state.attempt++; task.workerDone=false; task.unreviewedFinals=0;
     const taskId = `${state.id}.work${state.attempt}`, actorId = `${state.id}.worker`;
     state.workerTaskIds.push(taskId); state.status=state.repairs?'repairing':'executing';
     this.deps.coordinator.create({taskId,parentTaskId:state.id,ownerActorId:actorId,goal:state.goal,privateMode:state.spec.privateMode,scope:state.spec.scope});
@@ -219,7 +238,7 @@ export class TaskSupervisor {
     const task=this.live.get(id);
     if(task && !task.closing && !task.workerDone && !task.inspector) this.startInspector(task,false);
   }
-  private startInspector(task: LiveTask, final: boolean): void {
+  private startInspector(task: LiveTask, final: boolean, note = ''): void {
     if(task.closing || task.inspector) return;
     const state=task.state, taskId=`${state.id}.review${state.inspectorTaskIds.length+1}`, actorId=`${state.id}.inspector`;
     state.inspectorTaskIds.push(taskId); task.inspectorFinal=final; task.review=undefined;
@@ -230,7 +249,8 @@ export class TaskSupervisor {
       brain.on('text',text=>{if(task.inspector?.brain===brain && !task.closing) this.progress(task,'inspector',text);});
       let ended=false;
       const finish=()=>{if(!ended && task.inspector?.brain===brain && !task.closing) {ended=true;void this.inspectorEnded(task).catch(e=>this.end(state.id,'blocked',[issue(e)]));}};
-      const limit=setTimeout(finish,Math.min(120_000,Math.max(1,state.createdAt+state.spec.timeoutMs!-Date.now())));
+      const allowed=final?this.deps.inspectionMs?.final ?? INSPECTION_MS.final:this.deps.inspectionMs?.progress ?? INSPECTION_MS.progress;
+      const limit=setTimeout(finish,Math.min(allowed,Math.max(1,state.createdAt+state.spec.timeoutMs!-Date.now())));
       brain.on('turnEnd',()=>{clearTimeout(limit);finish();});
       brain.on('error',()=>{clearTimeout(limit);finish();});
       // Store the timer on the owned agent's stop path so cancellation clears it too.
@@ -243,7 +263,8 @@ export class TaskSupervisor {
         `A file merely existing is insufficient for an application; inspect current tests, regression results and user flows. `+
         `If incomplete, submit_task_review verdict repair with actionable fixes; if unsafe or impossible use blocked. `+
         `For progress use continue or repair; never pass. Finish by calling submit_task_review with a fresh viewToken. `+
-        `Do not edit, execute shell commands, spawn agents or claim a test passed without its logs.`,undefined,
+        `Do not edit, execute shell commands, spawn agents or claim a test passed without its logs.`+
+        (note?`\n${note}`:''),undefined,
         {taskId,parentTaskId:state.id,scope:{...state.spec.scope,supervisorTaskId:state.id},modality:'text',privateMode:state.spec.privateMode});
       this.persist(task);
     } catch(error) {void this.end(state.id,'blocked',[`Inspector initialization: ${issue(error)}`]);}
@@ -262,7 +283,24 @@ export class TaskSupervisor {
       else this.persist(task);
       return;
     }
-    if(!review) {await this.repair(task,['Inspector ended without a structured review']);return;}
+    if(!review) {
+      // The INSPECTOR failed here — it ran out of time or stopped without
+      // submitting. That says nothing about the worker's output, so it must
+      // not cost a repair attempt or send the worker back to redo it. Inspect
+      // once more; if that also yields nothing, the honest state is
+      // "unverified", with the work and its evidence left exactly as they are.
+      // One thing does not change: an action whose outcome is unknown blocks
+      // the task whichever way the review went, exactly as on the repair path.
+      const unsafe=this.unresolvedWorkerEffects(task);
+      if(unsafe.length) {await this.end(task.state.id,'blocked',['Inspector ended without a structured review',...unsafe]);return;}
+      task.unreviewedFinals=(task.unreviewedFinals ?? 0)+1;
+      if(task.unreviewedFinals<=UNREVIEWED_FINALS_ALLOWED && Date.now()<task.state.createdAt+task.state.spec.timeoutMs!) {
+        this.startInspector(task,true,'A previous inspector ran out of time or stopped before submitting its review, so nothing has been verified yet. Do the required checks first — inspect the task, verify each acceptance criterion, then submit_task_review — before anything optional.');
+        return;
+      }
+      await this.end(task.state.id,'blocked',['The independent inspection ended without a structured review more than once, so this result is unverified. The worker\'s output and evidence are saved unchanged; read the task report before continuing.']);
+      return;
+    }
     if(review.verdict==='blocked') {await this.end(task.state.id,'blocked',[review.summary]);return;}
     if(review.verdict!=='pass') {await this.repair(task,[review.summary]);return;}
     task.state.status='verifying'; this.persist(task);

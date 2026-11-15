@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 import {TOOL_MAP} from './tools/registry.js';
 assert(/voiceLog\.init\(dataRoot\(\)\)/.test(readFileSync('src/main.ts','utf8')),'Installed Echo must write voice diagnostics under mutable user data, not its application bundle');
 const brightness=TOOL_MAP.get('adjust_brightness')!;

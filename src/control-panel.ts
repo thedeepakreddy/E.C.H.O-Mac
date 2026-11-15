@@ -322,7 +322,9 @@ export function wireControlPanel(deps: {
     // scheme or a local file path.
     if (authorized(event) && typeof url === "string" && /^https:\/\//.test(url)) {
       const { shell } = nodeRequire("electron") as typeof import("electron");
-      shell.openExternal(url);
+      shell.openExternal(url).catch((error) => {
+        console.error("[control] could not open the link:", (error as any)?.message ?? error);
+      });
     }
   });
 }

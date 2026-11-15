@@ -1,6 +1,9 @@
 import { watch, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Tts } from "../voice/tts.js";
+import { localGenerate } from "./local-llm.js";
+import { addressed } from "../brain/character.js";
+import { activeConfig } from "../config.js";
 
 let debugWatcher: import("node:fs").FSWatcher | null = null;
 let lastSize = 0;
@@ -28,18 +31,14 @@ export function startAutoDebug(tts: Tts) {
               
               const lower = newText.toLowerCase();
               if (lower.includes("error:") || lower.includes("exception") || lower.includes("traceback (most recent call last)")) {
-                 fetch("http://localhost:11434/api/generate", {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({
-                      model: "llama3.2:3b",
-                      prompt: `You are Jarvis, an auto-debugger. A terminal error just occurred:\n${newText.substring(0, 1000)}\n\nIn ONE short sentence, tell the user what the error is and ask if you should fix it.`,
-                      stream: false
-                    })
-                 }).then(r => r.json()).then(d => {
-                    tts.say(d.response);
-                 }).catch(() => {
-                    tts.say("Sir, I detected a terminal error. Shall I investigate the logs?");
+                 // The configured local model, with a deadline. This used to read
+                 // `response` straight off whatever came back, so a missing model
+                 // (an error body with no `response`) was spoken as-is.
+                 void localGenerate(
+                   `You are Jarvis, an auto-debugger. A terminal error just occurred:\n${newText.substring(0, 1000)}\n\nIn ONE short sentence, tell the user what the error is and ask if you should fix it.`,
+                   30_000
+                 ).then((reply) => {
+                    tts.say(reply ?? addressed(activeConfig().persona, "I detected a terminal error. Shall I investigate the logs?"));
                  });
               }
             } else {

@@ -97,6 +97,50 @@ try{
    assert(progress.some(value=>value.includes(`Using Gemini model ${requests.at(-1)}`)),'Progress names only a model that actually responded');
   }finally{await provider.stop();}
  });
+ await test('Gemini keeps the configured model through a temporary fallback and returns to it',async()=>{
+  const cfg=config(),account='gemini-sticky-fallback-fixture';cfg.gemini.model='preferred-gemini-fixture';
+  const health=healthModule.scopedModelHealth({provider:'gemini',account,
+   environment:cfg.gemini.apiKeyEnv,endpoint:'generativelanguage:v1beta'});
+  const provider=new GeminiBrain(cfg,account,{allowedTools:new Set(),maxIterations:3});
+  const requests:string[]=[],progress:string[]=[];let overloaded=true;
+  provider.on('error',()=>{});provider.on('progress',value=>progress.push(String(value)));
+  (provider as any).ai={models:{generateContentStream:async(request:any)=>{
+   requests.push(request.model);
+   if(request.model==='preferred-gemini-fixture'&&overloaded)throw Object.assign(Error('The model is overloaded'),{status:503});
+   return geminiReply();
+  }}};
+  try{
+   await turn(provider);
+   const fallback=requests.at(-1)!;
+   assert.notEqual(fallback,'preferred-gemini-fixture','The overloaded turn is answered by a fallback');
+   assert.equal(cfg.gemini.model,'preferred-gemini-fixture','A fallback never replaces the model the user configured');
+   assert.equal(health.usable('preferred-gemini-fixture'),false,'The overloaded model is paused, not asked again at once');
+   await turn(provider);
+   assert.equal(requests.filter(model=>model==='preferred-gemini-fixture').length,1,'The paused model is not re-asked while its pause lasts');
+   assert.equal(progress.filter(value=>value.includes(`Using Gemini model ${fallback}`)).length,1,'A model in continued use is announced once, not on every request');
+   // The pause passing is what the reset stands in for; the provider recovered.
+   overloaded=false;health.reset();
+   await turn(provider);
+   assert.equal(requests.at(-1),'preferred-gemini-fixture','Once usable again the configured model is asked first');
+   assert(progress.some(value=>value.includes('Using Gemini model preferred-gemini-fixture')),'Returning to the configured model is announced');
+  }finally{await provider.stop();}
+ });
+ await test('a model that keeps failing temporarily is paused for longer each time, and a success clears it',async()=>{
+  const health=healthModule.scopedModelHealth({provider:'gemini',account:'backoff-fixture',environment:'ENV',endpoint:'backoff'});
+  const pause=()=>{const stored=JSON.parse(readFileSync(join(root,'model-health',readdirSync(join(root,'model-health'))
+   .find(name=>readFileSync(join(root,'model-health',name),'utf8').includes('flaky-fixture'))!),'utf8'))['flaky-fixture'];return stored.until-stored.at;};
+  health.markUnavailable('flaky-fixture','stalled');const first=pause();
+  health.markUnavailable('flaky-fixture','stalled');const second=pause();
+  for(let n=0;n<12;n++)health.markUnavailable('flaky-fixture','temporarily overloaded');
+  const capped=pause();
+  assert.equal(first,60_000);assert.equal(second,120_000,'A second failure in a row doubles the pause');
+  assert.equal(capped,15*60_000,'The pause is capped, so a recovered model is always re-tried');
+  assert.equal(health.usable('flaky-fixture'),false);
+  health.noteSuccess('flaky-fixture');
+  assert.equal(health.usable('flaky-fixture'),true,'An answer clears the pause');
+  health.markUnavailable('flaky-fixture','stalled');
+  assert.equal(pause(),60_000,'and the streak with it');
+ });
  await test('Gemini skips a fallback another same-account worker marked dead during this turn',async()=>{
   const cfg=config(),account='gemini-shared-account-fixture';cfg.gemini.model='shared-primary-fixture';
   const {GEMINI_MODEL_FALLBACKS}=await import('./brain/types.js');

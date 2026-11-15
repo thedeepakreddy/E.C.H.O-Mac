@@ -6,6 +6,8 @@ Follow the repository's [permission and use policy](../README.md#permission-and-
 
 ## Install and launch
 
+Requirements: macOS 13 (Ventura) or later, and Node.js 22.12 or later. Both come from the Electron 45 runtime Echo is built on, which no longer supports macOS 12 and whose npm package needs that Node version to install.
+
 Install Node.js and npm, then run from the repository directory:
 
 ```bash
@@ -22,7 +24,7 @@ npm start
 
 `npm run embedder` fetches the local sentence embedder into `models/embed`. `models/` is not in the repository, so a fresh clone has none — and nothing fails without it. Echo simply gets slower: the tool router stops pruning and every brain receives the full tool list each turn, the reflex cache falls back to exact-string matching so a reworded repeat pays the model again, and no fast path is ever learned. `npm run doctor` reports whether it is present.
 
-`npm start` builds and launches Electron. The build uses esbuild and does not substitute for `npm run typecheck`. `npm run dev` rebuilds on changes; it is not the normal launch command. Check the [validation record](VALIDATION.md) for the runtime used in the latest checks.
+`npm start` builds and launches Electron. The Electron binary is no longer downloaded by `npm install`: it is fetched the first time Electron runs, so the first `npm start` after a fresh install or an Electron upgrade needs a network connection and takes longer. `npx install-electron --no` fetches it ahead of time. The build uses esbuild and does not substitute for `npm run typecheck`. `npm run dev` rebuilds on changes; it is not the normal launch command. Check the [validation record](VALIDATION.md) for the runtime used in the latest checks.
 
 The built-in Whisper default is the English model above. For multilingual local recognition, download a multilingual Whisper model, select its path in `voice.sttModel`, and configure the desired recognition language. Provider-specific realtime audio is a separate feature; installing a multilingual model does not enable it.
 

@@ -2,6 +2,10 @@
 
 [README](../README.md) · [Setup](GETTING_STARTED.md) · [Configuration](CONFIGURATION.md) · [Validation](VALIDATION.md)
 
+## Character and form of address
+
+Echo speaks in a consistent manner on every model: composed, exact and dry. It acknowledges an instruction and acts on it, reports the outcome first, tells you about a problem before it happens when it can see one coming, and disagrees once if it thinks an instruction is a mistake. By default it addresses you as “sir”, at most once in a reply. Set `persona.address` in the configuration to whatever you prefer, or to an empty string for none; set `persona.character` to `plain` to turn the manner off. Reports, code and messages Echo writes for other people are not affected. This is prompt guidance in [src/brain/character.ts](../src/brain/character.ts); how closely a given model follows it varies.
+
 ## Voice and model selection
 
 Say “Echo” followed by a request, click the reactor, or use **⌘⇧J** for push-to-talk. A follow-up window can accept another utterance without repeating the wake word. Its duration, silence threshold and interruption behavior are configuration choices, not fixed promises about every device.
@@ -16,9 +20,15 @@ For building or changing software through conversation, see [Vibe coding with Ec
 
 The **Bots** page starts a task or a coordinated team, shows progress, and displays the result. The **Agents** views show the underlying task board and configured roles. They share [the task service](../src/frontier/swarm.ts); they are not two independent task engines.
 
-Built-in fleet roles are Lead, Research, Plan, Write, Review and Analyse. Role tier and grants influence which model and tools a worker can use. Bot teams use dependencies so later roles can consume earlier work. Screen-control ownership limits competing input; separate research workers can proceed without taking over the desktop.
+Built-in fleet roles are Lead, Research, Plan, Write, Review, Analyse and Verify. Every agent uses the brain selected in Echo when it starts; roles differ in their brief, reasoning level and tool grants. Bot teams use dependencies so later roles can consume earlier work: Verify audits the sources behind the other reports, Review weighs everything including that audit, and Lead combines the results. Each agent has its own time budget (eight minutes for a team specialist, six for Lead, ten for a specialist working alone); a larger team does not shrink it. A specialist that could only partly finish still hands its report on, with its gaps stated, and the run as a whole is marked partial. A specialist that failed blocks what depends on it and can be retried from the Bots page. Screen-control ownership limits competing input; separate research workers can proceed without taking over the desktop.
 
 Useful requests include “research three laptops and compare them,” “what did the agents find?” and “cancel the mission.” Review the report and sources before acting on it. A completed status indicates the workflow ended, not that every statement or external effect was independently verified.
+
+### Recurring tasks
+
+Ask for something to repeat and Echo schedules it: “check the build every ten minutes and tell me if it breaks,” or “every morning at nine, tell me what's on my calendar.” A schedule is either an interval of at least 60 seconds or a daily local time. Echo asks before creating one, because it starts an agent that acts with nobody at the desk.
+
+Each run is an ordinary background agent: it appears on the board while it works, its result is saved, and “what did the scheduled task find?” reads it back. A run never overlaps the previous one. Schedules are saved in `schedules.json` in the data root and continue after a restart; runs missed while Echo was closed are made up once, about a minute after launch, not once each. “What's scheduled?” lists them and “cancel the build check” stops one. At most 20 exist at a time. [src/frontier/schedules.ts](../src/frontier/schedules.ts) implements this and [the schedule tests](../src/_schedulestest.ts) cover it with a controlled clock; a scheduled run on a real provider is subject to the same quota, permissions and approval rules as any other agent.
 
 The [Bots usage notes](bots-integration/usage.md) describe task routing, results and research access. [Bots tests](../src/_botstest.ts) check lifecycle and orchestration with controlled dependencies. They do not measure real-provider research quality.
 

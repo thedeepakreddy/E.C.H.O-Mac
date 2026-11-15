@@ -22,7 +22,7 @@ ipcMain.on('control:open-url',(_e,url)=>{external=url;});
 app.whenReady().then(async () => {
 const win=new BrowserWindow({width:1180,height:760,show:false,webPreferences:{preload:resolve(root,'dist/preload.cjs'),contextIsolation:true,sandbox:true}});
 let failed=false;
-const errors=[];win.webContents.on('console-message',(_e,level,message)=>{if(level>=3&&!message.includes('Content Security Policy'))errors.push(message);});
+const errors=[];win.webContents.on('console-message',event=>{if(event.level==='error'&&!event.message.includes('Content Security Policy'))errors.push(event.message);});
 try{
  win.showInactive();
  await win.loadFile(resolve(root,'renderer/control-panel.html'));

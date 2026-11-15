@@ -121,7 +121,7 @@ The [tool registry](src/tools/registry.ts) is the source of truth for built-in t
 
 ## Run an authorized local checkout
 
-Echo currently supports **macOS**. Screen control and voice depend on macOS helpers and permissions; other operating systems are not supported.
+Echo currently supports **macOS 13 (Ventura) or later**, with Node.js 22.12 or later. Screen control and voice depend on macOS helpers and permissions; other operating systems are not supported.
 
 ```bash
 brew install cliclick whisper-cpp

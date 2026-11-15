@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 import {Brain, type BrainEventMap} from './brain/types.js';
 import {BrainLifecycle, type BrainHandlers} from './brain/lifecycle.js';
 import {PROVIDERS, unavailableReason} from './brain/switching.js';

@@ -139,7 +139,12 @@ export function createBrain(cfg: JarvisConfig, options: CreateBrainOptions = {})
       maxIterations: options.limits?.maxIterations ?? LOOP_CAPS.openai.maxIterations, model: cfg.nvidia.model}, options), provider};
   }
 
-  selected = new ClaudeBrain(cfg, options.limits);
+  // Only the main Echo keeps a session warm between turns; an agent runs one
+  // task and is stopped, so warming a second session for it would be a process
+  // started only to be killed.
+  selected = new ClaudeBrain(cfg, options.limits, {
+    keepWarm: cfg.claude.keepWarm !== false && (options.identity?.kind ?? "main") === "main",
+  });
   provider = "claude";
   return {
     brain: new RecordingBrain(selected, provider, { ...LOOP_CAPS.claude, maxTurns: options.limits?.maxIterations ?? LOOP_CAPS.claude.maxTurns, model: cfg.claude.model }, options),

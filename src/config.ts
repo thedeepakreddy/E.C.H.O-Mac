@@ -7,6 +7,19 @@ export interface JarvisConfig {
   /** Shared working context across providers. All token sizes are estimates. */
   context?: import("./memory/conversation.js").ContextSettings;
   brain: "claude" | "gemini" | "ollama" | "openai" | "openrouter" | "nvidia";
+  /**
+   * How Echo carries itself in conversation (brain/character.ts).
+   *
+   * `character`: "jarvis" (the default) is composed, exact and dry — it
+   * acknowledges then acts, leads with the outcome, warns before a problem and
+   * disagrees once. "plain" turns that off and leaves the concise assistant.
+   *
+   * `address`: how it addresses you — "sir", "ma'am", "boss", your name. Used
+   * sparingly, at most once in a reply. An empty string means no form of
+   * address at all. It never appears in reports, code or messages Echo writes
+   * for someone else.
+   */
+  persona?: { character?: "jarvis" | "plain"; address?: string };
   /** NVIDIA's hosted Chat Completions API; inference runs in the cloud. */
   nvidia: {model: string; apiKeyEnv: string; baseUrl: string; maxOutputTokens: number; reasoningEffort: 'low' | 'high' | 'max'};
   /**
@@ -16,7 +29,23 @@ export interface JarvisConfig {
    * identity and adds several thousand tokens to every turn. Only worth it for
    * a mostly-coding setup.
    */
-  claude: { model: string; systemPromptPreset: "claude_code" | "none" };
+  /**
+   * `keepWarm`: start the next SDK session as soon as a turn ends, instead of
+   * when the next message arrives.
+   *
+   * Every new task resets the Claude session, and a session is a subprocess:
+   * today the first thing a new turn does is boot one, before the model can
+   * begin answering. With this on, that boot happens during the pause after
+   * the previous reply, and the next message goes straight to a session that
+   * is already up. Nothing is sent to the model while it waits.
+   *
+   * On by default. Measured on real turns (Agent SDK 0.3.325, Linux): the
+   * first text of every turn after the first arrived in about 2.3s with it and
+   * about 3.8s without, across two runs of each. Set it to false to go back to
+   * starting a session when the message arrives. Background agents never use
+   * it: they run one task and stop.
+   */
+  claude: { model: string; systemPromptPreset: "claude_code" | "none"; keepWarm?: boolean };
   gemini: { model: string; apiKeyEnv: string };
   ollama: { model: string; host: string };
   /**
@@ -483,9 +512,14 @@ const DEFAULTS: JarvisConfig = {
   nvidia: {model: 'moonshotai/kimi-k3', apiKeyEnv: 'NVIDIA_API_KEY', baseUrl: 'https://integrate.api.nvidia.com/v1', maxOutputTokens: 16384, reasoningEffort: 'low'},
   context: { maxTokens: 128000, outputReserveTokens: 16000, compactAt: 0.75, providerLimits: {} },
   brain: "claude",
-  claude: { model: "claude-sonnet-5-5", systemPromptPreset: "none" },
-  // gemini-2.5-flash is retired for new keys; 2.0-flash still resolves.
-  gemini: { model: "gemini-2.0-flash", apiKeyEnv: "GEMINI_API_KEY" },
+  persona: { character: "jarvis", address: "sir" },
+  claude: { model: "claude-sonnet-5-5", systemPromptPreset: "none", keepWarm: true },
+  // The model the fallback ladder itself leads with (GEMINI_MODEL_FALLBACKS in
+  // brain/types.ts), which is ordered by measured latency on a real key. The
+  // default used to be gemini-2.0-flash, which that same measurement found
+  // retired ("no longer available"): a fresh install spent its first request
+  // on a 404 before falling back. _wiringtest keeps the two in step.
+  gemini: { model: "gemini-3.1-flash-lite", apiKeyEnv: "GEMINI_API_KEY" },
   ollama: { model: "llama3.2:3b", host: "http://localhost:11434" },
   openai: { model: "gpt-4o", apiKeyEnv: "OPENAI_API_KEY", auth: "auto", chatgptModel: "", chatgptRedirectPort: 8797, chatgptSendHostId: false },
   openrouter: {

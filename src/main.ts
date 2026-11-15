@@ -1,5 +1,7 @@
 import {companionProjection,companionMemory,saveCompanionMemory,forgetCompanionMemory,phoneUpdateIntent,type CompanionWork} from './control-companion.js';
 import {taskCoordinator} from './memory/task-state.js';
+import {reconcileInterruptedTasks} from './memory/consolidate.js';
+import {scheduler} from './frontier/schedules.js';
 import {PhoneUpdates} from './frontier/phone-updates.js';
 import {phoneUpdateInventory,sendPhoneUpdate} from './frontier/remote.js';
 import {answerBuildQuestion,startProjectBuild,projectIsBuilding} from './coding/dialogue.js';
@@ -720,7 +722,11 @@ function createWindow() {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  win.loadFile(join(__dirname, "..", "renderer", "index.html"));
+  win.loadFile(join(__dirname, "..", "renderer", "index.html")).catch((error) => {
+    // Without the HUD there is no reactor and no visible state at all, so say
+    // exactly what failed rather than leaving an unexplained rejection.
+    console.error("[jarvis] the HUD failed to load:", (error as any)?.message ?? error);
+  });
 
   win.on("closed", () => {
     win = null;
@@ -1379,6 +1385,10 @@ function wireConfirmations() {
       answered.then((approved) => {
         if (approved) confirmations.settle(id, true, "approved from phone");
         else confirmations.settle(id, false, "denied from phone");
+      }).catch((error) => {
+        // The relay failing is not an answer. The local prompt is still open
+        // and still decides; only the phone's copy of the question is lost.
+        console.error("[confirm] phone mirror failed:", (error as any)?.message ?? error);
       });
     } catch {
       /* the phone mirror must never break the local confirmation */
@@ -1569,7 +1579,10 @@ function brainHandlers(): BrainHandlers {
             remoteRecord(`Action: ${info.summary}`, "action");
             send("message", { kind: "action", text: info.summary });
         },
-        'progress': (text: string) => { send('message', { kind: 'action', text }); controlTelemetry.observe('notice', { level: 'info', text }); publishControlUpdate(); },
+        // `send` already files the line in the control panel's activity feed and
+        // schedules its refresh (observeControlEvent). Filing it a second time as
+        // a notice put every progress update in the feed twice.
+        'progress': (text: string) => { send('message', { kind: 'action', text }); },
         "risk": (r: {
             tool: string;
             tier: string;
@@ -2692,7 +2705,7 @@ app.whenReady().then(async () => {
   // explicitly. assets/echo.icns is ready for a future packaged build; other
   // desktop platforms pick up the BrowserWindow icon above.
   if (process.platform === "darwin" && existsSync(ECHO_ICON_PATH)) {
-    app.dock.setIcon(ECHO_ICON_PATH);
+    app.dock?.setIcon(ECHO_ICON_PATH);
   }
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['*://*.youtube.com/*', '*://*.youtube-nocookie.com/*'] },
@@ -2983,7 +2996,30 @@ app.whenReady().then(async () => {
       if (closed.tasks) {
         console.warn(`[echo:recovery] closed ${closed.tasks} abandoned Agent Task(s) across ${closed.missions} mission(s)`);
       }
+      // The same question for ordinary tasks and their working memory. Last,
+      // so everything recovered or reconciled above has already been written
+      // to by this process and is recognised as its own.
+      try {
+        const interrupted = reconcileInterruptedTasks({
+          startedAt: Date.now() - Math.round(process.uptime() * 1000),
+          isLive: (taskId) => taskId === brain?.currentTaskState?.taskId,
+        });
+        if (interrupted.tasks || interrupted.working) {
+          console.warn(`[echo:recovery] closed ${interrupted.tasks} task(s) and ${interrupted.working} working record(s) left open by the previous run`);
+        }
+      } catch (error) {
+        console.error("[echo:recovery] could not reconcile interrupted tasks:", (error as any)?.message ?? error);
+      }
     }
+
+    // Recurring tasks are saved, so "every morning at nine" outlives a restart.
+    // Each run is built on the brain selected when it fires, like every agent.
+    void scheduler().then((schedules) => {
+      if (shuttingDown) return;
+      schedules.start(() => ({ makeBrain: makeFleetBrain() }));
+      const restored = schedules.list().length;
+      if (restored) console.log(`[scheduler] restored ${restored} scheduled task(s)`);
+    }).catch((error) => console.error("[scheduler] could not restore scheduled tasks:", (error as any)?.message ?? error));
     
     // Futuristic Features: Background Tasks
     if (cfg.helpers?.screenHistory === true) {
@@ -3114,6 +3150,9 @@ async function shutdown(): Promise<void> {
   await shutdownStep('speech recognition', () => stopSttServer(), 3000);
   await shutdownStep('audio player', () => player?.dispose(), 3000);
   await shutdownStep('task reports', () => closeTaskReports(), 3000);
+  // Before the agents close: a schedule firing mid-shutdown would start a run
+  // the very next step has to cancel.
+  await shutdownStep('scheduled tasks', async () => (await scheduler()).stop(), 3000);
   await Promise.all([
     shutdownStep('background agents', () => swarm.close()),
     shutdownStep('supervised tasks', () => supervisor.close()),

@@ -1,4 +1,4 @@
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 /** JSON.parse silently overwrites duplicate keys. Check the source tree first. */
 export function parseUniqueJson(source){
  const value=JSON.parse(source);

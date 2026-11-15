@@ -35,6 +35,8 @@ export interface ModelHealthScope {
 
 interface Note {
   temporary?: string;
+  /** Consecutive temporary failures, so a model that keeps failing is asked less often. */
+  strikes?: number;
   /** Why the model was written off, when it 404s. */
   dead?: string;
   /** Epoch ms after which a quota-exhausted model is worth trying again. */
@@ -47,6 +49,12 @@ interface Note {
 const DEAD_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 /** A per-minute rate limit clears in well under this; a daily one does not. */
 const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+/** First pause after a stall or a 503, doubled for each failure in a row. */
+const TEMPORARY_COOLDOWN_MS = 60 * 1000;
+/** However often it has failed, a temporarily unavailable model is re-tried at least this often. */
+const TEMPORARY_COOLDOWN_MAX_MS = 15 * 60 * 1000;
+/** Failures further apart than this are separate incidents, not one streak. */
+const STRIKE_WINDOW_MS = 30 * 60 * 1000;
 
 class ModelHealth {
   private notes: Record<string, Note> | null = null;
@@ -119,10 +127,36 @@ class ModelHealth {
     this.save();
     console.warn(`[${this.provider}] ${model} is not available to this account — dropping it from the ladder`);
   }
+  /**
+   * Stalled or overloaded: step past it for a while, then ask again.
+   *
+   * The pause grows with each failure in a row (1, 2, 4, 8, then 15 minutes at
+   * most) and `noteSuccess` clears it. The fixed minute this used to be only
+   * worked because the Gemini loop also overwrote the configured model with
+   * whichever fallback answered — so a brief 503 on the model the user chose
+   * silently replaced it for the rest of the session. With the choice left
+   * alone, the backoff is what keeps a model that is genuinely struggling from
+   * being re-asked every minute, while one that recovers is used again.
+   */
   markUnavailable(model:string,reason:string):void {
     const notes=this.load();if(notes[model]?.dead&&!this.usable(model))return;
     const temporary=reason==='stalled'||reason==='temporarily overloaded'?reason:'unavailable';
-    notes[model]={until:Date.now()+60000,at:Date.now(),temporary};this.save();
+    const now=Date.now(),previous=notes[model];
+    const streak=previous?.temporary&&now-previous.at<STRIKE_WINDOW_MS?previous.strikes??1:0;
+    const strikes=Math.min(streak+1,16);
+    const pause=Math.min(TEMPORARY_COOLDOWN_MS*2**(strikes-1),TEMPORARY_COOLDOWN_MAX_MS);
+    notes[model]={until:now+pause,at:now,temporary,strikes};this.save();
+  }
+
+  /**
+   * The model just answered, so whatever was noted against it is out of date.
+   * Clears a temporary pause and its streak; a model written off as gone that
+   * answers after its re-probe is believed too.
+   */
+  noteSuccess(model:string):void {
+    const notes=this.load();
+    if(!notes[model])return;
+    delete notes[model];this.save();
   }
 
   /**

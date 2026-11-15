@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 import {OfficeReportQueue} from './frontier/office-report.js';
 // Exercise the actual host functions without booting Electron, speech or models.
 const source=readFileSync('src/main.ts','utf8'),ast=ts.createSourceFile('main.ts',source,ts.ScriptTarget.Latest,true);

@@ -4,7 +4,7 @@ import {EventEmitter} from 'node:events';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';import {tmpdir} from 'node:os';import {randomUUID} from 'node:crypto';
 const root=mkdtempSync(join(tmpdir(),'echo-bots-'));process.env.ECHO_DATA_ROOT=root;process.env.ECHO_MEMORY_ROOT=join(root,'memory');process.env.JARVIS_FLEET_DIR=root;process.env.JARVIS_REMOTE_DIR=root;process.env.ECHO_MCP='0';
-const {createMacBots,botRevision,botIntent,TEAM_BOT_ID}=await import('./frontier/bots.js');
+const {createMacBots,botRevision,botIntent,TEAM_BOT_ID,BOT_BUDGET_MS}=await import('./frontier/bots.js');
 const {makeFleetBrain}=await import('./frontier/fleet-brain.js');
 const {getFleetMember}=await import('./frontier/fleet.js');
 const {SwarmManager}=await import('./frontier/swarm.js');
@@ -39,15 +39,35 @@ try {
   assert.equal(task.readOnly,true);let limits:any;makeFleetBrain(DEFAULTS_FOR_TESTS,((_cfg:any,o:any)=>{limits=o.limits;return {brain:new FakeBrain()};}) as any)({id:'grant-test',name:'Grant test',role:'clone'} as any,task);
   assert.ok(limits.allowedTools.has('recall'));assert.ok(limits.allowedTools.has('submit_agent_result'));assert.equal(limits.allowedTools.has('write_local_file'),false);assert.equal(limits.allowedTools.has('run_terminal_command'),false);assert.equal(limits.allowedTools.has('spawn_agent'),false);
  }
- function complete(missionId:string,profile:string,summary:string,status:'completed'|'failed'='completed'){
+ function complete(missionId:string,profile:string,summary:string,status:'completed'|'failed'|'partial'='completed'){
   const task=host.getMission(missionId)!.tasks[profile];assert.equal(task.status,'working');const brain=brains.find(b=>b.opts?.taskId===task.taskId)!;assert.ok(brain);
-  taskCoordinator.submitResult(task.taskId!,task.actorId!,{status,summary,artifacts:status==='completed'?[{kind:'text',label:`${profile} report`,value:summary}]:[],verificationRefs:[`fixture:${profile}`],blockers:status==='failed'?['fixture failure']:[]});brain.emit('turnEnd');
+  taskCoordinator.submitResult(task.taskId!,task.actorId!,{status,summary,artifacts:status!=='failed'?[{kind:'text',label:`${profile} report`,value:summary}]:[],verificationRefs:[`fixture:${profile}`],blockers:status==='failed'?['fixture failure']:status==='partial'?['source: the third source was unreachable']:[]});brain.emit('turnEnd');
  }
  complete(teamId,'research','Research verified evidence');assert.equal(brains.length,beforeTeam+2);assert.ok(brains.at(-1)!.sent.includes('Research verified evidence'));assert.equal(host.getMission(teamId)!.tasks.review.status,'pending');
  complete(teamId,'plan','Ordered plan using research');assert.equal(brains.length,beforeTeam+3);assert.ok(brains.at(-1)!.sent.includes('Ordered plan using research'));assert.equal(host.getMission(teamId)!.tasks.lead.status,'pending');
  complete(teamId,'review','Review checked the evidence and plan');assert.equal(brains.length,beforeTeam+4);assert.ok(brains.at(-1)!.sent.includes('Review checked the evidence and plan'));assert.ok(brains.at(-1)!.sent.includes('Research verified evidence'));
  complete(teamId,'lead','One consolidated decision');assert.equal(host.getMission(teamId)!.status,'completed');assert.equal(bots.list().jobs.find(j=>j.id===teamId)!.result!.summary,'One consolidated decision');
  const failedTeam=bots.run({...teamRequest,requestId:randomUUID(),goal:'A team with a failed dependency'});const beforeFailure=brains.length;complete(failedTeam.data!.missionId!,'research','The source is unavailable','failed');assert.equal(brains.length,beforeFailure);assert.equal(host.getMission(failedTeam.data!.missionId!)!.tasks.lead.status,'blocked');assert.equal(host.getMission(failedTeam.data!.missionId!)!.status,'failed');
+ // A partial report is still a report. The team reads it, gaps and all, instead of stopping:
+ // a specialist that honestly submitted `partial` used to block Review and Lead with no way back.
+ const partialTeam=bots.run({...teamRequest,requestId:randomUUID(),goal:'A team with one honest partial report'});assert.equal(partialTeam.ok,true);const partialId=partialTeam.data!.missionId!;
+ complete(partialId,'research','Two of three sources read; the third was unreachable','partial');
+ assert.equal(host.getMission(partialId)!.tasks.plan.status,'working','Plan starts from a partial Research report');
+ assert.ok(brains.at(-1)!.sent.includes('Two of three sources read'));assert.ok(brains.at(-1)!.sent.includes('the third source was unreachable'),'the gap travels with the report');
+ assert.match(brains.at(-1)!.sent,/At least one Dependency Result above is PARTIAL/);
+ complete(partialId,'plan','Plan built on the two sources read');assert.doesNotMatch(brains.at(-1)!.sent.split('Dependency Results:')[0],/PARTIAL\./);
+ complete(partialId,'review','Review notes the unread source');complete(partialId,'lead','One answer, naming the unread source as a gap');
+ assert.equal(host.getMission(partialId)!.tasks.lead.status,'completed');assert.equal(host.getMission(partialId)!.status,'partial','the run itself is honest about being partial');
+ assert.equal(bots.list().jobs.find(j=>j.id===partialId)!.result!.summary,'One answer, naming the unread source as a gap');
+ // Verify audits the other reports' sources, so it waits for them; Review then weighs that audit.
+ const audited=bots.run({...teamRequest,requestId:randomUUID(),goal:'Research with a source audit',agentIds:['research','review','verify']});assert.equal(audited.ok,true);
+ const auditState=host.getMission(audited.data!.missionId!)!;
+ assert.deepEqual(auditState.tasks.verify.dependsOn,['research']);assert.equal(auditState.tasks.verify.status,'pending');assert.deepEqual(auditState.tasks.review.dependsOn,['research','verify']);
+ // Each agent's time is sized for its own job, not divided by how many colleagues it has.
+ assert.equal(auditState.tasks.research.budget.timeoutMs,BOT_BUDGET_MS.specialist);assert.equal(auditState.tasks.verify.budget.timeoutMs,BOT_BUDGET_MS.specialist);
+ assert.equal(auditState.tasks.lead.budget.timeoutMs,BOT_BUDGET_MS.lead);assert.equal(first.tasks.research.budget.timeoutMs,BOT_BUDGET_MS.solo);
+ assert.equal(host.getMission(teamId)!.tasks.research.budget.timeoutMs,auditState.tasks.research.budget.timeoutMs,'a bigger team does not shrink a specialist\'s time');
+ assert.equal(bots.stop(audited.data!.missionId!).ok,true);
  // A subset remains the same team when a signed-in Phone follows up without resending its selection.
  const subset=bots.run({...teamRequest,requestId:randomUUID(),goal:'Research and write the comparison',agentIds:['research','write']});assert.equal(subset.ok,true);assert.equal(bots.stop(subset.data!.missionId!).ok,true);
  const subsetFollow=bots.run({...teamRequest,requestId:randomUUID(),goal:'Explain that result',parentId:subset.data!.missionId!,agentIds:undefined});assert.equal(subsetFollow.ok,true);assert.deepEqual(Object.keys(host.getMission(subsetFollow.data!.missionId!)!.tasks).sort(),['lead','research','write']);assert.equal(bots.stop(subsetFollow.data!.missionId!).ok,true);

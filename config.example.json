@@ -1,5 +1,9 @@
 {
   "brain": "claude",
+  "persona": {
+    "character": "jarvis",
+    "address": "sir"
+  },
   "nvidia": {
     "model": "moonshotai/kimi-k3",
     "apiKeyEnv": "NVIDIA_API_KEY",
@@ -15,7 +19,8 @@
   },
   "claude": {
     "model": "claude-sonnet-5-5",
-    "systemPromptPreset": "none"
+    "systemPromptPreset": "none",
+    "keepWarm": true
   },
   "gemini": {
     "model": "gemini-3.5-flash-lite",

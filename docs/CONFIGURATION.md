@@ -21,6 +21,9 @@ These are code defaults, not a description of an existing user's settings. Model
 | Setting | Built-in default | Meaning |
 | --- | --- | --- |
 | `brain` | `claude` | Starting model adapter. |
+| `persona.character` | `jarvis` | Echo's manner in conversation: composed, exact and dry. It acknowledges then acts, leads with the outcome, warns before a problem and disagrees once. `plain` turns the character off. |
+| `persona.address` | `sir` | How Echo addresses you, at most once in a reply: `sir`, `ma'am`, `boss`, your name. An empty string means no form of address. Never used in reports, code or messages written for someone else. |
+| `claude.keepWarm` | `true` | Start the next Claude SDK session as soon as a turn ends, so the next message does not wait for a subprocess to boot. Nothing is sent to the model while it waits, a settings change discards the waiting session, and background agents never use it. Measured on real turns in a Linux container: about 2.3s to first text with it, about 3.8s without. Set to `false` to start a session only when a message arrives. |
 | `voice.ttsEngine` | `mac` | Speech synthesis engine; optional engines need their own setup. |
 | `voice.ttsVoice` | `Daniel` | Requested macOS voice. Installed voices vary. |
 | `voice.sttProvider` | `whisper` | Local recognition by default; Apple and Sarvam are alternative paths. |

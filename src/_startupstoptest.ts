@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from 'typescript-compiler-api';
 // Exercise the real main callback without booting Electron or accessing a device.
 const source=readFileSync('src/main.ts','utf8');
 const ast=ts.createSourceFile('main.ts',source,ts.ScriptTarget.Latest,true);

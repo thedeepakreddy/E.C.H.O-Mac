@@ -345,6 +345,210 @@ function check(label: string, condition: unknown): void {
   else { console.log(`  ✗ ${label}`); fail++; }
 }
 
+// ---- a session replaced by the next turn ----------------------------------
+//
+// Every new task resets the Claude SDK session (`send()` -> `resetSession()`),
+// so the previous session's consume() is still unwinding while the new turn is
+// already running — and `currentLoop()` already resolves to the NEW turn. That
+// old consumer used to (a) announce "my connection to the model closed" if its
+// own turn had not reached a result, (b) record `stream_closed` or a provider
+// error on the new turn's log, sending a healthy run into recovery, and (c)
+// swallow its own rethrow through a `return` inside `finally`.
+console.log("\na superseded Claude session does not speak or fail the turn that replaced it");
+{
+  const { ClaudeBrain } = await import("./brain/claude.js");
+  const { Recorder } = await import("./agent-replay/recorder.js");
+  const { LoopLog, setCurrentLoop } = await import("./agent-replay/loop-log.js");
+  const events = (rec: any) =>
+    readFileSync(join(rec.dir, "events.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const mkLog = (label: string) => {
+    const rec = new Recorder(root, `superseded-${label}`);
+    const log = new LoopLog(rec, "claude", "claude-sonnet-5");
+    log.runStart({ maxTurns: 150 });
+    setCurrentLoop(log);
+    return { rec, log };
+  };
+  const assistant = (text: string) => ({
+    type: "assistant",
+    message: { content: [{ type: "text", text }], stop_reason: "end_turn", usage: {} },
+  });
+  const result = () => ({
+    type: "result", subtype: "success", is_error: false,
+    terminal_reason: "completed", num_turns: 1, usage: {}, permission_denials: [],
+  });
+
+  for (const ending of ["ends", "throws"] as const) {
+    const held = { release: null as null | (() => void) };
+    async function* stream() {
+      yield assistant("working on the first request");
+      await new Promise<void>((r) => { held.release = r; });
+      if (ending === "throws") throw new Error("read ECONNRESET: session closed");
+      // otherwise the closed stream simply ends, with no result message
+    }
+    const brain = new ClaudeBrain(cfg);
+    const said: string[] = [];
+    brain.on("text", (t: string) => said.push(String(t)));
+    (brain as any).started = true;
+    (brain as any).q = stream();
+    (brain as any).turnsAwaitingResult = 1;
+    mkLog(`${ending}-old`);
+    const generation = ++(brain as any).sessionGeneration;
+    const consumed: Promise<void> = (brain as any).consume(generation);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // What send() does for the next task: a new turn's logger exists, the old
+    // session is reset, and a new one is started and handed the message.
+    const next = mkLog(`${ending}-new`);
+    (brain as any).resetSession();
+    (brain as any).started = true;
+    (brain as any).q = "the replacing session";
+    (brain as any).turnsAwaitingResult = 1;
+    held.release?.();
+    let threw = false;
+    await consumed.catch(() => { threw = true; });
+
+    check(`${ending}: the old session's teardown is not reported as a failure`, !threw);
+    check(`${ending}: nothing is said about a closed connection`, !said.some((t) => /connection to the model closed/i.test(t)));
+    check(`${ending}: the replacing turn's log has no exit recorded on it`, !events(next.rec).some((e) => e.type === "loop.exit"));
+    check(`${ending}: the replacing session's state is left alone`,
+      (brain as any).started === true && (brain as any).q === "the replacing session" && (brain as any).turnsAwaitingResult === 1);
+    next.log.exit("completed", { detail: "test cleanup" });
+  }
+
+  // The other half: a stream that really does die mid-turn must say so on ANY
+  // turn of the session, not only the first.
+  const held = { release: null as null | (() => void) };
+  async function* dying() {
+    yield assistant("turn one"); yield result();
+    await new Promise<void>((r) => { held.release = r; });
+    yield assistant("turn two, cut off");
+  }
+  const brain = new ClaudeBrain(cfg);
+  const said: string[] = [];
+  brain.on("text", (t: string) => said.push(String(t)));
+  (brain as any).started = true;
+  (brain as any).q = dying();
+  (brain as any).turnsAwaitingResult = 1;
+  mkLog("dying-a");
+  const generation = ++(brain as any).sessionGeneration;
+  const consumed: Promise<void> = (brain as any).consume(generation);
+  await new Promise((r) => setTimeout(r, 30));
+  const second = mkLog("dying-b");
+  (brain as any).turnsAwaitingResult++; // the follow-up message send() pushed
+  held.release?.();
+  await consumed;
+  const exit = events(second.rec).find((e) => e.type === "loop.exit");
+  check(`a stream that dies on a later turn is named stream_closed (got ${exit?.reason ?? "NONE"})`, exit?.reason === "stream_closed");
+  check("and the user is told the connection closed", said.some((t) => /connection to the model closed/i.test(t)));
+  check("the dead session is cleared so the next message starts a fresh one", (brain as any).started === false && (brain as any).q === null);
+}
+
+// ---- keeping the next Claude session warm ----------------------------------
+//
+// Every new task resets the Claude SDK session, and a session is a subprocess,
+// so a turn normally begins by booting one. With `claude.keepWarm` the next
+// session is started just after a turn ends and the next message goes to it
+// without a reset. These drive the real send()/consume() against a stand-in
+// for the SDK stream; start() is replaced because the real one spawns the CLI.
+console.log("\nkeeping the next Claude session warm");
+{
+  const { ClaudeBrain } = await import("./brain/claude.js");
+  const assistant = (text: string) => ({
+    type: "assistant",
+    message: { content: [{ type: "text", text }], stop_reason: "end_turn", usage: {} },
+  });
+  const result = () => ({
+    type: "result", subtype: "success", is_error: false,
+    terminal_reason: "completed", num_turns: 1, usage: {}, permission_denials: [],
+  });
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** A brain whose sessions are fakes that answer each message once. */
+  const build = (keepWarm: boolean) => {
+    const brain: any = new ClaudeBrain(cfg, {}, { keepWarm });
+    const sessions: Array<{ closed: boolean; received: number }> = [];
+    const events = { turnEnd: 0, errors: [] as string[], texts: [] as string[] };
+    brain.on("turnEnd", () => events.turnEnd++);
+    brain.on("error", (e: string) => events.errors.push(String(e)));
+    brain.on("text", (t: string) => events.texts.push(String(t)));
+    brain.start = function () {
+      if (this.started) return;
+      this.started = true;
+      const input = this.input, session = { closed: false, received: 0 };
+      sessions.push(session);
+      async function* stream() {
+        for await (const _message of input) {
+          session.received++;
+          yield assistant(`answer ${session.received}`);
+          yield result();
+        }
+      }
+      this.q = Object.assign(stream(), { close() { session.closed = true; }, interrupt: async () => {} });
+      const generation = ++this.sessionGeneration;
+      this.consume(generation).catch(() => {});
+    };
+    return { brain, sessions, events };
+  };
+
+  {
+    const { brain, sessions, events } = build(true);
+    brain.send("first request", undefined, { taskId: "warm-task-1" });
+    await settle(60);
+    check("the first turn runs on a session started when it was sent", sessions.length === 1 && events.turnEnd === 1);
+    await settle(400);
+    check("a moment after the turn ends, the next session is already up", sessions.length === 2 && sessions[0].closed);
+    check("warming it says and ends nothing", events.turnEnd === 1 && events.errors.length === 0 && events.texts.length === 1);
+
+    brain.send("second request", undefined, { taskId: "warm-task-2" });
+    await settle(60);
+    check("the next task's message goes to that session — no reset, no third one", sessions.length === 2 && sessions[1].received === 1 && !sessions[1].closed);
+    check("and its turn ends normally", events.turnEnd === 2 && events.errors.length === 0);
+    await settle(400);
+    check("after which the following session is warmed in turn", sessions.length === 3 && sessions[1].closed);
+    await brain.stop();
+    const before = sessions.length;
+    await settle(400);
+    check("a stopped brain warms nothing more", sessions.length === before);
+  }
+  {
+    // A message that arrives before the warm-up fires must not race it.
+    const { brain, sessions, events } = build(true);
+    brain.send("first request", undefined, { taskId: "quick-task-1" });
+    await settle(60);
+    brain.send("an immediate follow-on task", undefined, { taskId: "quick-task-2" });
+    await settle(60);
+    check("a message sent before the warm-up fires is answered the ordinary way", events.turnEnd === 2 && sessions.length === 2 && sessions[1].received === 1);
+    await settle(400);
+    check("and the pending warm-up never replaces a session that is in use", sessions[1].received === 1 && events.errors.length === 0 && sessions.length <= 3);
+    await brain.stop();
+  }
+  {
+    // A session warmed under one model must not answer after the model changes.
+    const { brain, sessions, events } = build(true);
+    brain.cfg = { ...brain.cfg, claude: { ...brain.cfg.claude } };
+    brain.send("first request", undefined, { taskId: "settings-task-1" });
+    await settle(450);
+    check("a session is warm and waiting", sessions.length === 2 && sessions[1].received === 0);
+    brain.cfg.claude.model = "a-different-model";
+    brain.send("second request", undefined, { taskId: "settings-task-2" });
+    await settle(60);
+    check("a settings change discards the warm session instead of answering from it",
+      sessions.length === 3 && sessions[1].closed && sessions[1].received === 0 && sessions[2].received === 1);
+    check("and the turn still completes", events.turnEnd === 2 && events.errors.length === 0);
+    await brain.stop();
+  }
+  {
+    const { brain, sessions, events } = build(false);
+    brain.send("first request", undefined, { taskId: "cold-task-1" });
+    await settle(450);
+    check("with keepWarm off nothing is started ahead of need", sessions.length === 1 && !sessions[0].closed);
+    brain.send("second request", undefined, { taskId: "cold-task-2" });
+    await settle(60);
+    check("and a new task resets the session when its message arrives, as before", sessions.length === 2 && sessions[0].closed && events.turnEnd === 2);
+    await brain.stop();
+  }
+}
+
 // ---- the watchdog must outlive the deadlines it backs up -------------------
 //
 // `STALL_AFTER_MS` and the `ECHO_LLM_TIMEOUT_MS` deadline were both 120000, so

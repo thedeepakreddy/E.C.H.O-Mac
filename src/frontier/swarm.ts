@@ -63,6 +63,20 @@ export interface AgentTaskSpec {
   botRevision?:string;
   /** Team reports cannot perform external mutations. Enforced at brain construction. */
   readOnly?:boolean;
+  /**
+   * Start once every dependency has ended, even when one of them ended
+   * `partial`, and read its stated gaps along with its report.
+   *
+   * Off by default: a dependency that did not complete blocks what waits on
+   * it. That rule is right for a build, and wrong for a team of reporters,
+   * where it made honesty the most expensive thing an agent could do — a
+   * specialist that correctly submitted `partial` ("one source was
+   * unreachable") blocked Review and Lead, the user got no combined answer at
+   * all, and since Retry exists only for a FAILED task there was no way back
+   * short of starting over. `failed`, `blocked` and `cancelled` still block:
+   * those have no report to read, and a failed specialist has its Retry.
+   */
+  usePartialDependencies?:boolean;
   budget?: Partial<AgentTaskBudget>;
 }
 
@@ -160,6 +174,10 @@ const safePart = (value: string, fallback: string) => {
 
 const resultStatus = (status: MissionTaskStatus): status is TaskResultStatus =>
   ["completed", "partial", "blocked", "failed", "cancelled"].includes(status);
+
+/** Whether a dependency that ended this way gives `task` something to work from. */
+const dependencyUsable = (task: Pick<AgentTaskSpec, "usePartialDependencies">, status: MissionTaskStatus | undefined): boolean =>
+  status === "completed" || (task.usePartialDependencies === true && status === "partial");
 
 function taskBudget(input: Partial<AgentTaskBudget> | undefined): AgentTaskBudget {
   const positive = (value: unknown, fallback: number) =>
@@ -520,7 +538,7 @@ export class SwarmManager {
   /** Resume one failed specialist with trusted progress and fresh bounded execution. */
   private retryMissionTask(m:MissionState,task:MissionTaskState,input:{attempt:number;requestId:string},deps:SwarmDeps) {
     if(this.closing||task.status!=='failed')return {ok:false,message:'Retry is available only for a failed specialist.'};
-    if(task.profile==='lead'&&Object.values(m.tasks).some(sibling=>sibling!==task&&(sibling.status!=='completed'||!sibling.result)))return {ok:false,message:'Final-report retry requires every specialist report to be completed. Retry the failed specialist first.'};
+    if(task.profile==='lead'&&Object.values(m.tasks).some(sibling=>sibling!==task&&(!dependencyUsable(task,sibling.status)||!sibling.result)))return {ok:false,message:'Final-report retry requires every specialist report to be completed. Retry the failed specialist first.'};
     if((task.attempt??1)>=10||(task.updates?.length??0)>=40)return {ok:false,message:'This task reached its retry limit. Review the failure and start a follow-up.'};
     const coordinator=deps.coordinator??taskCoordinator,now=deps.now??Date.now;
     if(this.persistedMissions(coordinator,Infinity).some(other=>other.id!==m.id&&this.isMissionLive(other.id)))return {ok:false,message:'Another task is working. Wait or stop it before retrying.'};
@@ -684,7 +702,7 @@ export class SwarmManager {
         if (task.status !== "pending") continue;
         const failedDependency = (task.dependsOn ?? []).find((id) => {
           const status = mission.tasks[id]?.status;
-          return status && resultStatus(status) && status !== "completed";
+          return status && resultStatus(status) && !dependencyUsable(task, status);
         });
         if (!failedDependency) continue;
         task.status = "blocked";
@@ -702,7 +720,7 @@ export class SwarmManager {
 
     for (const task of Object.values(mission.tasks)) {
       if (task.status !== "pending" || this.clones.size + this.reservedCapacity() >= MAX_CONCURRENT_CLONES) continue;
-      const ready = (task.dependsOn ?? []).every((id) => mission.tasks[id]?.status === "completed");
+      const ready = (task.dependsOn ?? []).every((id) => dependencyUsable(task, mission.tasks[id]?.status));
       if (!ready) continue;
       if (task.lane === "gui" && this.guiLaneBusy()) continue;
       this.startMissionTask(mission, task, deps);
@@ -877,6 +895,12 @@ export class SwarmManager {
       `Execution lane: ${task.lane}\n` +
       `Acceptance criteria:\n${criteria}\n\n` +
       `Dependency Results:\n${JSON.stringify(dependencies, null, 2)}\n\n` +
+      // Said in words as well as in the JSON: a status buried in a long report
+      // is easy to read past, and the point of running on a partial report is
+      // that its gaps are carried forward rather than smoothed over.
+      (dependencies.some((dependency) => dependency.result?.status === "partial")
+        ? `At least one Dependency Result above is PARTIAL. Use what it established, read its blockers, and name what it could not confirm as a gap in your own deliverable; never present its unverified claims as settled.\n\n`
+        : "") +
       (task.previousAttempts?.length?`Previous interrupted attempts (context only; do not replay external effects):\n${JSON.stringify(task.previousAttempts).slice(0,12000)}\n\n`:'')+
       (task.retryContext?`Saved progress for this retry (context only; do not replay completed external actions):\n${task.retryContext}\nContinue the same task from the next unfinished step. Inspect current state before any mutation.\n\n`:'')+
       `Budget: ${task.budget.maxIterations} model iterations, ${task.budget.maxRecoveryAttempts} recovery attempts, ` +

@@ -36,7 +36,8 @@ export async function showProjectPreview(id:string){const session=getSession(id)
  const record=(items:string[],line:string)=>{items.push(line.slice(0,2000));if(items.length>100)items.shift();};
  window.webContents.session.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));window.webContents.session.setPermissionCheckHandler(()=>false);window.webContents.session.on('will-download',event=>event.preventDefault());
  window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',(event,url)=>{if(new URL(url).origin!==new URL(preview.url).origin)event.preventDefault();});
- window.webContents.on('console-message',(_event,level,message)=>record(preview.console,`${level}: ${message}`));
+ // The event object, not the positional (level, message) arguments: those are removed in Electron 47, and `event.level` is a word ("error", "warning") where the old one was a number the model had to decode.
+ window.webContents.on('console-message',event=>record(preview.console,`${event.level}: ${event.message}`));
  window.webContents.session.webRequest.onCompleted(details=>record(preview.network,`${details.statusCode} ${details.method} ${details.url}`));window.webContents.session.webRequest.onErrorOccurred(details=>record(preview.network,`${details.error} ${details.url}`));
  await window.loadURL(preview.url);return {url:preview.url,isolated:true};
 }

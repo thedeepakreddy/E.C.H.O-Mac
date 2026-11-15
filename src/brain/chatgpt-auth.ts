@@ -98,6 +98,31 @@ function safeStorage(): SafeStorage | null {
   }
 }
 
+/**
+ * Inside Electron, but the synchronous safeStorage methods are gone.
+ *
+ * Electron 45 deprecates `isEncryptionAvailable`, `encryptString` and
+ * `decryptString`, and Electron 46 removes them in favour of asynchronous
+ * ones. When that happens `safeStorage()` above returns null — exactly what it
+ * returns outside Electron, where an owner-only plaintext file is the intended
+ * fallback. Without this check the same fallback would apply inside the app:
+ * the next sign-in after such an upgrade would be written to disk unencrypted,
+ * and nothing would say so.
+ *
+ * This does not make Echo work on Electron 46 (that needs the stored sign-in
+ * moved to the asynchronous methods, see docs/VALIDATION.md). It makes sure
+ * the upgrade fails loudly at sign-in instead of quietly dropping encryption.
+ */
+function encryptionApiRemoved(): boolean {
+  if (!process.versions.electron) return false;
+  try {
+    const s = createRequire(import.meta.url)("electron")?.safeStorage as Partial<SafeStorage> | undefined;
+    return !!s && typeof s.encryptString !== "function";
+  } catch {
+    return false;
+  }
+}
+
 function readStored(): Stored | null {
   if (!existsSync(connectionFile())) return null;
   try {
@@ -121,6 +146,9 @@ function readStored(): Stored | null {
 
 function writeStored(value: Stored): void {
   mkdirSync(dir(), { recursive: true, mode: 0o700 });
+  if (encryptionApiRemoved()) {
+    throw new ChatGPTError("storage_unavailable", "This version of Electron no longer has the encryption call Echo stores your ChatGPT sign-in with, so it was not saved. Echo needs updating before it can keep a sign-in here.");
+  }
   const s = safeStorage();
   const json = JSON.stringify(value);
   // Outside Electron (tests, scripts) there is no Keychain; the file is then

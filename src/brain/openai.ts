@@ -243,6 +243,8 @@ export class OpenAIBrain extends Brain {
   private turnAbort: AbortController | null = null;
   /** The plan model, resolved once from the account's catalog when none is configured. */
   private planModel: string | null = null;
+  /** The model last named in a progress line, so it is named again only when it changes. */
+  private announcedModel: string | null = null;
   private planModels:string[]|null=null;
   private planHealth:ReturnType<typeof scopedModelHealth>|null=null;
   private readonly healthEnvironment:string;
@@ -618,7 +620,12 @@ export class OpenAIBrain extends Brain {
         }
         }
         if(!res)throw new OpenAIRequestError('No authorized model remains available. The task is not finished.',404,'cached_model_unavailable');
-        this.emitEvent('progress',`Using ${this.endpoint.label} model ${model}.`);
+        // Once per change of model, not once per request — see the same line
+        // in gemini.ts for what repeating it did to the activity feed.
+        if (model !== this.announcedModel) {
+          this.announcedModel = model;
+          this.emitEvent('progress',`Using ${this.endpoint.label} model ${model}.`);
+        }
 
         const output = res.output ?? [];
         const calls = output.filter((o: any) => o?.type === "function_call");

@@ -77,6 +77,57 @@ export function recordTaskStarted(input: { taskId: string; scope?: MemoryScope; 
   });
 }
 
+/** Why a task the last process left open was closed, as its saved summary. */
+export const INTERRUPTED_TASK_SUMMARY = "Echo exited while this task was in progress, and it was not resumed.";
+
+/**
+ * Close what a process that no longer exists left open.
+ *
+ * `recordTaskStarted` and `consolidateTask` are a pair, but only for a task
+ * that reaches its end. A crash, a SIGTERM or a force-quit mid-task left the
+ * task `running` and its working record `active` permanently: nothing looked
+ * at either again, so `/task status` and the task overview collected "live"
+ * tasks that had stopped existing with the process that ran them.
+ *
+ * Run once at startup, AFTER checkpoint recovery and the mission and
+ * supervisor reconciliation. Anything resumed has been written to since
+ * `startedAt` and is left alone; `isLive` is a second guard for a task this
+ * process owns. Only `running` and `waiting` are closed — neither can survive
+ * a restart (the timers, the provider session and the pending question lived
+ * in memory). A `verifying` task did finish its turn and stays as history.
+ *
+ * No episode is written for these. The first start after this ships may find
+ * a long backlog, and an episodic record per phantom would flood recall with
+ * tasks nobody finished.
+ */
+export function reconcileInterruptedTasks(input: { startedAt: number; isLive?: (taskId: string) => boolean }): { tasks: number; working: number } {
+  const live = input.isLive ?? (() => false);
+  let tasks = 0, working = 0;
+  for (const taskId of taskCoordinator.untouchedSince(input.startedAt, ["running", "waiting"])) {
+    if (live(taskId)) continue;
+    // One unreadable or foreign record must not stop the rest, or the boot.
+    try {
+      taskCoordinator.cancel(taskId);
+      taskCoordinator.finish(taskId, { status: "cancelled", summary: INTERRUPTED_TASK_SUMMARY });
+      tasks++;
+    } catch (error) {
+      console.warn(`[memory] could not close interrupted task ${taskId}: ${(error as any)?.message ?? error}`);
+    }
+  }
+  for (const record of memoryService.list(undefined, { layer: "working", kind: "task", status: "active" })) {
+    const taskId = record.scope.taskId ?? record.source.taskId;
+    if (!taskId || live(taskId)) continue;
+    const state = taskCoordinator.get(taskId);
+    if (state && (state.status === "running" || state.status === "waiting")) continue;
+    try {
+      if (memoryService.propose({ ...record, status: "superseded", validTo: new Date().toISOString(), source: { ...record.source, origin: "real" } })) working++;
+    } catch (error) {
+      console.warn(`[memory] could not close working record ${record.id}: ${(error as any)?.message ?? error}`);
+    }
+  }
+  return { tasks, working };
+}
+
 /**
  * Convert completed task state into a compact episode. It deliberately never
  * promotes arbitrary model prose to a stable fact or procedure.

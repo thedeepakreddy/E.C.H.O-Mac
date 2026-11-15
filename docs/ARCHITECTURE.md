@@ -56,7 +56,7 @@ notices.
 
 | Provider | Loop | Notes |
 |---|---|---|
-| Claude | `brain/claude.ts` | One long-lived `query()` fed by a streaming async iterable; the whole session is one conversation. Tools are an **in-process MCP server**, no subprocess. Rides the existing Claude Code login. |
+| Claude | `brain/claude.ts` | A `query()` fed by a streaming async iterable. The SDK session lasts for one task: a new task (or a different project) resets it, and continuity comes from `<echo_context>`, as it does for every brain. Tools are an **in-process MCP server**, no subprocess. Rides the existing Claude Code login. |
 | Gemini | `brain/gemini.ts` | Hand-written function-calling loop. Streams text deltas for early TTS. Has an 8-model fallback ladder. |
 | Ollama | `brain/ollama.ts` | Local. Gets a **shortlist** of tools, not all 136 — the full list is ~22KB and crowds a small model into inventing names. |
 
@@ -359,13 +359,23 @@ These are the rules the system maintains. Breaking one is how a regression gets 
 | 10 | `<echo_context>` is data, never instructions | persona + router | Prompt injection from memory |
 | 11 | An unpaired `llm.request` means something went wrong | open-work ledger | The abandoned-call signature becomes noise |
 
-### Known gap
+### Boot reconciliation
 
-Invariant 9 holds for every path that reaches `finalizeTask`, but nothing reconciles working
-records at boot. A crash or `SIGTERM` mid-task leaves `task-<id>` at `status: "active"`
-permanently — `retentionPolicy: "task"` is written and never acted on. Recall is not polluted
-(a dead `taskId` never recurs), but `/task status` accumulates phantom live tasks. The fix is a
-boot-time sweep, mirroring what `pendingRecoveries()` already does for checkpoints.
+Invariant 9 holds for every path that reaches `finalizeTask`. A crash or `SIGTERM` mid-task
+never reaches it, and used to leave `task-<id>` at `status: "active"` and the task itself
+`running` permanently, so `/task status` and the task overview accumulated phantom live tasks.
+
+`reconcileInterruptedTasks()` (`memory/consolidate.ts`) closes them at startup. It runs **last**,
+after checkpoint recovery, `swarm.reconcileAbandoned()` and `supervisor.reconcile()`, so anything
+those resumed has already been written to by this process and is recognised as its own:
+
+- a task still `running` or `waiting` that nothing has touched since this process started is
+  cancelled, with a summary saying Echo exited while it was in progress. Its `generation` is
+  bumped, so a late result from the dead run is refused at `assertInvocation`;
+- its working record is superseded, as is any working record whose task state no longer exists;
+- a `verifying` task is left as it is. It finished its turn and is history, not work in flight;
+- no episode is written. The first start after a long gap may find many phantoms, and an episodic
+  record for each would put tasks nobody finished into recall.
 
 ---
 
@@ -384,22 +394,38 @@ The suites are named for failure modes, not for files:
 | `wiringtest` | Prompts name only real tools; schemas convert; the risk gate knows every tool |
 | `memoryostest` | Privacy switches, scope isolation, budget honesty, the task lifecycle end to end |
 
-`exittest` carries a known pre-existing failure: nine Gemini cases stub
-`ai.models.generateContent` while the brain calls `generateContentStream`, and the long-lived
-session case calls `consume()` without its `generation` argument. Both are stale harness code, not
-product defects — but it means the exit contract is currently unguarded for those paths.
+`exittest` used to carry a failure in its own harness: the Gemini cases stubbed
+`generateContent` while the brain calls `generateContentStream`, and the long-lived session case
+called `consume()` without its `generation`. Both are corrected in the suite, which passes, so the
+exit contract is guarded on those paths again.
 
 ---
 
-## 11. Remaining silent-stop path
+## 11. A superseded Claude session
 
-One is known and unfixed. `brain/claude.ts` has a bare `return` **inside** the `finally` block,
-ahead of the `unknown_fallthrough` backstop three lines below it. When `sessionGeneration` has
-advanced — which `send()` triggers via `resetSession()` on a new memory context — `consume()`
-unwinds and the turn's journal records no exit and no `run.end` at all. `turnEnd` is only emitted
-inside the result handler, which the earlier generation check has already skipped.
+A new task resets the Claude SDK session (`send()` → `resetSession()`), so the previous
+session's `consume()` is still unwinding while the next turn is already running. `consume()`
+finds its log through `currentLoop()`, which follows the run context to the newest turn — so
+anything the old consumer records lands on the turn that **replaced** it.
 
-A `return` in `finally` also discards the pending throw from the `catch` above it.
+That used to go wrong three ways:
 
-That is a run ending with nothing in the log, which is the exact thing invariant 1 exists to
-prevent.
+- If the old turn had not reached its `result` (stop, then a new command), the old consumer saw a
+  stream that ended without one, announced "my connection to the model closed" inside the new
+  turn, and recorded `stream_closed` on the new turn's log. A healthy run went into recovery.
+- A read rejected by the deliberately closed stream was recorded on the new turn as a provider
+  error.
+- A bare `return` inside `finally` replaced the rethrow from `catch`, and skipped the
+  `unknown_fallthrough` backstop: a run ending with nothing in the log, which is exactly what
+  invariant 1 exists to prevent.
+
+A consumer whose generation has been superseded now does nothing on the live turn's behalf — it
+does not speak, record an exit, or reset session state — and `finally` no longer returns.
+
+The same function decided "the stream died mid-turn" from a flag set by the first `result` of a
+session and never cleared. A stream that died during any later turn of that session therefore
+looked finished, said nothing, and closed as `unknown_fallthrough`. It now counts the turns still
+owed a result (`turnsAwaitingResult`), so the death is named `stream_closed` on whichever turn it
+happens.
+
+`exittest` drives both: a session replaced while its stream ends, and while its stream throws.

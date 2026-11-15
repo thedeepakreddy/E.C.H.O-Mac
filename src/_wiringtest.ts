@@ -14,15 +14,18 @@
  * None of these are caught by typechecking, and none of them raise an error
  * anywhere near the thing that is actually wrong.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import ts from "typescript";
+import ts from "typescript-compiler-api";
 import { TOOLS, TOOL_MAP } from "./tools/registry.js";
-import { JARVIS_PERSONA } from "./brain/types.js";
+import { JARVIS_PERSONA, GEMINI_MODEL_FALLBACKS } from "./brain/types.js";
+import { DEFAULTS_FOR_TESTS } from "./config.js";
 import { LOCAL_TOOL_NAMES, resolveToolName } from "./brain/localtools.js";
 import { ROUTER_ALWAYS_INCLUDE } from "./brain/tool-router.js";
 import { READ_ONLY, UI_ACTIONS, classify } from "./safety/risk.js";
+import { geminiClient, GEMINI_API_VERSION } from "./brain/gemini-client.js";
+import { GoogleGenAI } from "@google/genai";
 
 let pass = 0;
 const failures: string[] = [];
@@ -379,6 +382,36 @@ console.log("  the risk gate knows these tools");
     t.readOnly === false && classify(t.name, {}, { workingDir: "/tmp" }).tier === "low"
   );
   console.log(`      (${unclassified.length} mutating tools classify as low risk${unclassified.length ? `: ${unclassified.map((t) => t.name).join(", ")}` : ""})`);
+}
+
+console.log("  every Gemini client speaks the pinned API version");
+{
+  // @google/genai 3 changed its default from v1beta to v1. Echo's realtime
+  // voice and preview models live on the beta surface, so the version is set
+  // in one place and every client is built there — a client constructed
+  // directly would follow whatever the installed SDK defaults to.
+  const version = (client: GoogleGenAI) => (client as any).apiClient?.getApiVersion?.();
+  ok(version(geminiClient("fixture-key")) === GEMINI_API_VERSION && GEMINI_API_VERSION === "v1beta",
+    `the shared client is on ${GEMINI_API_VERSION}`);
+  const sdkDefault = version(new GoogleGenAI({ apiKey: "fixture-key" }));
+  console.log(`      (the installed SDK's own default is ${sdkDefault})`);
+  const direct: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const path = join(dir, entry);
+      if (statSync(path).isDirectory()) { if (entry !== "vendor") walk(path); continue; }
+      if (!entry.endsWith(".ts") || entry === "gemini-client.ts" || entry === "_wiringtest.ts") continue;
+      if (readFileSync(path, "utf8").includes("new GoogleGenAI(")) direct.push(path);
+    }
+  };
+  walk(join(process.cwd(), "src"));
+  ok(direct.length === 0, `nothing else constructs a Gemini client directly${direct.length ? `: ${direct.join(", ")}` : ""}`);
+  ok(readFileSync(join(process.cwd(), "src/voice/tts-stream.ts"), "utf8").includes("generativelanguage.googleapis.com/${GEMINI_API_VERSION}/"),
+    "the one raw REST call uses the same constant");
+  // The default must be a model the measured ladder vouches for. It was once
+  // one the ladder's own notes record as retired.
+  ok(DEFAULTS_FOR_TESTS.gemini.model === GEMINI_MODEL_FALLBACKS[0],
+    `the default Gemini model is the one the fallback ladder leads with (${DEFAULTS_FOR_TESTS.gemini.model})`);
 }
 
 console.log("  name resolution for small models");

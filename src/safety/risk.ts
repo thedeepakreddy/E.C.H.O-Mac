@@ -542,6 +542,25 @@ export function classify(
     };
   }
 
+  // The recurring version of spawning an agent: it starts one that acts on its
+  // own again and again, with nobody at the desk, until someone cancels it.
+  // It had no rule and fell through to medium, so of all the ways to start an
+  // unattended agent, the one that repeats was the one nobody was asked about.
+  if (tool === "schedule_task") {
+    const interval = Number((input as any)?.intervalSeconds);
+    const daily = firstString(input, ["dailyAt"]);
+    const cadence = daily ? `every day at ${daily}`
+      : Number.isFinite(interval) && interval > 0 ? `every ${interval >= 120 ? `${Math.round(interval / 60)} minutes` : `${Math.round(Math.max(60, interval))} seconds`}`
+      : "on a schedule";
+    return {
+      tier: "high",
+      reason: `start a background agent ${cadence}, until cancelled, to ${speakable(firstString(input, ["goal"]) ?? "work on its own", 50)}`,
+    };
+  }
+  if (tool === "cancel_scheduled_task") {
+    return { tier: "medium", reason: `stop the scheduled task ${speakable(firstString(input, ["id"]) ?? "", 30)}`.trim() };
+  }
+
   if (tool === "delegate_task") {
     return {
       tier: "high",
